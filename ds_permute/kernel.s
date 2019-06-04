@@ -1,6 +1,13 @@
 .hsa_code_object_version 2,0
 .hsa_code_object_isa 9, 0, 0, "AMD", "AMDGPU"
 
+; (src_lane & (width-1)) + (self_lane_id&~(width-1))
+.macro .__shfl val, src_lane, width_m1
+    ; CAUSION! omited self_lane > width-1 case
+    v_and_b32 v[\src_lane], \width_m1, v[\src_lane]
+    v_lshlrev_b32 v[\src_lane], 2, v[\src_lane]
+    ds_bpermute_b32 v[\val], v[\src_lane], v[\val]
+.endm
 
 .macro .__shfl_xor val, lane_mask, width, self_lane_id, idx_tmp
     v_xor_b32 v[\idx_tmp], \lane_mask, v[\self_lane_id]
@@ -10,6 +17,13 @@
     ;v_mov_b32 v[\val], v[\idx_tmp]
     v_lshlrev_b32 v[\idx_tmp], 2, v[\idx_tmp]
     ds_bpermute_b32 v[\val], v[\idx_tmp], v[\val]
+.endm
+.macro .s_cmul_imm a, br, bi, bi_neg, tmp
+    v_mov_b32 v[\tmp], v[\a]
+    v_mul_f32 v[\a], \bi_neg, v[\a+1]
+    v_madmk_f32 v[\a], v[\tmp], \br, v[\a]
+    v_mul_f32 v[\a+1], \br, v[\a+1]
+    v_madmk_f32 v[\a+1], v[\tmp], \bi, v[\a+1]
 .endm
 
 .text
@@ -67,7 +81,10 @@ shfl_xor_test:
     v_mbcnt_lo_u32_b32  v[v_lane_id], -1, 0
     v_mbcnt_hi_u32_b32  v[v_lane_id], -1, v[v_lane_id]
 
-    .__shfl_xor         v_val, 1, 32, v_lane_id, v_tmp
+    ;.__shfl_xor         v_val, 2, 32, v_lane_id, v_tmp
+    v_sub_u32           v[v_tmp], 32, v[v_lane_id]
+    .__shfl v_val, v_tmp, 31
+
     s_waitcnt           lgkmcnt(0)
 
     global_store_dword  v[v_os:v_os+1], v[v_val], s[s_out:s_out+1]
