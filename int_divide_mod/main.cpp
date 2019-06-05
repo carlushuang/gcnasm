@@ -65,7 +65,7 @@ int main(int argc, char ** argv){
 
     int max_divider = 10000;
     int divider;
-    for(divider=2;divider<=max_divider;divider++){
+    for(divider=1;divider<=max_divider;divider++){
 
     //printf("-- start of divider:%d\n",divider);
     int total_loop=30;
