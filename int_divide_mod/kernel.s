@@ -3,7 +3,7 @@
 
 ; Divisionby Invariant IntegersusingMultiplication, 7 Useof  oatingpoint
 ; CAUSION: val need not exeed 2**20-1, other wise need use fp64 to do the trick
-.macro .v_uint_div_mod_sd dst, val, s_divider, mod
+.macro .v_u20_div_mod_sd dst, val, s_divider, mod
     v_cvt_f32_u32 v[\dst], v[\val]
     v_cvt_f32_u32 v[\mod], s[\s_divider]
     v_rcp_iflag_f32 v[\mod], v[\mod]
@@ -14,6 +14,42 @@
     v_sub_u32 v[\mod], v[\val], v[\mod]
 .endm
 
+/*
+.macro .v_u32_div_mod_sd dst, val, s_divider, mod, tt
+    v_cvt_f32_u32 v[\dst], v[\val]
+    v_cvt_f32_u32 v[\mod], s[\s_divider]
+    v_rcp_iflag_f32 v[\mod], v[\mod]
+    v_subrev_u32  v[\mod], 2, v[\mod]              ; f_Dlowered
+    v_mul_f32 v[\tt], v[\mod], v[\dst]             ; fQ1
+    v_cvt_u32_f32 v[\tt], v[\tt]                   ; Q1
+    v_mul_lo_u32 v[\dst], s[\s_divider], v[\tt]    ; N2
+    v_subrev_u32 v[\dst], v[\dst], v[\val]         ; err2
+    v_cvt_f32_u32 v[\dst], v[\dst]
+    v_mul_f32 v[\dst], v[\mod], v[\dst]            ; Q2, fQ2
+    v_cvt_u32_f32 v[\dst], v[\dst]
+    v_add_u32 v[\dst], v[\dst], v[\tt]             ; result2
+    v_mul_lo_u32 v[\tt], s[\s_divider], v[\dst]    ; N3
+    v_subrev_u32 v[\tt], v[\tt], v[\val]           ; err3
+    v_cmp_lt_u32 vcc, s[\s_divider], v[\tt]        ; oneCorr
+    v_addc_co_u32 v[\dst], vcc, 0, v[\dst], vcc    ; final
+    v_mul_lo_u32 v[\mod], v[\dst], s[\s_divider]
+    v_sub_u32 v[\mod], v[\val], v[\mod]
+.endm
+.macro .v_u32_div_mod_sd dst, val, s_divider, mod, tt4
+    v_cvt_f32_u32 v[\tt4], s[\s_divider]
+    v_rcp_iflag_f32 v[\tt4], v[\tt4]
+    v_cvt_f64_f32 v[\tt4:\tt4+1], v[\tt4]
+    v_mov_b32 v[\tt4+2], 0x4
+    v_mov_b32 v[\tt4+3], 0x3ff00000
+    v_mul_f64 v[\tt4:\tt4+1], v[\tt4:\tt4+1], v[\tt4+2:\tt4+3]
+    v_cvt_f64_u32 v[\tt4+2:\tt4+3], v[\val]
+    v_mul_f64 v[\tt4+2:\tt4+3], v[\tt4:\tt4+1], v[\tt4+2:\tt4+3]
+    v_cvt_u32_f64 v[\dst], v[\tt4+2:\tt4+3]
+    v_mul_lo_u32 v[\mod], v[\dst], s[\s_divider]
+    v_sub_u32 v[\mod], v[\val], v[\mod] 
+.endm
+*/
+
 .text
 .p2align 8
 .amdgpu_hsa_kernel kernel_func
@@ -23,7 +59,8 @@
 .set v_val,     2
 .set v_dst,     3
 .set v_mod,     4
-.set v_end,     4
+.set v_tmp0,    5
+.set v_end,     8
 
 .set s_arg,     0
 .set s_in,      4
@@ -64,7 +101,7 @@ kernel_func:
     global_load_dword   v[v_val], v[v_os:v_os+1], s[s_in:s_in+1]
     s_waitcnt           vmcnt(0)
 
-    .v_uint_div_mod_sd v_dst, v_val, s_divider, v_mod
+    .v_u20_div_mod_sd v_dst, v_val, s_divider, v_mod
 
     global_store_dword  v[v_os:v_os+1], v[v_dst], s[s_out:s_out+1]
 

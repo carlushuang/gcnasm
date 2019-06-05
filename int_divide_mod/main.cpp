@@ -21,7 +21,7 @@ template<typename T>
 void rand_vec(T * seq, size_t len){
     static std::random_device rd;   // seed
     static std::mt19937 mt(rd());
-    static std::uniform_real_distribution<float> dist(0.0, 1048575.0); // 2**20-1
+    static std::uniform_real_distribution<float> dist(0.0, 1048575.1); // 2**20-1
 
     for(size_t i=0;i<len;i++) seq[i] =  (T)dist(mt);
 }
