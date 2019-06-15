@@ -10,8 +10,10 @@
 .set v_tid,     0
 .set v_os,      1
 .set v_os_ptr,  2
-.set v_tmp,     3
-.set v_val,     6
+.set v_x,       3
+.set v_y,       4
+.set v_tmp,     5
+.set v_val,     7
 .set v_end,     63
 
 .set s_dptr,    0
@@ -29,6 +31,8 @@
 .set p_gdx,     GRID_DIM_X
 .set p_gdy,     GRID_DIM_Y
 .set p_unit_per_t, UNIT_PER_THRD
+.set p_unit_stride, UNIT_STRIDE
+.set p_unit_stride_shift, UNIT_STRIDE_SHIFT
 .set p_loop,    P_LOOP
 
 .if v_val+p_unit_per_t*p_dwords_per_unit-1 > v_end
@@ -60,12 +64,24 @@ kernel_func:
     s_load_dwordx2 s[s_in:s_in+1], s[s_arg:s_arg+1], 0
     s_load_dwordx2 s[s_out:s_out+1], s[s_arg:s_arg+1], 8
 
-    ;  by*gdx*bdx*unit*dpu + bx*bdx*unit*dpu +  tid*dpu
-    v_mov_b32 v[v_tmp], p_bdx*p_dwords_per_unit*p_unit_per_t
-    v_mul_u32_u24 v[v_tmp+1], p_dwords_per_unit, v[v_tid]
-    v_mad_u32_u24 v[v_os], s[s_bx], v[v_tmp], v[v_tmp+1]
-    v_mov_b32 v[v_tmp], p_gdx*p_bdx*p_dwords_per_unit*p_unit_per_t
-    v_mad_u32_u24 v[v_os], s[s_by], v[v_tmp], v[v_os]
+    ; performance is heavily affected by unit_stride!
+    ;  x=tid&(unit_stride-1)
+    ;  y=tid>>unit_stride_shift
+    ;
+    ;  by*gdx*bdx*unit_per_t*dpu + bx*bdx*unit_per_t*dpu + y*unit_stride*unit_per_t*dpu+x*dpu
+    ; CAUSION! careful for the mad_u32_u24, carefully check not beyond 24bit
+    v_and_b32 v[v_x], p_unit_stride-1, v[v_tid]
+    v_lshrrev_b32 v[v_y], p_unit_stride_shift, v[v_tid]
+
+    v_mul_u32_u24 v[v_x], p_dwords_per_unit, v[v_x]
+    v_mov_b32 v[v_tmp], p_unit_stride*p_unit_per_t*p_dwords_per_unit
+    v_mad_u32_u24 v[v_os], v[v_y], v[v_tmp], v[v_x]
+
+    v_mov_b32 v[v_tmp], p_bdx*p_unit_per_t*p_dwords_per_unit
+    v_mad_u32_u24 v[v_os], s[s_bx], v[v_tmp], v[v_os]
+    v_mov_b32 v[v_tmp+1], p_gdx*p_bdx*p_unit_per_t*p_dwords_per_unit
+    v_mad_u32_u24 v[v_os], s[s_by], v[v_tmp+1], v[v_os]
+
     v_lshlrev_b32 v[v_os], 2, v[v_os]
 
     s_waitcnt lgkmcnt(0)
@@ -84,7 +100,7 @@ kernel_func:
         .elseif p_dwords_per_unit == 4
             global_load_dwordx4 v[v_val+4*.cnt:v_val+4*.cnt+3],v[v_os_ptr:v_os_ptr+1], s[s_in:s_in+1]
         .endif
-        v_add_u32 v[v_os_ptr], p_bdx*p_dwords_per_unit*4, v[v_os_ptr]
+        v_add_u32 v[v_os_ptr], p_unit_stride*p_dwords_per_unit*4, v[v_os_ptr]
         .cnt = .cnt+1
     .endr
     s_waitcnt vmcnt(0)
@@ -105,7 +121,7 @@ kernel_func:
         .elseif p_dwords_per_unit == 4
             global_store_dwordx4 v[v_os_ptr:v_os_ptr+1], v[v_val+4*.cnt:v_val+4*.cnt+3], s[s_out:s_out+1]
         .endif
-        v_add_u32 v[v_os_ptr], p_bdx*p_dwords_per_unit*4, v[v_os_ptr]
+        v_add_u32 v[v_os_ptr], p_unit_stride*p_dwords_per_unit*4, v[v_os_ptr]
         .cnt = .cnt+1
     .endr
     s_waitcnt vmcnt(0)
