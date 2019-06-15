@@ -54,14 +54,10 @@ int valid_vector(const T* lhs, const T * rhs, size_t len, T delta = (T)0.0001){
 #define HSACO "kernel.co"
 #define HSA_KERNEL "kernel_func"
 
-#define DWORD_PER_UNIT 1ull
-#define BLOCK_DIM_X 256ull
-#define GRID_DIM_X 64*2*16*8ull
-#define UNIT_PER_THRD 16ull
-#define P_LOOP 1
+
 
 void host_func(float * in, float * out){
-    for(size_t i=0;i<DWORD_PER_UNIT*BLOCK_DIM_X*GRID_DIM_X*UNIT_PER_THRD;i++){
+    for(size_t i=0;i<DWORD_PER_UNIT*BLOCK_DIM_X*GRID_DIM_X*GRID_DIM_Y*UNIT_PER_THRD;i++){
         out[i] = in[i];
     }
 }
@@ -74,7 +70,7 @@ int main(int argc, char ** argv){
     hipFunction_t kernel_func;
     float * host_in, * host_out, *dev_in, *dev_out;
 
-    size_t dword_size = DWORD_PER_UNIT*BLOCK_DIM_X*GRID_DIM_X*UNIT_PER_THRD;
+    size_t dword_size = DWORD_PER_UNIT*BLOCK_DIM_X*GRID_DIM_X*GRID_DIM_Y*UNIT_PER_THRD;
 
     host_in   = new float[dword_size];
     host_out  = new float[dword_size];
@@ -104,12 +100,12 @@ int main(int argc, char ** argv){
 
     hipCtxSynchronize();
     for(int i=0;i<WARMUP;i++){
-        HIP_CALL(hipModuleLaunchKernel(kernel_func, GRID_DIM_X,1,1, BLOCK_DIM_X,1,1,  0, 0, NULL, (void**)&config ));
+        HIP_CALL(hipModuleLaunchKernel(kernel_func, GRID_DIM_X,GRID_DIM_Y,1, BLOCK_DIM_X,1,1,  0, 0, NULL, (void**)&config ));
     }
     hipCtxSynchronize();
     hipEventRecord(evt_0, NULL);
     for(int i=0;i<LOOP;i++){
-        HIP_CALL(hipModuleLaunchKernel(kernel_func, GRID_DIM_X,1,1, BLOCK_DIM_X,1,1,  0, 0, NULL, (void**)&config ));
+        HIP_CALL(hipModuleLaunchKernel(kernel_func, GRID_DIM_X,GRID_DIM_Y,1, BLOCK_DIM_X,1,1,  0, 0, NULL, (void**)&config ));
     }
     hipEventRecord(evt_1, NULL);
     hipEventSynchronize(evt_1);
@@ -129,7 +125,6 @@ int main(int argc, char ** argv){
         delete [] host_out_2;
     }
 
-out:
     delete [] host_in;
     delete [] host_out;
 }

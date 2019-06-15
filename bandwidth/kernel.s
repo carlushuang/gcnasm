@@ -12,7 +12,7 @@
 .set v_os_ptr,  2
 .set v_tmp,     3
 .set v_val,     6
-.set v_end,     31
+.set v_end,     63
 
 .set s_dptr,    0
 .set s_arg,     2
@@ -24,12 +24,16 @@
 .set s_tmp,     12
 .set s_end,     20
 
-.set p_dwords_per_unit, 1
+.set p_dwords_per_unit, DWORD_PER_UNIT
+.set p_bdx,     BLOCK_DIM_X
+.set p_gdx,     GRID_DIM_X
+.set p_gdy,     GRID_DIM_Y
+.set p_unit_per_t, UNIT_PER_THRD
+.set p_loop,    P_LOOP
 
-.set p_bdx,     256
-.set p_unit_per_t, 16
-
-.set p_loop,    1
+.if v_val+p_unit_per_t*p_dwords_per_unit-1 > v_end
+    .error "register requested more than allocated. check v_end not enough"
+.endif
 
 kernel_func:
     .amd_kernel_code_t
@@ -56,9 +60,12 @@ kernel_func:
     s_load_dwordx2 s[s_in:s_in+1], s[s_arg:s_arg+1], 0
     s_load_dwordx2 s[s_out:s_out+1], s[s_arg:s_arg+1], 8
 
+    ;  by*gdx*bdx*unit*dpu + bx*bdx*unit*dpu +  tid*dpu
     v_mov_b32 v[v_tmp], p_bdx*p_dwords_per_unit*p_unit_per_t
     v_mul_u32_u24 v[v_tmp+1], p_dwords_per_unit, v[v_tid]
     v_mad_u32_u24 v[v_os], s[s_bx], v[v_tmp], v[v_tmp+1]
+    v_mov_b32 v[v_tmp], p_gdx*p_bdx*p_dwords_per_unit*p_unit_per_t
+    v_mad_u32_u24 v[v_os], s[s_by], v[v_tmp], v[v_os]
     v_lshlrev_b32 v[v_os], 2, v[v_os]
 
     s_waitcnt lgkmcnt(0)
