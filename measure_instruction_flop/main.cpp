@@ -35,10 +35,10 @@ int main(int argc, char ** argv){
     }
 
 
-    int total_loop=200;
-    int warm_ups = 3;
+    int total_loop=100;
+    int warm_ups = 5;
     int i;
-    int inst_blocks = 1024*8;
+    int inst_blocks = 1024*16;
     int inst_loop = 256;
     int bdx = 256;
     int gdx = num_cu;   //

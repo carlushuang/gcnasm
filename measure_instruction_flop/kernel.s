@@ -11,7 +11,6 @@
 .set v_end,     255     ; hard code to this to let occupancy to be 1.  65536 / 256 = 256
 
 .set s_blocks,  12
-.set s_itr,     14
 .set s_end,     31
 
 .set inst_loop, 256
@@ -38,11 +37,10 @@ kernel_func:
     .end_amd_kernel_code_t
 
     s_load_dword        s[s_blocks], s[0:1], 8
-    s_mov_b32           s[s_itr], 0
     s_waitcnt           lgkmcnt(0)
 
 L_kernel_start:
-    s_add_u32 s[s_itr], 1, s[s_itr]
+    s_sub_u32 s[s_blocks], s[s_blocks], 1
     .itr = 0
     .rept inst_loop
         ;v_fmac_f32 v[.itr], v[.itr+1], v[.itr+2]
@@ -58,7 +56,7 @@ L_kernel_start:
         .endif
     .endr
 
-    s_cmp_le_u32 s[s_itr], s[s_blocks]
+    s_cmp_gt_u32 s[s_blocks], 0
     s_cbranch_scc1 L_kernel_start
 
     s_endpgm
