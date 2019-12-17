@@ -40,7 +40,6 @@ int main(int argc, char ** argv){
     int i;
     int inst_blocks = 1024*8;
     int inst_loop = 256;
-    int fma_factor = 2;
     int bdx = 256;
     int gdx = num_cu;   //
 
@@ -73,7 +72,8 @@ int main(int argc, char ** argv){
     hipEventDestroy(evt_11);
 
     float time_per_loop = elapsed_ms/total_loop;
+    float tips = (double)inst_loop*inst_blocks*num_cu*bdx/time_per_loop/1e9;
 
-    printf("%d CU, %fTflops, cost:%fms per loop\n",num_cu,  (double)inst_loop*inst_blocks*num_cu*bdx*fma_factor/time_per_loop/1e9,   time_per_loop);
+    printf("CU:%d, TIPS:%.3f(2x:%.3f, 4x:%.3f), cost:%fms per loop\n", num_cu, tips, 2*tips, 4*tips, time_per_loop);
 
 }
