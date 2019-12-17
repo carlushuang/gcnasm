@@ -44,7 +44,8 @@ L_kernel_start:
     .itr = 0
     .rept inst_loop
         ;v_fmac_f32 v[.itr], v[.itr+1], v[.itr+2]
-        v_mac_f32 v[.itr], v[.itr+1], v[.itr+2]
+        ;v_mac_f32 v[.itr], v[.itr+1], v[.itr+2]
+        v_mad_f32 v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]
         ;v_mac_f16 v[.itr], v[.itr+1], v[.itr+2]
 
         ;v_dot2_f32_f16 v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]
