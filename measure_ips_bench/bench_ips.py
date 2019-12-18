@@ -241,7 +241,10 @@ bench_inst_dict = [
     ("v_mad_f32",       "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
     ("v_mac_f16",       "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_pk_mul_f16",    "v[.itr], v[.itr+1], v[.itr+2], op_sel_hi:[1,1]"),
-    ("v_pk_mul_f16",    "v[.itr], v[.itr+1], v[.itr+2]")
+    ("v_pk_mul_f16",    "v[.itr], v[.itr+1], v[.itr+2]"),
+    ("v_sin_f32",       "v[.itr], v[.itr+1]"),
+    ("v_cos_f16",       "v[.itr], v[.itr+1]"),
+    ("v_sqrt_f32",       "v[.itr], v[.itr+1]")
 ]
 
 benched_inst_dict = dict()
