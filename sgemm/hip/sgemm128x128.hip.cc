@@ -104,7 +104,7 @@ void sgemm_128x128(
         smem_store[0x100] = q0;
 
         __syncthreads();
-        //#pragma unroll
+        #pragma unroll
         for(unsigned int i=0;i<8;i++) {
             a[0] = smem_load_a[(i<<5)];
             a[1] = smem_load_a[(i<<5)|8];
@@ -122,7 +122,7 @@ void sgemm_128x128(
     smem_store[0] = p0;
     smem_store[0x100] = q0;
     __syncthreads();
-    //#pragma unroll
+    #pragma unroll
     for(unsigned int i=0;i<8;i++) {
         a[0] = smem_load_a[(i<<5)];
         a[1] = smem_load_a[(i<<5)|8];
@@ -135,12 +135,12 @@ void sgemm_128x128(
     }
 
     {
-        //#pragma unroll
+        #pragma unroll
         for(int i=0;i<16;i++){ c[i].x*=alpha; c[i].y*=alpha; c[i].z*=alpha; c[i].w*=alpha;}
 
         float4 * smem_store_c = (float4 *)&smem[(wave_q<<(11+2))|(lane_w<<(9+2))|(lane_v<<(8+2))|(wave_p<<(6+2))|(lane_u<<(2+2))];
         float4 * smem_load_c = (float4 *)&smem[(wave_id<<(8+2))|(lane_hi<<(7+2))|(lane_lo<<(2+2))];
-        //#pragma unroll
+        #pragma unroll
         for(int i=0; i<4; i++){
             int cid = ((i>>1)<<3)|((i&1)<<1);
             int cof = ((i>>1)<<5)|((i&1)<<1);
