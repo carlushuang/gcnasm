@@ -1,6 +1,8 @@
 #!/bin/sh
 ARCH=gfx906
-KSRC=sgemm128x128.hip.cc
+KSRC_HIP=sgemm128x128.hip.cc
+KSRC_ASM=sgemm128x128_v2.s
+#KSRC_ASM=sgemm128x128.s
 KOUT=kernel.co
 SRC=sgemm.cc
 USE_MKL=0
@@ -17,12 +19,12 @@ fi
 
 rm -rf $KOUT dump*
 export KMDUMPLLVM=1 && export KMDUMPISA=1
-/opt/rocm/hip/bin/hipcc --genco  --targets $ARCH $KSRC -o $KOUT
+/opt/rocm/hip/bin/hipcc --genco  --targets $ARCH $KSRC_HIP -o $KOUT
 
 rm -rf kernel_asm.co
 /opt/rocm/hcc/bin/clang -x assembler -target amdgcn--amdhsa -mcpu=$ARCH -mno-code-object-v3 \
-  sgemm128x128.s -o kernel_asm.co
-/opt/rocm/hcc/bin/llvm-objdump -disassemble -mcpu=${ARCH} kernel_asm.co > dump.sgemm128x128.s
+  $KSRC_ASM -o kernel_asm.co
+/opt/rocm/hcc/bin/llvm-objdump -disassemble -mcpu=${ARCH} kernel_asm.co > dump.$KSRC_ASM
 
 
 rm -rf $TARGET
