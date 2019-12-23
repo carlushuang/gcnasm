@@ -107,7 +107,8 @@ void rand_vector_2d(float* v, int row, int col, int ld){
     }
 }
 
-#define HSACO "kernel.co"
+//#define HSACO "kernel.co"
+#define HSACO "kernel_asm.co"
 #define HSA_KERNEL "sgemm_128x128"
 
 #define SGEMM_M 4096
@@ -198,7 +199,7 @@ int main(int argc, char ** argv){
     hipEventDestroy(evt_11);
 
     float time_per_loop = elapsed_ms/total_loop;
-    float gflops = (float)m*n*k/time_per_loop/(1e6);
+    float gflops = (float)2*m*n*k/time_per_loop/(1e6);
     printf("m:%d,n:%d,k:%d,gflops:%.3f",m,n,k,gflops);
     if(validate){
         sgemm_cr(host_c, host_a, host_b, alpha, m,n,k,lda/sizeof(float),ldb/sizeof(float),ldc/sizeof(float));
