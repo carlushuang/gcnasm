@@ -239,37 +239,49 @@ L_sgemm128x128_k_loop_start:
     global_load_dwordx4 v[v_q0:v_q0+3], v[v_os_b:v_os_b+1], s[s_ptr_b:s_ptr_b+1]
 
     ds_read_b128 v[v_a0+0:v_a0+3], v[v_smem_load_a], offset:0
-    ds_read_b128 v[v_a0+4:v_a0+7], v[v_smem_load_a], offset:0x80
     ds_read_b128 v[v_b0+0:v_b0+3], v[v_smem_load_b], offset:0x1000
-    ds_read_b128 v[v_b0+4:v_b0+7], v[v_smem_load_b], offset:0x1000+0x80
+
     .cnt = 0
     .rept 4
-        ds_read_b128 v[v_a1+0:v_a1+3], v[v_smem_load_a], offset:(.cnt+1)*0x200+0
-        ds_read_b128 v[v_a1+4:v_a1+7], v[v_smem_load_a], offset:(.cnt+1)*0x200+0x80
-        ds_read_b128 v[v_b1+0:v_b1+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
-        ds_read_b128 v[v_b1+4:v_b1+7], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0x80
-        .cnt = .cnt + 1
-
-        s_waitcnt lgkmcnt(4)
+        ds_read_b128 v[v_a0+4:v_a0+7], v[v_smem_load_a], offset:(.cnt)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+0 , v_a0+0, v_b0+0
+
+        ds_read_b128 v[v_b0+4:v_b0+7], v[v_smem_load_b], offset:0x1000+(.cnt)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+16, v_a0+4, v_b0+0
+
+        ds_read_b128 v[v_a1+0:v_a1+3], v[v_smem_load_a], offset:(.cnt+1)*0x200+0
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+32, v_a0+0, v_b0+4
+
+        ds_read_b128 v[v_b1+0:v_b1+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+48, v_a0+4, v_b0+4
+
+        ds_read_b128 v[v_a1+4:v_a1+7], v[v_smem_load_a], offset:(.cnt+1)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
+        .s_fma4x4 v_c+0 , v_a1+0, v_b1+0
+
+        ds_read_b128 v[v_b1+4:v_b1+7], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
+        .s_fma4x4 v_c+16, v_a1+4, v_b1+0
+        .cnt = .cnt + 1
 
         .if .cnt != 7
             ds_read_b128 v[v_a0+0:v_a0+3], v[v_smem_load_a], offset:(.cnt+1)*0x200+0
-            ds_read_b128 v[v_a0+4:v_a0+7], v[v_smem_load_a], offset:(.cnt+1)*0x200+0x80
-            ds_read_b128 v[v_b0+0:v_b0+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
-            ds_read_b128 v[v_b0+4:v_b0+7], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0x80
-            s_waitcnt lgkmcnt(4)
+            s_waitcnt lgkmcnt(1)
         .else
             s_waitcnt lgkmcnt(0)
         .endif
-        .cnt = .cnt + 1
-        .s_fma4x4 v_c+0 , v_a1+0, v_b1+0
-        .s_fma4x4 v_c+16, v_a1+4, v_b1+0
         .s_fma4x4 v_c+32, v_a1+0, v_b1+4
+
+        .if .cnt != 7
+            ds_read_b128 v[v_b0+0:v_b0+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
+            s_waitcnt lgkmcnt(1)
+        .endif
         .s_fma4x4 v_c+48, v_a1+4, v_b1+4
+        .cnt = .cnt + 1
     .endr
     s_barrier
     s_add_u32 s[s_kitr], 8, s[s_kitr]
@@ -283,37 +295,49 @@ L_sgemm128x128_k_loop_end:
     s_waitcnt lgkmcnt(0)
     s_barrier
     ds_read_b128 v[v_a0+0:v_a0+3], v[v_smem_load_a], offset:0
-    ds_read_b128 v[v_a0+4:v_a0+7], v[v_smem_load_a], offset:0x80
-    ds_read_b128 v[v_b0+0:v_b0+3], v[v_smem_load_b], offset:0x1000+0
-    ds_read_b128 v[v_b0+4:v_b0+7], v[v_smem_load_b], offset:0x1000+0x80
+    ds_read_b128 v[v_b0+0:v_b0+3], v[v_smem_load_b], offset:0x1000
+
     .cnt = 0
     .rept 4
-        ds_read_b128 v[v_a1+0:v_a1+3], v[v_smem_load_a], offset:(.cnt+1)*0x200+0
-        ds_read_b128 v[v_a1+4:v_a1+7], v[v_smem_load_a], offset:(.cnt+1)*0x200+0x80
-        ds_read_b128 v[v_b1+0:v_b1+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
-        ds_read_b128 v[v_b1+4:v_b1+7], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0x80
-        .cnt = .cnt + 1
-
-        s_waitcnt lgkmcnt(4)
+        ds_read_b128 v[v_a0+4:v_a0+7], v[v_smem_load_a], offset:(.cnt)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+0 , v_a0+0, v_b0+0
+
+        ds_read_b128 v[v_b0+4:v_b0+7], v[v_smem_load_b], offset:0x1000+(.cnt)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+16, v_a0+4, v_b0+0
+
+        ds_read_b128 v[v_a1+0:v_a1+3], v[v_smem_load_a], offset:(.cnt+1)*0x200+0
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+32, v_a0+0, v_b0+4
+
+        ds_read_b128 v[v_b1+0:v_b1+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
+        s_waitcnt lgkmcnt(1)
         .s_fma4x4 v_c+48, v_a0+4, v_b0+4
+
+        ds_read_b128 v[v_a1+4:v_a1+7], v[v_smem_load_a], offset:(.cnt+1)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
+        .s_fma4x4 v_c+0 , v_a1+0, v_b1+0
+
+        ds_read_b128 v[v_b1+4:v_b1+7], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0x80
+        s_waitcnt lgkmcnt(1)
+        .s_fma4x4 v_c+16, v_a1+4, v_b1+0
+        .cnt = .cnt + 1
 
         .if .cnt != 7
             ds_read_b128 v[v_a0+0:v_a0+3], v[v_smem_load_a], offset:(.cnt+1)*0x200+0
-            ds_read_b128 v[v_a0+4:v_a0+7], v[v_smem_load_a], offset:(.cnt+1)*0x200+0x80
-            ds_read_b128 v[v_b0+0:v_b0+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
-            ds_read_b128 v[v_b0+4:v_b0+7], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0x80
-            s_waitcnt lgkmcnt(4)
+            s_waitcnt lgkmcnt(1)
         .else
             s_waitcnt lgkmcnt(0)
         .endif
-        .cnt = .cnt + 1
-        .s_fma4x4 v_c+0 , v_a1+0, v_b1+0
-        .s_fma4x4 v_c+16, v_a1+4, v_b1+0
         .s_fma4x4 v_c+32, v_a1+0, v_b1+4
+
+        .if .cnt != 7
+            ds_read_b128 v[v_b0+0:v_b0+3], v[v_smem_load_b], offset:0x1000+(.cnt+1)*0x200+0
+            s_waitcnt lgkmcnt(1)
+        .endif
         .s_fma4x4 v_c+48, v_a1+4, v_b1+4
+        .cnt = .cnt + 1
     .endr
     s_barrier
 
