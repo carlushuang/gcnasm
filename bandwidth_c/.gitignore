@@ -1,0 +1,3 @@
+*.rocm
+*.cuda
+*.hip.cc

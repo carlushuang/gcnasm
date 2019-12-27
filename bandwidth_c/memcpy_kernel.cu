@@ -46,22 +46,32 @@ static inline void b2s(size_t bytes, char * str){
 	}
 }
 
+static inline int env_get_int(const char * var_name, int def_v)
+{
+    char * v = getenv(var_name);
+    int r = def_v;
+    if(v)
+        r = atoi(v);
+    return r;
+}
+
 int main() {
 	cudaSetDevice(0);
     unsigned char *A, *B;
-    const int total_float =64*3*224*224;
-	static float h_A[total_float], h_B[total_float];
-	for (int i = 0; i < total_float; ++i)
+    const int dwords = env_get_int("DWORDS",64*3*224*224);
+    float * h_A = (float*)malloc(dwords*sizeof(float));
+    float * h_B = (float*)malloc(dwords*sizeof(float));
+	for (int i = 0; i < dwords; ++i)
 		h_A[i] = i % 71;
 
-    CALL(cudaMalloc(&A, total_float * sizeof(float)));
-    CALL(cudaMalloc(&B, total_float * sizeof(float)));
-    CALL(cudaMemcpy(A, h_A, total_float * sizeof(float), cudaMemcpyHostToDevice));
+    CALL(cudaMalloc(&A, dwords * sizeof(float)));
+    CALL(cudaMalloc(&B, dwords * sizeof(float)));
+    CALL(cudaMemcpy(A, h_A, dwords * sizeof(float), cudaMemcpyHostToDevice));
 
     // benchmark kernel
     int bx = 256;
-    int gx = (total_float+255)>>11;
-    assert(total_float/bx);
+    int gx = (dwords+255)>>11;
+    assert(dwords/bx);
 
     cudaEvent_t start_ev, stop_ev;
     CALL(cudaEventCreate(&start_ev));
@@ -70,7 +80,7 @@ int main() {
     for(int i=0;i<WARMUP;i++)
         memcpy_kernel<<<gx, bx>>>(B, A);
 
-    CALL(cudaEventRecord( start_ev, 0));
+    CALL(cudaEventRecord(start_ev, 0));
     for(int i=0;i<LOOP;i++)
         memcpy_kernel<<<gx, bx>>>(B, A);
     CALL(cudaEventRecord( stop_ev, 0 ));
@@ -84,10 +94,10 @@ int main() {
 
     // benchmark memcpy api
     for(int i=0;i<WARMUP;i++)
-        CALL(cudaMemcpy(B, A, total_float * sizeof(float), cudaMemcpyDeviceToDevice));
+        CALL(cudaMemcpy(B, A, dwords * sizeof(float), cudaMemcpyDeviceToDevice));
     CALL(cudaEventRecord( start_ev, 0));
     for(int i=0;i<LOOP;i++)
-        CALL(cudaMemcpy(B, A, total_float * sizeof(float), cudaMemcpyDeviceToDevice));
+        CALL(cudaMemcpy(B, A, dwords * sizeof(float), cudaMemcpyDeviceToDevice));
     CALL(cudaEventRecord( stop_ev, 0 ));
     CALL(cudaEventSynchronize(stop_ev));
 
@@ -96,7 +106,12 @@ int main() {
     ms_api/=LOOP;
 
     char str[64];
-    b2s(total_float*sizeof(float), str);
-    printf("%s, gflops_kernel:%.3f, gflops_api:%.3f\n", str, ((double)total_float*sizeof(float)*2)/((double)ms/1000)/1000000000.0,
-    ((double)total_float*sizeof(float)*2)/((double)ms_api/1000)/1000000000.0 );
+    b2s(dwords*sizeof(float), str);
+    printf("%s, gflops_kernel:%.3f, gflops_api:%.3f\n", str, ((double)dwords*sizeof(float)*2)/((double)ms/1000)/1000000000.0,
+    ((double)dwords*sizeof(float)*2)/((double)ms_api/1000)/1000000000.0 );
+
+    free(h_A);
+    free(h_B);
+    CALL(cudaFree(A));
+    CALL(cudaFree(B));
 }
