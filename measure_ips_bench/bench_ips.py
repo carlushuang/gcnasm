@@ -12,6 +12,7 @@ k_CPP_TARGET = "bench.exe"
 k_ASM_SRC = "kernel.s"
 k_ASM_TARGET = k_HSACO
 k_ARCH = "gfx906"
+k_INST_LOOP = [256, 512, 768, 1024]
 
 class cpp_src_t:
     def get_cxxflags(self):
@@ -232,6 +233,13 @@ L_kernel_start:
         f.write(self.get_src())
 
 bench_inst_dict = [
+    ("v_add_co_u32",     "v[.itr], vcc, v[.itr+1], v[.itr+2]"),
+    ("v_addc_co_u32",    "v[.itr], vcc, v[.itr+1], v[.itr+2], vcc"),
+    ("v_or_b32",         "v[.itr], v[.itr+1], v[.itr+2]"),
+    ("v_mul_lo_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
+    ("v_mul_hi_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
+    ("v_mad_u32_u24",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
+
     ("v_dot2_f32_f16",  "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
     ("v_dot4_i32_i8",   "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
     ("v_pk_fma_f16",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
