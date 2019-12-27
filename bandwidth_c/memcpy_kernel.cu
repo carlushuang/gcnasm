@@ -31,6 +31,21 @@ do {\
 #define WARMUP 2
 #define LOOP 10
 
+static inline void b2s(size_t bytes, char * str){
+	if(bytes<1024){
+		sprintf(str, "%luB", bytes);
+	}else if(bytes<(1024*1024)){
+		double b= (double)bytes/1024.0;
+		sprintf(str, "%.2fKB", b);
+	}else if(bytes<(1024*1024*1024)){
+		double b= (double)bytes/(1024.0*1024);
+		sprintf(str, "%.2fMB", b);
+	}else{
+		double b= (double)bytes/(1024.0*1024*1024);
+		sprintf(str, "%.2fGB", b);
+	}
+}
+
 int main() {
 	cudaSetDevice(0);
     unsigned char *A, *B;
@@ -80,6 +95,8 @@ int main() {
     CALL(cudaEventElapsedTime(&ms_api,start_ev, stop_ev));
     ms_api/=LOOP;
 
-    printf("total %d Byte, gflops_kernel:%.3f, gflops_api:%.3f\n", total_float, ((double)total_float*sizeof(float)*2)/((double)ms/1000)/1000000000.0,
+    char str[64];
+    b2s(total_float*sizeof(float), str);
+    printf("%s, gflops_kernel:%.3f, gflops_api:%.3f\n", str, ((double)total_float*sizeof(float)*2)/((double)ms/1000)/1000000000.0,
     ((double)total_float*sizeof(float)*2)/((double)ms_api/1000)/1000000000.0 );
 }
