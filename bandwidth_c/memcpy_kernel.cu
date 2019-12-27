@@ -29,8 +29,8 @@ do {\
     }\
 } while(0)
 
-#define WARMUP 2
-#define LOOP 10
+#define WARMUP 20
+#define LOOP 100
 
 static inline void b2s(size_t bytes, char * str){
 	if(bytes<1024){
