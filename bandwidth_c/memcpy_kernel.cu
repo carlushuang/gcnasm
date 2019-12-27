@@ -3,10 +3,12 @@
 #include <assert.h>
 #include <iostream>
 #include <stdlib.h>
+#include <unistd.h>
 
 extern "C" __global__
 void memcpy_kernel(unsigned char* __restrict__ output, const unsigned char* __restrict__ input){
-    output += (blockIdx.x<<13)|(threadIdx.x<<2); 
+    output += (blockIdx.x<<13)|(threadIdx.x<<2);
+    input  += (blockIdx.x<<13)|(threadIdx.x<<2);
     *((float* )&output[0])       = *((float* )&input[0]);
     *((float* )&output[0x400])   = *((float* )&input[0x400]);
     *((float* )&output[0x800])   = *((float* )&input[0x800]);
@@ -41,8 +43,9 @@ int main() {
     CALL(cudaMalloc(&B, total_float * sizeof(float)));
     CALL(cudaMemcpy(A, h_A, total_float * sizeof(float), cudaMemcpyHostToDevice));
 
+    // benchmark kernel
     int bx = 256;
-    int gx = (total_float+255)>>8;
+    int gx = (total_float+255)>>11;
     assert(total_float/bx);
 
     cudaEvent_t start_ev, stop_ev;
@@ -52,9 +55,7 @@ int main() {
     for(int i=0;i<WARMUP;i++)
         memcpy_kernel<<<gx, bx>>>(B, A);
 
-    CALL(cudaDeviceSynchronize());
     CALL(cudaEventRecord( start_ev, 0));
-    //CALL(cudaEventSynchronize(start_ev));
     for(int i=0;i<LOOP;i++)
         memcpy_kernel<<<gx, bx>>>(B, A);
     CALL(cudaEventRecord( stop_ev, 0 ));
@@ -64,5 +65,21 @@ int main() {
     CALL(cudaEventElapsedTime(&ms,start_ev, stop_ev));
     ms/=LOOP;
 
-    printf("total %dB, gflops:%f\n", total_float, ((double)total_float*sizeof(float)*2)/((double)ms/1000)/1000000000.0 );
+    sleep(1);
+
+    // benchmark memcpy api
+    for(int i=0;i<WARMUP;i++)
+        CALL(cudaMemcpy(B, A, total_float * sizeof(float), cudaMemcpyDeviceToDevice));
+    CALL(cudaEventRecord( start_ev, 0));
+    for(int i=0;i<LOOP;i++)
+        CALL(cudaMemcpy(B, A, total_float * sizeof(float), cudaMemcpyDeviceToDevice));
+    CALL(cudaEventRecord( stop_ev, 0 ));
+    CALL(cudaEventSynchronize(stop_ev));
+
+    float ms_api;
+    CALL(cudaEventElapsedTime(&ms_api,start_ev, stop_ev));
+    ms_api/=LOOP;
+
+    printf("total %d Byte, gflops_kernel:%.3f, gflops_api:%.3f\n", total_float, ((double)total_float*sizeof(float)*2)/((double)ms/1000)/1000000000.0,
+    ((double)total_float*sizeof(float)*2)/((double)ms_api/1000)/1000000000.0 );
 }
