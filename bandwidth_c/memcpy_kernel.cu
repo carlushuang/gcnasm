@@ -127,7 +127,7 @@ int main() {
 
     char str[64];
     b2s(dwords*sizeof(float), str);
-    printf("%s, gflops_kernel:%.3f, gflops_api:%.3f\n", str, ((double)dwords*sizeof(float)*2)/((double)ms/1000)/1000000000.0,
+    printf("%s, bandwidth_kernel:%.3f(GB/s), bandwidth_api:%.3f(GB/s)\n", str, ((double)dwords*sizeof(float)*2)/((double)ms/1000)/1000000000.0,
     ((double)dwords*sizeof(float)*2)/((double)ms_api/1000)/1000000000.0 );
 
     free(h_A);
