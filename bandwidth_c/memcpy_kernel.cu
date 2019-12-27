@@ -7,16 +7,16 @@
 
 extern "C" __global__
 void memcpy_kernel(unsigned char* __restrict__ output, const unsigned char* __restrict__ input){
-    output += (blockIdx.x<<13)|(threadIdx.x<<2);
-    input  += (blockIdx.x<<13)|(threadIdx.x<<2);
-    *((float* )&output[0])       = *((float* )&input[0]);
-    *((float* )&output[0x400])   = *((float* )&input[0x400]);
-    *((float* )&output[0x800])   = *((float* )&input[0x800]);
-    *((float* )&output[0xc00])   = *((float* )&input[0xc00]);
-    *((float* )&output[0x1000])  = *((float* )&input[0x1000]);
-    *((float* )&output[0x1400])  = *((float* )&input[0x1400]);
-    *((float* )&output[0x1800])  = *((float* )&input[0x1800]);
-    *((float* )&output[0x1c00])  = *((float* )&input[0x1c00]);
+    output += (blockIdx.x<<15)|(threadIdx.x<<4);
+    input  += (blockIdx.x<<15)|(threadIdx.x<<4);
+    *((float4* )&output[0])       = *((float4* )&input[0]);
+    *((float4* )&output[0x1000])  = *((float4* )&input[0x1000]);
+    *((float4* )&output[0x2000])  = *((float4* )&input[0x2000]);
+    *((float4* )&output[0x3000])  = *((float4* )&input[0x3000]);
+    *((float4* )&output[0x4000])  = *((float4* )&input[0x4000]);
+    *((float4* )&output[0x5000])  = *((float4* )&input[0x5000]);
+    *((float4* )&output[0x6000])  = *((float4* )&input[0x6000]);
+    *((float4* )&output[0x7000])  = *((float4* )&input[0x7000]);
 }
 
 #define CALL(cmd) \
@@ -54,6 +54,23 @@ static inline int env_get_int(const char * var_name, int def_v)
         r = atoi(v);
     return r;
 }
+static inline float get_rand(){
+    static int inited = 0;
+    float v;
+    if(!inited){ srand(time(NULL)); inited = 1; }
+    v = rand() % 1000 + 1;
+    return v / 1000.0f;
+}
+
+static inline int valid_vec(const float * vec_a, const float * vec_b, int num)
+{
+    int err_cnt = 0;
+    for(int i=0;i<num;i++){
+        if(vec_a[i] != vec_b[i])
+            err_cnt++;
+    }
+    return err_cnt;
+}
 
 int main() {
 	cudaSetDevice(0);
@@ -61,8 +78,7 @@ int main() {
     const int dwords = env_get_int("DWORDS",64*3*224*224);
     float * h_A = (float*)malloc(dwords*sizeof(float));
     float * h_B = (float*)malloc(dwords*sizeof(float));
-	for (int i = 0; i < dwords; ++i)
-		h_A[i] = i % 71;
+	for (int i = 0; i < dwords; ++i) h_A[i] = get_rand();
 
     CALL(cudaMalloc(&A, dwords * sizeof(float)));
     CALL(cudaMalloc(&B, dwords * sizeof(float)));
@@ -70,8 +86,8 @@ int main() {
 
     // benchmark kernel
     int bx = 256;
-    int gx = (dwords+255)>>11;
-    assert(dwords/bx);
+    int gx = (dwords+255)>>13;
+    assert(dwords/(bx*8*4));
 
     cudaEvent_t start_ev, stop_ev;
     CALL(cudaEventCreate(&start_ev));
@@ -90,6 +106,9 @@ int main() {
     CALL(cudaEventElapsedTime(&ms,start_ev, stop_ev));
     ms/=LOOP;
 
+    CALL(cudaMemcpy(h_B, B, dwords * sizeof(float), cudaMemcpyDeviceToHost));
+
+    //if(valid_vec(h_A, h_B, dwords) != 0) printf("not valid copy!\n");
     sleep(1);
 
     // benchmark memcpy api
