@@ -1,5 +1,5 @@
 cuda:
-	nvcc memcpy_kernel.cu -o memcpy_kernel.nvcc
+	nvcc memcpy_kernel.cu -o memcpy_kernel.cuda
 
 rocm:
 	rm -rf memcpy_kernel.cu.hip.cc memcpy_kernel.rocm

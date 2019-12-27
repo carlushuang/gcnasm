@@ -7,17 +7,18 @@
 
 extern "C" __global__
 void memcpy_kernel(unsigned char* __restrict__ output, const unsigned char* __restrict__ input){
-    output += (blockIdx.x<<15)|(threadIdx.x<<4);
-    input  += (blockIdx.x<<15)|(threadIdx.x<<4);
-    *((float4* )&output[0])       = *((float4* )&input[0]);
-    *((float4* )&output[0x1000])  = *((float4* )&input[0x1000]);
-    *((float4* )&output[0x2000])  = *((float4* )&input[0x2000]);
-    *((float4* )&output[0x3000])  = *((float4* )&input[0x3000]);
-    *((float4* )&output[0x4000])  = *((float4* )&input[0x4000]);
-    *((float4* )&output[0x5000])  = *((float4* )&input[0x5000]);
-    *((float4* )&output[0x6000])  = *((float4* )&input[0x6000]);
-    *((float4* )&output[0x7000])  = *((float4* )&input[0x7000]);
+    output += (blockIdx.x<<13)|(threadIdx.x<<2);
+    input  += (blockIdx.x<<13)|(threadIdx.x<<2);
+    *((float* )&output[0])       = *((float* )&input[0]);
+    *((float* )&output[0x400])   = *((float* )&input[0x400]);
+    *((float* )&output[0x800])   = *((float* )&input[0x800]);
+    *((float* )&output[0xc00])   = *((float* )&input[0xc00]);
+    *((float* )&output[0x1000])  = *((float* )&input[0x1000]);
+    *((float* )&output[0x1400])  = *((float* )&input[0x1400]);
+    *((float* )&output[0x1800])  = *((float* )&input[0x1800]);
+    *((float* )&output[0x1c00])  = *((float* )&input[0x1c00]);
 }
+
 
 #define CALL(cmd) \
 do {\
@@ -86,7 +87,7 @@ int main() {
 
     // benchmark kernel
     int bx = 256;
-    int gx = (dwords+255)>>13;
+    int gx = (dwords+255)>>11;
     assert(dwords/(bx*8*4));
 
     cudaEvent_t start_ev, stop_ev;
