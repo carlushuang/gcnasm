@@ -7,14 +7,14 @@
 extern "C" __global__
 void memcpy_kernel(unsigned char* __restrict__ output, const unsigned char* __restrict__ input){
     output += (blockIdx.x<<13)|(threadIdx.x<<2); 
-    *((float* __restrict__ )&output[0])       = *((float* __restrict__ )&input[0]);
-    *((float* __restrict__ )&output[0x400])   = *((float* __restrict__ )&input[0x400]);
-    *((float* __restrict__ )&output[0x800])   = *((float* __restrict__ )&input[0x800]);
-    *((float* __restrict__ )&output[0xc00])   = *((float* __restrict__ )&input[0xc00]);
-    *((float* __restrict__ )&output[0x1000])  = *((float* __restrict__ )&input[0x1000]);
-    *((float* __restrict__ )&output[0x1400])  = *((float* __restrict__ )&input[0x1400]);
-    *((float* __restrict__ )&output[0x1800])  = *((float* __restrict__ )&input[0x1800]);
-    *((float* __restrict__ )&output[0x1c00])  = *((float* __restrict__ )&input[0x1c00]);
+    *((float* )&output[0])       = *((float* )&input[0]);
+    *((float* )&output[0x400])   = *((float* )&input[0x400]);
+    *((float* )&output[0x800])   = *((float* )&input[0x800]);
+    *((float* )&output[0xc00])   = *((float* )&input[0xc00]);
+    *((float* )&output[0x1000])  = *((float* )&input[0x1000]);
+    *((float* )&output[0x1400])  = *((float* )&input[0x1400]);
+    *((float* )&output[0x1800])  = *((float* )&input[0x1800]);
+    *((float* )&output[0x1c00])  = *((float* )&input[0x1c00]);
 }
 
 #define CALL(cmd) \
@@ -54,9 +54,11 @@ int main() {
 
     CALL(cudaDeviceSynchronize());
     CALL(cudaEventRecord( start_ev, 0));
+    //CALL(cudaEventSynchronize(start_ev));
     for(int i=0;i<LOOP;i++)
         memcpy_kernel<<<gx, bx>>>(B, A);
     CALL(cudaEventRecord( stop_ev, 0 ));
+    CALL(cudaEventSynchronize(stop_ev));
 
     float ms;
     CALL(cudaEventElapsedTime(&ms,start_ev, stop_ev));
