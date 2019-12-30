@@ -38,8 +38,47 @@
     c[15] = (float4)0;      \
 }
 
+template<typename FLOAT, int element_cnt>
+__device__ void thread_wise_reduction(FLOAT * c)
+{
+    #pragma unroll
+    for(int e=1;e<element_cnt;e++)
+        c[0] += c[e];
+}
 /*
-* wave-wise reduction
+*
+* generic wave wise reduction
+* the thread mapping means nothing here, we only reduce gpr in corresponding waves into one.
+* and use different wave store different elem_per_split
+*/
+template<int wave_cnt,
+        int split,
+        typename FLOAT,
+        int float_cnt>
+__device__ void wave_wise_reduction(FLOAT * c, int lane_id, int wave_id, char * __restrict__ smem){
+    static_assert((float_cnt%split==0), "error, not dividable");
+    static_assert(wave_cnt == (float_cnt / split), "other divide scheme to be supported");
+    const int elem_per_split = float_cnt / split;
+    const int float_size = sizeof(FLOAT);
+    char * __restrict__ smem_store = &smem[((wave_id<<6)|lane_id)*elem_per_split*float_size];
+    char * __restrict__ smem_load = &smem[(wave_id+lane_id*elem_per_split)*float_size];
+    #pragma unroll
+    for(int i=0;i<split;i++){
+        #pragma unroll
+        for(int e=0;e<elem_per_split;e++)
+            *(FLOAT*)(&smem_store[e*float_size]) = c[i*elem_per_split+e];
+        __syncthreads();
+        #pragma unroll
+        for(int e=0;e<elem_per_split;e++)
+            c[i*elem_per_split+e] = *(FLOAT*)(&smem_load[e*float_size*elem_per_split*64]);
+        __syncthreads();
+
+        thread_wise_reduction<FLOAT, elem_per_split>(&c[i*elem_per_split]);
+    }
+}
+
+/*
+* wave-wise reduction gemm
 * 256x1x1, 4 waves
 * each wave compute align K(unrool 8), 4 waves compute 4x8=32 K
 * each wave compute 64x64 fp32
@@ -177,7 +216,7 @@ void sgemm_64x64_wr(
         S_FMA4x4((float*)&c[12], (float*)&a[1], (float*)&b[1])
     }
     __syncthreads();
-
+#if 0
     {
         /* reduction
          * for a single wave, have 64x64 float -> 64*64*4 = 16384 byte
@@ -231,8 +270,6 @@ void sgemm_64x64_wr(
             __syncthreads();
         }
     }
-
-
     // after reduction, do coalesing and store
     {
         #pragma unroll
@@ -252,4 +289,32 @@ void sgemm_64x64_wr(
         *((float4*)&ptr_c[0]) = smem_load_c[0x200]; ptr_c += bs_c;
         *((float4*)&ptr_c[0]) = smem_load_c[0x300];
     }
+#endif
+#if 1
+    /*
+    * NOTE
+    * call wave_wise_reduction will result in different thread mapping compare to above handwrite one
+    * although this function might be more generic, the final coalescing and store is different.
+    */
+    wave_wise_reduction<4,4,float4,16>(c, lane_id, wave_id, smem);
+    // after reduction, do coalesing and store
+    {
+        #pragma unroll
+        for(int i=0;i<4;i++){ c[i<<2].x*=alpha; c[i<<2].y*=alpha; c[i<<2].z*=alpha; c[i<<2].w*=alpha;}
+
+        float4 * smem_store_c = (float4*)&smem[(lane_w<<11)|(lane_v<<10)|(wave_id<<8)|(lane_u<<4)];
+        float4 * smem_load_c = (float4*)&smem[tid<<4];
+
+        smem_store_c[0]     = c[0];
+        smem_store_c[0x8]   = c[4];
+        smem_store_c[0x200] = c[8];
+        smem_store_c[0x208] = c[12];
+        __syncthreads();
+
+        *((float4*)&ptr_c[0]) = smem_load_c[0];     ptr_c += bs_c;
+        *((float4*)&ptr_c[0]) = smem_load_c[0x100]; ptr_c += bs_c;
+        *((float4*)&ptr_c[0]) = smem_load_c[0x200]; ptr_c += bs_c;
+        *((float4*)&ptr_c[0]) = smem_load_c[0x300];
+    }
+#endif
 }
