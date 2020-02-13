@@ -120,7 +120,7 @@ int main(int argc, char ** argv){{
     float tips = (double)inst_loop*inst_blocks*num_cu*bdx/time_per_loop/1e9;
 
     //printf("CU:%d, inst:%s, TIPS:%.3f(2x:%.3f, 4x:%.3f), cost:%fms per loop\\n", num_cu, argv[1], tips, 2*tips, 4*tips, time_per_loop);
-    printf("%d\\t%s\\t%.3f\\t%.3f\\t%.3f\\t%fms\\n", num_cu, argv[1], tips, 2*tips, 4*tips, time_per_loop);
+    printf("%d\\t%s\\t%.3f\\t%.3f\\t%.3f\\t%.3fms\\n", num_cu, argv[1], tips, 2*tips, 4*tips, time_per_loop);
 }}
 '''.format(hsaco=k_HSACO, hsakn=k_HSAKN)
         return src
@@ -314,7 +314,7 @@ def bench():
     shutil.rmtree(k_WS,True)
     os.mkdir(k_WS)
     prepare_cpp()
-    print("CU\tinst\ttips\t2x\t4x\tper_loop")
+    print("CU\tinstruction\ttips\t2x\t4x\tper_loop")
     for item in bench_inst_dict:
         bench_inst = item[0] + " " + item[1]
         prepare_asm(k_ARCH, bench_inst)
