@@ -1,4 +1,4 @@
-test `Instruction Per Seconde`(ips) for a specific inst. tested on [MI50](https://www.amd.com/en/products/professional-graphics/instinct-mi50)(13.3 Tflops for fp32):
+test `Instructions Per Second`(ips) for a specific inst. tested on [MI50](https://www.amd.com/en/products/professional-graphics/instinct-mi50)(13.3 Tflops for fp32):
 
 ```
 CU      instruction     tips    2x      4x      per_loop
