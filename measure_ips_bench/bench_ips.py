@@ -243,6 +243,7 @@ bench_inst_dict = [
     ("v_dot2_f32_f16",  "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
     ("v_dot4_i32_i8",   "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
     ("v_pk_fma_f16",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
+    ("v_swap_b32",       "v[.itr], v[.itr+1]"),
 
     ("v_fmac_f32",      "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_mac_f32",       "v[.itr], v[.itr+1], v[.itr+2]"),
