@@ -236,6 +236,7 @@ bench_inst_dict = [
     ("v_add_co_u32",     "v[.itr], vcc, v[.itr+1], v[.itr+2]"),
     ("v_addc_co_u32",    "v[.itr], vcc, v[.itr+1], v[.itr+2], vcc"),
     ("v_or_b32",         "v[.itr], v[.itr+1], v[.itr+2]"),
+    ("v_lshl_or_b32",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
     ("v_mul_lo_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_mul_hi_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_mad_u32_u24",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
