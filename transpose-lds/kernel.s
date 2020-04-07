@@ -1,5 +1,5 @@
 .hsa_code_object_version 2,0
-.hsa_code_object_isa 9, 0, 0, "AMD", "AMDGPU"
+.hsa_code_object_isa 9, 0, 6, "AMD", "AMDGPU"
 
 .include "common.inc"
 
