@@ -13,14 +13,24 @@ k_ASM_SRC = "kernel.s"
 k_ASM_TARGET = k_HSACO
 k_ARCH = "gfx906"
 k_INST_LOOP = [256, 512, 768, 1024]
+USE_HIP_CLANG = True
 
 class cpp_src_t:
     def get_cxxflags(self):
-        return '`/opt/rocm/bin/hipconfig --cpp_config` -Wall -O2  -std=c++11 '
+        if USE_HIP_CLANG:
+            return ' -D__HIP_PLATFORM_HCC__= -I/opt/rocm/hip/include -I/opt/rocm/hcc/include -I/opt/rocm/hsa/include'\
+                    ' -Wall -O2 -std=c++11 '
+        else:
+            return '`/opt/rocm/bin/hipconfig --cpp_config` -Wall -O2  -std=c++11 '
     def get_ldflags(self):
-        return " -L/opt/rocm/hcc/lib -L/opt/rocm/lib -L/opt/rocm/lib64" \
-            " -Wl,-rpath=/opt/rocm/hcc/lib:/opt/rocm/lib -ldl -lm -lpthread -lhc_am " \
-            " -Wl,--whole-archive -lmcwamp -lhip_hcc -lhsa-runtime64 -lhsakmt -Wl,--no-whole-archive"
+        if USE_HIP_CLANG:
+            return " -L/opt/rocm/lib -L/opt/rocm/lib64" \
+                " -Wl,-rpath=/opt/rocm/lib -ldl -lm -lpthread " \
+                " -Wl,--whole-archive -lamdhip64 -lhsa-runtime64 -lhsakmt -Wl,--no-whole-archive"
+        else:
+            return " -L/opt/rocm/hcc/lib -L/opt/rocm/lib -L/opt/rocm/lib64" \
+                " -Wl,-rpath=/opt/rocm/hcc/lib:/opt/rocm/lib -ldl -lm -lpthread -lhc_am " \
+                " -Wl,--whole-archive -lmcwamp -lhip_hcc -lhsa-runtime64 -lhsakmt -Wl,--no-whole-archive"
     def compile(self, src, target, working_dir):
         def do_compile():
             cmd = "g++" + " "
@@ -136,8 +146,12 @@ class asm_src_t:
         return ""
     def compile(self, src, target, working_dir):
         def do_compile():
-            cmd = "/opt/rocm/hcc/bin/clang" + " "
-            cmd += "-x assembler -target amdgcn--amdhsa -mcpu={} -mno-code-object-v3".format(self.arch) + " "
+            if USE_HIP_CLANG:
+                cmd = "/opt/rocm/llvm/bin/clang++" + " "
+                cmd += "-x assembler -target amdgcn--amdhsa -mcpu={} ".format(self.arch) + " "
+            else:
+                cmd = "/opt/rocm/hcc/bin/clang" + " "
+                cmd += "-x assembler -target amdgcn--amdhsa -mcpu={} -mno-code-object-v3".format(self.arch) + " "
             cmd += src + " "
             cmd += "-o {}".format(target)
             proc = subprocess.Popen(cmd,
@@ -160,8 +174,12 @@ class asm_src_t:
             if not os.path.exists(hsaco):
                 print("not exist {}, fail to disassembly".format(hsaco))
                 return
-            cmd = "/opt/rocm/hcc/bin/llvm-objdump" + " "
-            cmd += "-disassemble -mcpu={}".format(self.arch) + " "
+            if USE_HIP_CLANG:
+                cmd = "/opt/rocm/llvm/bin/llvm-objdump" + " "
+                cmd += "--disassemble --mcpu={}".format(self.arch) + " "
+            else:
+                cmd = "/opt/rocm/hcc/bin/llvm-objdump" + " "
+                cmd += "-disassemble -mcpu={}".format(self.arch) + " "
             cmd += hsaco + " "
             cmd += "> {}".format(output)
             proc = subprocess.Popen(cmd,
@@ -179,7 +197,72 @@ class asm_src_t:
         os.chdir(save_dir)
 
     def get_src(self):
-        asm_src='''\
+        if USE_HIP_CLANG:
+            asm_src='''\
+.text
+.global kernel_func
+.p2align 8
+.type kernel_func,@function
+
+.set k_bdx,     256     ; should be 256 in bdx
+.set k_end,     12
+.set v_end,     255     ; hard code to this to let occupancy to be 1.  65536 / 256 = 256
+.set s_blocks,  12
+.set s_end,     31
+.set inst_loop, 256
+
+kernel_func:
+    s_load_dword        s[s_blocks], s[0:1], 8
+    s_waitcnt           lgkmcnt(0)
+L_kernel_start:
+    s_sub_u32 s[s_blocks], s[s_blocks], 1
+    .itr = 0
+    .rept inst_loop
+        {bench_inst}
+        .itr = .itr+4
+        .if .itr > (v_end-4+1)
+            .itr = 0
+        .endif
+    .endr
+    s_cmp_gt_u32 s[s_blocks], 0
+    s_cbranch_scc1 L_kernel_start
+
+    s_endpgm
+
+.rodata
+.p2align 6
+.amdhsa_kernel kernel_func
+    .amdhsa_group_segment_fixed_size 0
+    .amdhsa_user_sgpr_kernarg_segment_ptr 1
+    .amdhsa_system_sgpr_workgroup_id_x 1
+    .amdhsa_system_vgpr_workitem_id 0
+    .amdhsa_next_free_vgpr 256
+    .amdhsa_next_free_sgpr 32
+    .amdhsa_ieee_mode 0
+    .amdhsa_dx10_clamp 0
+.end_amdhsa_kernel
+
+.amdgpu_metadata
+---
+amdhsa.version: [ 1, 0 ]
+amdhsa.kernels:
+  - .name: kernel_func
+    .symbol: kernel_func.kd
+    .sgpr_count: 32
+    .vgpr_count: 256
+    .kernarg_segment_align: 4
+    .kernarg_segment_size: 12
+    .group_segment_fixed_size: 0
+    .private_segment_fixed_size: 0
+    .wavefront_size: 64
+    .reqd_workgroup_size : [256, 1, 1]
+    .max_flat_workgroup_size: 256
+...
+.end_amdgpu_metadata
+
+'''.format(bench_inst=self.bench_inst)
+        else:
+            asm_src='''\
 .hsa_code_object_version 2,0
 .hsa_code_object_isa {arch_str}, "AMD", "AMDGPU"
 
