@@ -8,13 +8,11 @@
     if(err != hipSuccess){  \
         printf("[hiperror](%d) fail to call %s",(int)err,#call);    \
         exit(0);            \
-    }                       \
+    }                      \
 } while(0)
 
-
-#define HSACO "kernel.co"
+#define HSACO "kernel.hsaco"
 #define HSA_KERNEL "kernel_func"
-#define NUM_CU 64
 
 int main(int argc, char ** argv){
     hipModule_t module;
@@ -34,14 +32,13 @@ int main(int argc, char ** argv){
         num_cu = dev_prop.multiProcessorCount;
     }
 
-
     int total_loop=100;
     int warm_ups = 5;
     int i;
     int inst_blocks = 1024*16;
     int inst_loop = 256;
     int bdx = 256;
-    int gdx = num_cu;   //
+    int gdx = num_cu;
 
     struct {
         int * dummy_ptr;
@@ -74,6 +71,6 @@ int main(int argc, char ** argv){
     float time_per_loop = elapsed_ms/total_loop;
     float tips = (double)inst_loop*inst_blocks*num_cu*bdx/time_per_loop/1e9;
 
-    printf("CU:%d, TIPS:%.3f(2x:%.3f, 4x:%.3f), cost:%fms per loop\n", num_cu, tips, 2*tips, 4*tips, time_per_loop);
-
+    printf("CU\tinst\t\tTIPS\t2xTIPS\t4xTIPS\tcost(ms)\n");
+    printf("%d\t%s\t%.3f\t%.3f\t%.3f\t%.3fms\n", num_cu, "v_mac_f32", tips, 2*tips, 4*tips, time_per_loop);
 }
