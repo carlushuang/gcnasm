@@ -1,4 +1,4 @@
-*change `USE_HIP_CLANG` in bench_ips.py to `False` if use hcc to compile(aka before rocm 3.5). and set to `True` if use hip-clang*
+*will check hip-clang compiler (/opt/rocm/llvm/bin/clang++) to switch if use hip-clang or hcc*
 
 
 test `Instructions Per Second`(ips) for a specific inst. tested on [MI50](https://www.amd.com/en/products/professional-graphics/instinct-mi50)(13.3 Tflops for fp32):

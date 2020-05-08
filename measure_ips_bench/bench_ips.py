@@ -26,7 +26,7 @@ class cpp_src_t:
         if USE_HIP_CLANG:
             return " -L/opt/rocm/lib -L/opt/rocm/lib64" \
                 " -Wl,-rpath=/opt/rocm/lib -ldl -lm -lpthread " \
-                " -Wl,--whole-archive -lamdhip64 -lhsa-runtime64 -lhsakmt -Wl,--no-whole-archive"
+                " -Wl,--whole-archive -lhip_hcc -lhsa-runtime64 -lhsakmt -Wl,--no-whole-archive"
         else:
             return " -L/opt/rocm/hcc/lib -L/opt/rocm/lib -L/opt/rocm/lib64" \
                 " -Wl,-rpath=/opt/rocm/hcc/lib:/opt/rocm/lib -ldl -lm -lpthread -lhc_am " \
@@ -406,6 +406,10 @@ def bench():
         prepare_asm(k_ARCH, bench_inst)
         run_bench(bench_inst)
 
+def check_hip_clang():
+    # return True/False
+    return os.path.exists('/opt/rocm/llvm/bin/clang++')
+
 class test_suite:
     def __init__(self):
         pass
@@ -415,4 +419,5 @@ class test_suite:
 
 #gen_cpp()
 #gen_asm("9,0,6","v_fmac_f32 v[.itr], v[.itr+1], v[.itr+2]")
+USE_HIP_CLANG = check_hip_clang()
 bench()
