@@ -131,5 +131,10 @@ amdhsa.kernels:
     .wavefront_size: 64
     .reqd_workgroup_size : [256, 1, 1]
     .max_flat_workgroup_size: 256
+    .args:
+    - { .name: input,           .size: 8, .offset:   0, .value_kind: global_buffer, .value_type: f32, .address_space: global, .is_const: false}
+    - { .name: output,          .size: 8, .offset:   8, .value_kind: global_buffer, .value_type: f32, .address_space: global, .is_const: false}
+    - { .name: loops_per_block, .size: 4, .offset:  16, .value_kind: by_value, .value_type: i32}
+    - { .name: __pack0,         .size: 4, .offset:  20, .value_kind: by_value, .value_type: i32}
 ...
 .end_amdgpu_metadata
