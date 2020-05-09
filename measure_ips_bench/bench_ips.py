@@ -151,7 +151,8 @@ class asm_src_t:
                 cmd += "-x assembler -target amdgcn--amdhsa -mcpu={} ".format(self.arch) + " "
             else:
                 cmd = "/opt/rocm/hcc/bin/clang" + " "
-                cmd += "-x assembler -target amdgcn--amdhsa -mcpu={} -mno-code-object-v3".format(self.arch) + " "
+                #cmd += "-x assembler -target amdgcn--amdhsa -mcpu={} -mno-code-object-v3".format(self.arch) + " "
+                cmd += "-x assembler -target amdgcn--amdhsa -mcpu={} ".format(self.arch) + " "
             cmd += src + " "
             cmd += "-o {}".format(target)
             proc = subprocess.Popen(cmd,
@@ -197,7 +198,8 @@ class asm_src_t:
         os.chdir(save_dir)
 
     def get_src(self):
-        if USE_HIP_CLANG:
+        #if USE_HIP_CLANG:
+        if True:
             asm_src='''\
 .text
 .global kernel_func
@@ -257,6 +259,9 @@ amdhsa.kernels:
     .wavefront_size: 64
     .reqd_workgroup_size : [256, 1, 1]
     .max_flat_workgroup_size: 256
+    .args:
+    - {{ .name: dummy_ptr,   .size: 8, .offset:   0, .value_kind: global_buffer, .value_type: f32, .address_space: global, .is_const: false}}
+    - {{ .name: inst_blocks, .size: 4, .offset:   8, .value_kind: by_value, .value_type: i32}}
 ...
 .end_amdgpu_metadata
 
