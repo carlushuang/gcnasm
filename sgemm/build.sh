@@ -5,7 +5,7 @@ KSRC_ASM=sgemm128x128_v3.s
 #KSRC_ASM=sgemm128x128.s
 KOUT=kernel.co
 SRC=sgemm.cc
-USE_MKL=1
+USE_MKL=0
 TARGET=sgemm.exe
 CXXFLAGS=`/opt/rocm/bin/hipconfig --cpp_config`" -Wall -O2  -std=c++11 "
 LDFLAGS=" -L/opt/rocm/hcc/lib -L/opt/rocm/lib -L/opt/rocm/lib64"\
