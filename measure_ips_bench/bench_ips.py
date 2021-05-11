@@ -18,22 +18,22 @@ USE_HIP_CLANG = True
 class cpp_src_t:
     def get_cxxflags(self):
         if USE_HIP_CLANG:
-            return ' -D__HIP_PLATFORM_HCC__= -I/opt/rocm/hip/include -I/opt/rocm/hcc/include -I/opt/rocm/hsa/include'\
-                    ' -Wall -O2 -std=c++11 '
+            return ' -mcpu={} '.format(k_ARCH)
         else:
             return '`/opt/rocm/bin/hipconfig --cpp_config` -Wall -O2  -std=c++11 '
     def get_ldflags(self):
         if USE_HIP_CLANG:
-            return " -L/opt/rocm/lib -L/opt/rocm/lib64" \
-                " -Wl,-rpath=/opt/rocm/lib -ldl -lm -lpthread " \
-                " -Wl,--whole-archive -lhip_hcc -lhsa-runtime64 -lhsakmt -Wl,--no-whole-archive"
+            return ''
         else:
             return " -L/opt/rocm/hcc/lib -L/opt/rocm/lib -L/opt/rocm/lib64" \
                 " -Wl,-rpath=/opt/rocm/hcc/lib:/opt/rocm/lib -ldl -lm -lpthread -lhc_am " \
                 " -Wl,--whole-archive -lmcwamp -lhip_hcc -lhsa-runtime64 -lhsakmt -Wl,--no-whole-archive"
     def compile(self, src, target, working_dir):
         def do_compile():
-            cmd = "g++" + " "
+            if USE_HIP_CLANG:
+                cmd = "/opt/rocm/hip/bin/hipcc "
+            else:
+                cmd = "g++" + " "
             cmd += self.get_cxxflags() + " "
             cmd += src + " "
             cmd += self.get_ldflags() + " "
@@ -325,6 +325,7 @@ bench_inst_dict = [
     ("v_addc_co_u32",    "v[.itr], vcc, v[.itr+1], v[.itr+2], vcc"),
     ("v_or_b32",         "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_lshl_or_b32",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
+    ("v_lshlrev_b64",    "v[.itr:.itr+1], 8, v[.itr+2:.itr+3]"),
     ("v_mul_lo_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_mul_hi_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_mad_u32_u24",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
