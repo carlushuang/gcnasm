@@ -42,7 +42,7 @@ __device__ void amd_assembly_outer_product_1x4(float a,
 
 extern "C"
 __global__ __launch_bounds__(256,2)
-void hgemm_128x128(
+void hgemm_128x128_kpack2(
     unsigned char *  ptr_c,
     const unsigned char * __restrict__ ptr_a,
     const unsigned char * __restrict__ ptr_b,

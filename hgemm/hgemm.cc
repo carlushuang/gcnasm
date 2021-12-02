@@ -55,7 +55,7 @@ static inline bool valid_vector( const float* ref, const float16* pred, int n, d
     ;
 }
 
-void hgemm_cr(
+void hgemm_cr_kpack2(
     float*  ptr_c,
     const float*  __restrict__ ptr_a,
     const float*  __restrict__ ptr_b,
@@ -118,7 +118,7 @@ void rand_vector_2d(float* v, int row, int col, int ld){
 
 #define HSACO "hgemm128x128.hsaco"
 //#define HSACO "kernel_asm.co"
-#define HSA_KERNEL "hgemm_128x128"
+#define HSA_KERNEL "hgemm_128x128_kpack2"
 
 #define HGEMM_M 1024
 #define HGEMM_N 1024
@@ -222,7 +222,7 @@ int main(int argc, char ** argv){
     float gflops = (float)2*m*n*k/time_per_loop/(1e6);
     printf("m:%d,n:%d,k:%d,gflops:%.3f\n",m,n,k,gflops);
     if(validate){
-        hgemm_cr(host_c, host_a, host_b, alpha, m,n,k,lda/sizeof(float),ldb/sizeof(float),ldc/sizeof(float));
+        hgemm_cr_kpack2(host_c, host_a, host_b, alpha, m,n,k,lda/sizeof(float),ldb/sizeof(float),ldc/sizeof(float));
         HIP_CALL(hipMemcpy(fp16_c, dev_c, ldc*(n>>1), hipMemcpyDeviceToHost));
         bool res = valid_vector( host_c, fp16_c, m*n );
         printf(",%s",res?"valid":"fail");
