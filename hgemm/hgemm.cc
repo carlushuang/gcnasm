@@ -14,6 +14,7 @@
 #endif
 #define PER_PIXEL_CHECK
 #define ASSERT_ON_FAIL
+#define ASM_PRINT
 
 
 #ifndef ABS
@@ -28,7 +29,9 @@ static inline bool valid_vector( const float* ref, const float16* pred, int n, d
 #ifdef PER_PIXEL_CHECK
     int pp_err = 0;
 #endif
-    for( int i=0; i<n; ++i ){
+    int i_start = 0, i_end=16384;
+    int i_num = i_end - i_start;
+    for( int i=i_start; i<i_end; ++i ){
         double ri=(double)ref[i];
         double pi=(double)pred[i];
         double d=ri-pi;
@@ -36,18 +39,20 @@ static inline bool valid_vector( const float* ref, const float16* pred, int n, d
         double rr=2.0*ri*ri;
         s0+=dd;
         s1+=rr;
+        
 #ifdef PER_PIXEL_CHECK
         double delta = ABS(ri-pi)/ri;
         if(delta>1e-3){
 #ifdef ASSERT_ON_FAIL
-            if(pp_err<100)
-                printf("diff at %4d, ref:%lf, pred:%lf(0x%04x), d:%lf\n",i,ri,pi,((uint16_t*)pred)[i],delta);
+            //if(pp_err<100)printf("diff at %4d, ref:%lf, pred:%lf(0x%04x), d:%lf\n",i,ri,pi,((uint16_t*)pred)[i],delta);
 #endif
             pp_err++;
         }
 #endif
     }
-    //printf("nrms:%lf, s0:%lf, s1:%lf\n",sqrt(s0/s1),s0,s1);
+    //printf("pp_crr:%d, pp_err:%d, crr_ratio:%.3f, nrms:%lf, s0:%lf, s1:%lf\n",i_num-pp_err, pp_err, (float)(i_num-pp_err)/(float)i_num, sqrt(s0/s1),s0,s1);
+    printf("pp_crr:%d, pp_err:%d, crr_ratio:%.3f\n",i_num-pp_err, pp_err, (float)(i_num-pp_err)/(float)i_num);
+
     return (sqrt(s0/s1)<nrms)
 #ifdef PER_PIXEL_CHECK
         && (pp_err==0)
@@ -111,13 +116,13 @@ void rand_vector_2d(float* v, int row, int col, int ld){
         for(c=0;c<col;c++){
             v[r*ld+c] = ((float)(rand() % 100)) / 100.0f;
             //v[r*ld+c] = ((float)(r % 100)+1) / 100.0f + ((float)(c % 100)+1) / 1000.0f;
-            //v[r*ld+c] = 0.1;
+            //v[r*ld+c] = 1.0;
         }
     }
 }
 
-#define HSACO "hgemm128x128.hsaco"
-//#define HSACO "kernel_asm.co"
+//#define HSACO "hgemm128x128.hsaco"
+#define HSACO "kernel_asm.co"
 #define HSA_KERNEL "hgemm_128x128_kpack2"
 
 #define HGEMM_M 1024
@@ -164,14 +169,18 @@ int main(int argc, char ** argv){
     HIP_CALL(hipMalloc(&dev_a, lda*(k>>1)));
     HIP_CALL(hipMalloc(&dev_b, ldb*(k>>1)));
     HIP_CALL(hipMalloc(&dev_c, ldc*(n>>1)));
-    
     //fp16 cpy to device
     HIP_CALL(hipMemcpy(dev_a, fp16_a, lda*(k>>1), hipMemcpyHostToDevice));
     HIP_CALL(hipMemcpy(dev_b, fp16_b, ldb*(k>>1), hipMemcpyHostToDevice));
 
-    int total_loop=100;
+    int total_loop=20;
     int warm_ups = 5;
     int i;
+    
+    //debug pointer
+    float *host_print, *print;
+    host_print = (float*)malloc(bdx*8);
+    HIP_CALL(hipMalloc(&print, bdx*8));
 
     struct __attribute__((packed)) {
         void*  ptr_c;
@@ -184,6 +193,7 @@ int main(int argc, char ** argv){
         unsigned int lda;
         unsigned int ldb;
         unsigned int ldc;
+        void*  print;
     } args;
     size_t arg_size = sizeof(args);
     args.ptr_c  = (void*)dev_c;
@@ -196,15 +206,27 @@ int main(int argc, char ** argv){
     args.lda    = lda;
     args.ldb    = ldb;
     args.ldc    = ldc;
+    args.print  = (void*)print;
     void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, &args, HIP_LAUNCH_PARAM_BUFFER_SIZE,
                     &arg_size, HIP_LAUNCH_PARAM_END};
     
-    for(i=0;i<warm_ups;i++)
+    for(i=0;i<warm_ups;i++){
         HIP_CALL(hipModuleLaunchKernel(kernel_func, gdx,1,1, bdx,1,1,  0, 0, NULL, (void**)&config ));
+        //std::cout<<"safe here"<<std::endl;
+    }
+
+#ifdef ASM_PRINT
+    int max_i=256;
+    HIP_CALL(hipMemcpy(host_print, print, 8*max_i, hipMemcpyDeviceToHost));
+    for(int i=0; i<max_i; i++){
+        //printf("Thread%d, PrintVal:0x%x\n",((int*) host_print)[2*i], ((uint32_t*)host_print)[2*i+1]);
+        //std::cout<<"Thread"<<((int*) host_print)[2*i]<<", PrintVal1:"<<(((float16*)host_print)[4*i+2])<<
+        //", PrintVal2:"<<( ( (float16*)host_print )[4*i+3] )<<std::endl;
+    }    
+#endif
 
     hipEventCreate(&evt_00);
     hipEventCreate(&evt_11);
-
     hipDeviceSynchronize();
     hipEventRecord(evt_00, NULL);
     for(i=0;i<total_loop;i++)
@@ -235,10 +257,12 @@ int main(int argc, char ** argv){
     free(fp16_a);
     free(fp16_b);
     free(fp16_c);
+    free(host_print);
     
     hipFree(dev_a);
     hipFree(dev_b);
     hipFree(dev_c);
+    hipFree(print);
 
     //printf("CU:%d, TIPS:%.3f(2x:%.3f, 4x:%.3f), cost:%fms per loop\n", num_cu, tips, 2*tips, 4*tips, time_per_loop);
 
