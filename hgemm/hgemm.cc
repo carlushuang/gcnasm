@@ -14,7 +14,6 @@
 #endif
 #define PER_PIXEL_CHECK
 #define ASSERT_ON_FAIL
-#define ASM_PRINT
 
 
 #ifndef ABS
@@ -177,11 +176,12 @@ int main(int argc, char ** argv){
     int warm_ups = 5;
     int i;
 
+#ifdef ASM_PRINT
     //debug pointer
     float *host_print, *print;
     host_print = (float*)malloc(bdx*8);
     HIP_CALL(hipMalloc(&print, bdx*8));
-
+#endif
     struct __attribute__((packed)) {
         void*  ptr_c;
         void*  ptr_a;
@@ -193,7 +193,9 @@ int main(int argc, char ** argv){
         unsigned int lda;
         unsigned int ldb;
         unsigned int ldc;
+        #ifdef ASM_PRINT
         void*  print;
+        #endif
     } args;
     size_t arg_size = sizeof(args);
     args.ptr_c  = (void*)dev_c;
@@ -206,7 +208,9 @@ int main(int argc, char ** argv){
     args.lda    = lda;
     args.ldb    = ldb;
     args.ldc    = ldc;
+    #ifdef ASM_PRINT
     args.print  = (void*)print;
+    #endif
     void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, &args, HIP_LAUNCH_PARAM_BUFFER_SIZE,
                     &arg_size, HIP_LAUNCH_PARAM_END};
     
@@ -257,13 +261,15 @@ int main(int argc, char ** argv){
     free(fp16_a);
     free(fp16_b);
     free(fp16_c);
-    free(host_print);
     
     hipFree(dev_a);
     hipFree(dev_b);
     hipFree(dev_c);
-    hipFree(print);
 
+#ifdef ASM_PRINT
+    free(host_print);
+    hipFree(print);
+#endif 
     //printf("CU:%d, TIPS:%.3f(2x:%.3f, 4x:%.3f), cost:%fms per loop\n", num_cu, tips, 2*tips, 4*tips, time_per_loop);
 
 }
