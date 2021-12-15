@@ -29,7 +29,7 @@ static inline bool valid_vector( const float* ref, const float16* pred, int n, d
 #ifdef PER_PIXEL_CHECK
     int pp_err = 0;
 #endif
-    int i_start = 0, i_end=16384;
+    int i_start = 0, i_end=n;
     int i_num = i_end - i_start;
     for( int i=i_start; i<i_end; ++i ){
         double ri=(double)ref[i];
@@ -44,14 +44,14 @@ static inline bool valid_vector( const float* ref, const float16* pred, int n, d
         double delta = ABS(ri-pi)/ri;
         if(delta>1e-3){
 #ifdef ASSERT_ON_FAIL
-            //if(pp_err<100)printf("diff at %4d, ref:%lf, pred:%lf(0x%04x), d:%lf\n",i,ri,pi,((uint16_t*)pred)[i],delta);
+            if(pp_err<100)
+            printf("diff at %4d, ref:%lf, pred:%lf(0x%04x), d:%lf\n",i,ri,pi,((uint16_t*)pred)[i],delta);
 #endif
             pp_err++;
         }
 #endif
     }
-    //printf("pp_crr:%d, pp_err:%d, crr_ratio:%.3f, nrms:%lf, s0:%lf, s1:%lf\n",i_num-pp_err, pp_err, (float)(i_num-pp_err)/(float)i_num, sqrt(s0/s1),s0,s1);
-    printf("pp_crr:%d, pp_err:%d, crr_ratio:%.3f\n",i_num-pp_err, pp_err, (float)(i_num-pp_err)/(float)i_num);
+    printf("pp_crr:%d, pp_err:%d, crr_ratio:%.3f, nrms:%lf, s0:%lf, s1:%lf\n",i_num-pp_err, pp_err, (float)(i_num-pp_err)/(float)i_num, sqrt(s0/s1),s0,s1);
 
     return (sqrt(s0/s1)<nrms)
 #ifdef PER_PIXEL_CHECK
@@ -176,7 +176,7 @@ int main(int argc, char ** argv){
     int total_loop=20;
     int warm_ups = 5;
     int i;
-    
+
     //debug pointer
     float *host_print, *print;
     host_print = (float*)malloc(bdx*8);
