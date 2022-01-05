@@ -14,7 +14,8 @@
 #endif
 #define PER_PIXEL_CHECK
 #define ASSERT_ON_FAIL
-
+#define MFMA
+//#define ASM_PRINT
 
 #ifndef ABS
 #define ABS(x) ((x)>0?(x):-1*(x))
@@ -79,12 +80,25 @@ void hgemm_cr_kpack2(
     unsigned int im,in,ik;
     for(in=0;in<n;in++){
         for(im=0;im<m;im++){
+            #ifndef MFMA
             float c = .0;
             for(ik=0;ik<(k>>1);ik++){
                 c += ptr_a[ik*lda*2+im*2]*ptr_b[ik*ldb*2+in*2];
                 c += ptr_a[ik*lda*2+im*2+1]*ptr_b[ik*ldb*2+in*2+1];
             }
             ptr_c[in*ldc+im] = alpha*c;
+            #endif
+
+            #ifdef MFMA
+            float c = .0;
+            for(ik=0;ik<(k>>2);ik++){
+                c += ptr_a[ik*4*lda+im*4+0]*ptr_b[ik*4*ldb+in*4+0]
+                   + ptr_a[ik*4*lda+im*4+1]*ptr_b[ik*4*ldb+in*4+1]
+                   + ptr_a[ik*4*lda+im*4+2]*ptr_b[ik*4*ldb+in*4+2]
+                   + ptr_a[ik*4*lda+im*4+3]*ptr_b[ik*4*ldb+in*4+3];
+            }
+            ptr_c[in*ldc+im] = alpha*c;
+            #endif
         }
     }
 #endif
@@ -122,9 +136,11 @@ void rand_vector_2d(float* v, int row, int col, int ld){
 
 //#define HSACO "hgemm128x128.hsaco"
 #define HSACO "kernel_asm.co"
-#define HSA_KERNEL "hgemm_128x128_kpack2"
+//#define HSACO "hgemm_128x128_kpack2"
+#define HSA_KERNEL "hgemm_128x128_kpack4"
 
-#define HGEMM_M 1024
+
+#define HGEMM_M 960
 #define HGEMM_N 1024
 #define HGEMM_K 1024
 
@@ -137,7 +153,7 @@ int main(int argc, char ** argv){
     HIP_CALL(hipModuleLoad(&module, HSACO));
     HIP_CALL(hipModuleGetFunction(&kernel_func, module, HSA_KERNEL));
 
-    int validate = get_int("VALIDATE", 1);
+    int validate = get_int("VALIDATE", 0);
     int m = get_int("M", HGEMM_M);
     int n = get_int("N", HGEMM_N);
     int k = get_int("K", HGEMM_K);
@@ -172,8 +188,8 @@ int main(int argc, char ** argv){
     HIP_CALL(hipMemcpy(dev_a, fp16_a, lda*(k>>1), hipMemcpyHostToDevice));
     HIP_CALL(hipMemcpy(dev_b, fp16_b, ldb*(k>>1), hipMemcpyHostToDevice));
 
-    int total_loop=20;
-    int warm_ups = 5;
+    int total_loop=10;
+    int warm_ups = 10;
     int i;
 
 #ifdef ASM_PRINT
@@ -223,7 +239,8 @@ int main(int argc, char ** argv){
     int max_i=256;
     HIP_CALL(hipMemcpy(host_print, print, 8*max_i, hipMemcpyDeviceToHost));
     for(int i=0; i<max_i; i++){
-        //printf("Thread%d, PrintVal:0x%x\n",((int*) host_print)[2*i], ((uint32_t*)host_print)[2*i+1]);
+        if(((uint32_t*)host_print)[2*i+1]!=0x5c005c00)
+        printf("Thread%d, PrintVal:0x%x\n",((int*) host_print)[2*i], ((uint32_t*)host_print)[2*i+1]);
         //std::cout<<"Thread"<<((int*) host_print)[2*i]<<", PrintVal1:"<<(((float16*)host_print)[4*i+2])<<
         //", PrintVal2:"<<( ( (float16*)host_print )[4*i+3] )<<std::endl;
     }    
