@@ -58,6 +58,7 @@ class cpp_src_t:
         src = '''\
 #include <stdio.h>
 #include <hip/hip_runtime.h>
+#include <hip/hip_ext.h>
 #include <random>
 #include <iostream>
 
@@ -108,23 +109,36 @@ int main(int argc, char ** argv){{
                     &arg_size, HIP_LAUNCH_PARAM_END}};
 
     for(i=0;i<warm_ups;i++)
-        HIP_CALL(hipModuleLaunchKernel(kernel_func, gdx,1,1, bdx,1,1,  0, 0, NULL, (void**)&config ));
+    {{
+        hipEvent_t start;
+        hipEvent_t stop;
+        hipEventCreate(&start);
+        hipEventCreate(&stop);
 
-    hipEventCreate(&evt_00);
-    hipEventCreate(&evt_11);
+        HIP_CALL(hipHccModuleLaunchKernel(kernel_func, gdx*bdx,1,1, bdx,1,1,  0, 0, NULL, (void**)&config, start, stop));
 
-    hipCtxSynchronize();
-    hipEventRecord(evt_00, NULL);
+        hipEventDestroy(start);
+        hipEventDestroy(stop);
+    }}
+
+    float elapsed_ms = 0;
     for(i=0;i<total_loop;i++)
-        HIP_CALL(hipModuleLaunchKernel(kernel_func, gdx,1,1, bdx,1,1,  0, 0, NULL, (void**)&config ));
+    {{
+        hipEvent_t start;
+        hipEvent_t stop;
+        hipEventCreate(&start);
+        hipEventCreate(&stop);
 
-    float elapsed_ms;
-    hipEventRecord(evt_11, NULL);
-    hipEventSynchronize(evt_11);
-    hipCtxSynchronize();
-    hipEventElapsedTime(&elapsed_ms, evt_00, evt_11);
-    hipEventDestroy(evt_00);
-    hipEventDestroy(evt_11);
+        HIP_CALL(hipHccModuleLaunchKernel(kernel_func, gdx*bdx,1,1, bdx,1,1,  0, 0, NULL, (void**)&config, start, stop));
+        
+        float ms;
+        hipEventSynchronize(stop);
+        hipEventElapsedTime(&ms, start, stop);
+        hipEventDestroy(start);
+        hipEventDestroy(stop);
+        
+        elapsed_ms += ms;
+    }}
 
     float time_per_loop = elapsed_ms/total_loop;
     float tips = (double)inst_loop*inst_blocks*num_cu*bdx/time_per_loop/1e9;
