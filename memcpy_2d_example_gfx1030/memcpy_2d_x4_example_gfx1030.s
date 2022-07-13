@@ -33,9 +33,10 @@ memcpy_2d_x4_example_gfx1030:
     s_load_dword   s[s_bdx],                      s[s_karg:s_karg+1],     24
     s_load_dword   s[s_padding],                  s[s_karg:s_karg+1],     28
 
-    s_mul_i32 s[s_bdx+1], 256,  4                ; blockDim * 4
+    s_waitcnt           lgkmcnt(0)
+
+    s_mul_i32 s[s_bdx+1], s[s_bdx],  4                ; blockDim * 4
     s_mul_i32 s[s_tmp+1], s[s_bx], s[s_bdx+1]    ; blockIdx * blockDim * 4
-    ; s_mul_i32 s[s_tmp+1], s[s_bx], 256*4       ; blockIdx * blockDim * 4
     v_lshlrev_b32 v[v_tmp], 2, v0                ; threadIdx * 4
     v_add_nc_u32 v[v_offset+0], s[s_tmp+1], v[v_tmp]    ; (blockIdx*blockDim + threadIdx) * 4
     v_lshlrev_b32 v[v_offset+0], 2, v[v_offset+0]
