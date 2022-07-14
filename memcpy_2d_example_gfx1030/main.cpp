@@ -11,8 +11,8 @@
     }                       \
 } while(0)
 
-#define HSACO "memcpy_2d_x4_example_gfx1030.hsaco"
-#define HSA_KERNEL "memcpy_2d_x4_example_gfx1030"
+#define HSACO "memcpy_2d_example_gfx1030.hsaco"
+#define HSA_KERNEL "memcpy_2d_example_gfx1030"
 
 #define PER_PIXEL_CHECK
 #define ASSERT_ON_FAIL
@@ -175,6 +175,7 @@ int main(int argc, char **argv)
     }
 
     float time_per_loop_ms = elapsed_ms / total_loop;
+    float total_time = elapsed_ms;
     float gbps = total_floats * 2 * sizeof(float) / time_per_loop_ms / 1000 / 1000;
     printf("gbps:%f\n",gbps);
 
