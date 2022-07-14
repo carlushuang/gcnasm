@@ -5,13 +5,13 @@ Here rows and padding can pass in any value, while cols currently only support m
 
 ## build and run
 Go to the benchmark root and build by
-'''
+```
 $ ./run.sh
-'''
+```
 Then you can run by
-'''
+```
 $ ./out.exe params.config
-'''
+```
 
 ## conclusion
 I have tested in different paramter combination, which shows:
