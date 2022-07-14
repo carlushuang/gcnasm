@@ -1,9 +1,9 @@
-# memcpy 2d benchmark
+# Memcpy 2D Benchmark
 
 This is a benchmark for memcpy-2d-1Dword example on gfx1030. You can specify matrix parameters (rows, cols, padding) by modifying params.config. 
 Here rows and padding can pass in any value, while cols currently only support multiples of 2048 (2K).
 
-## build and run
+## Build and Run
 Go to the benchmark root and build by
 ```
 $ ./run.sh
@@ -13,7 +13,7 @@ Then you can run by
 $ ./out.exe params.config
 ```
 
-## conclusion
+## Conclusion
 I have tested in different paramter combination, which shows:
 | Rows | Cols | Padding | GBPS |
 | :--: | :--: | :-----: | :--: |
