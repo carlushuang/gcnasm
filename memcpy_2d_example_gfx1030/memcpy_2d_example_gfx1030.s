@@ -35,9 +35,9 @@ memcpy_2d_example_gfx1030:
 
     s_waitcnt           lgkmcnt(0)
 
-    s_mul_i32 s[s_bdx+1], s[s_bdx],  4                ; blockDim * 4
-    s_mul_i32 s[s_tmp+1], s[s_bx], s[s_bdx+1]    ; blockIdx * blockDim * 4
-    v_lshlrev_b32 v[v_tmp], 2, v0                  ; threadIdx * 4
+    s_mul_i32 s[s_bdx+1], s[s_bdx],  4                  ; blockDim * 4
+    s_mul_i32 s[s_tmp+1], s[s_bx], s[s_bdx+1]           ; blockIdx * blockDim * 4
+    v_lshlrev_b32 v[v_tmp], 2, v0                       ; threadIdx * 4
     v_add_nc_u32 v[v_offset+0], s[s_tmp+1], v[v_tmp]    ; (blockIdx*blockDim + threadIdx) * 4
 
     s_waitcnt           lgkmcnt(0)
