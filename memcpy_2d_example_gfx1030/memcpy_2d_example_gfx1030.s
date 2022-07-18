@@ -11,7 +11,7 @@ memcpy_2d_example_gfx1030:
 .set s_ptr_out,         6
 .set s_rows,            8
 .set s_gdx,             10
-.set s_bdx,             20
+.set s_bdx,             12
 .set s_padding,         14
 .set s_stride_block,    16
 .set s_tmp,             18
@@ -42,7 +42,8 @@ memcpy_2d_example_gfx1030:
 
     s_waitcnt           lgkmcnt(0)
 
-    s_mul_i32 s[s_tmp],  s[s_gdx],  256*4     ; gridDim * blockDim * 4
+    
+    s_mul_i32 s[s_tmp],  s[s_gdx],  s[s_bdx+1]    ; gridDim * blockDim * 4
     v_add_nc_u32 v[v_offset+1],    s[s_tmp],   v[v_offset+0]
     v_add_nc_u32 v[v_offset+2],    s[s_tmp],   v[v_offset+1]
     v_add_nc_u32 v[v_offset+3],    s[s_tmp],   v[v_offset+2]
@@ -117,7 +118,7 @@ amdhsa.kernels:
     .group_segment_fixed_size: 0
     .private_segment_fixed_size: 0
     .wavefront_size: 32 ;warpsize
-    .reqd_workgroup_size : [256, 1, 1]
+    ; .reqd_workgroup_size : [256, 1, 1]
     .max_flat_workgroup_size: 256 ;gridsize
     .args:
     - { .name: input,           .size: 8, .offset:   0, .value_kind: global_buffer, .value_type: f32, .address_space: global, .is_const: false}
