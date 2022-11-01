@@ -114,6 +114,7 @@ __global__ void simple_workgroup_reduce(int * p_cnt, float* p_in, float * p_out)
     float o_data = llvm_amdgcn_raw_buffer_load_fp32(o_res, threadIdx.x * sizeof(float), 0, 2);
     float i_data = llvm_amdgcn_raw_buffer_load_fp32(i_res, threadIdx.x * sizeof(float), 0, 0);
     llvm_amdgcn_raw_buffer_store_fp32(i_data + o_data, o_res,  threadIdx.x * sizeof(float), 0, 2);
+    __threadfence();
 
     // atomicAdd(p_cnt, (int)1); // atomic add seems fail... will stuck forever
     atomicCAS(p_cnt, blockIdx.x, blockIdx.x+1);
