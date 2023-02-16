@@ -6,9 +6,15 @@
 #include <unistd.h>
 #include <stdint.h>
 
+#ifdef __NVCC__
+using fp32 = __attribute__((__vector_type__(1))) float;
+using fp32x2 = __attribute__((__vector_type__(2))) float;
+using fp32x4 = __attribute__((__vector_type__(4))) float;
+#else
 using fp32 = __attribute__((__ext_vector_type__(1))) float;
 using fp32x2 = __attribute__((__ext_vector_type__(2))) float;
 using fp32x4 = __attribute__((__ext_vector_type__(4))) float;
+#endif
 
 #define BLOCK_SIZE 256
 template<typename T>
