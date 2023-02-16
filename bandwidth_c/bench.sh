@@ -1,10 +1,10 @@
 #!/bin/sh
-EXE=memcpy_kernel.rocm
-#EXE=memcpy_kernel.cuda
+EXE=memcpy_kernel.exe
 
-DWORDS=9633792      ./${EXE} # 3*64*224*224
-DWORDS=16777216     ./${EXE} # 64M
-DWORDS=67108864     ./${EXE} # 256M
-DWORDS=134217728    ./${EXE} # 512M
-DWORDS=268435456    ./${EXE} # 1G
-DWORDS=402653184    ./${EXE} # 1.5G
+./${EXE} 9633792 # 3*64*224*224
+./${EXE} 16777216 # 64M
+./${EXE} 67108864 # 256M
+./${EXE} 134217728 # 512M
+./${EXE} 268435456 # 1G
+#./${EXE} 402653184 # 1.5G
+
