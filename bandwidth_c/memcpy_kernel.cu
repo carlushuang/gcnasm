@@ -7,9 +7,9 @@
 #include <stdint.h>
 
 #ifdef __NVCC__
-using fp32 = __attribute__((__vector_type__(1))) float;
-using fp32x2 = __attribute__((__vector_type__(2))) float;
-using fp32x4 = __attribute__((__vector_type__(4))) float;
+using fp32 =  float;
+using fp32x2 = float2;
+using fp32x4 = float4;
 #else
 using fp32 = __attribute__((__ext_vector_type__(1))) float;
 using fp32x2 = __attribute__((__ext_vector_type__(2))) float;
