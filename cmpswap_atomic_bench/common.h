@@ -17,7 +17,12 @@ __device__ half2_t llvm_amdgcn_raw_buffer_atomic_add_fp16x2(
     index_t soffset,
     index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.atomic.fadd.v2f16");
 
-
+__device__ float llvm_amdgcn_raw_buffer_atomic_add_fp32(
+    float vdata,
+    int32x4_t rsrc,
+    index_t voffset,
+    index_t soffset,
+    index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.atomic.fadd.f32");
 
 template <typename T>
 union BufferResource

@@ -86,12 +86,14 @@ void block_reduce_kernel_fp16x2_atomic(void * __restrict__ output, void* __restr
     }
 
     if(o_idx < output_dwords){
-        int32x4_t res = make_wave_buffer_resource(p_out + o_idx);
-        llvm_amdgcn_raw_buffer_atomic_add_fp16x2(p_in[i_idx], res, 0, 0, 0);
+        // int32x4_t res = make_wave_buffer_resource(p_out + o_idx);
+        // llvm_amdgcn_raw_buffer_atomic_add_fp16x2(p_in[i_idx], res, 0, 0, 0);
+
+        __builtin_amdgcn_global_atomic_fadd_v2f16(p_out + o_idx, p_in[i_idx]);
     }
 
     // atomicAdd(reinterpret_cast<float*>(p_out + o_idx), float(p_in[i_idx].x));
-}
+}   
 
 struct fp16x2_cpu_t {
     half_float::half x;
