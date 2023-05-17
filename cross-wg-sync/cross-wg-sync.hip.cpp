@@ -14,8 +14,9 @@
 #define ABS(x) ((x)>0?(x):-1*(x))
 #endif
 
-#define BLOCK_SIZE 256
-#define GRID_SIZE 8
+#define WARP_SIZE 64  // need runtime detecting for correct value
+#define BLOCK_SIZE 64 
+#define GRID_SIZE (104 * 2)
 
 #define PER_PIXEL_CHECK
 static inline bool valid_vector( const float* ref, const float * pred, int n, double nrms = 1e-3 )
@@ -26,7 +27,7 @@ static inline bool valid_vector( const float* ref, const float * pred, int n, do
     int pp_err = 0;
 #endif
     int i_start = 0, i_end=n;
-    int i_num = i_end - i_start;
+    // int i_num = i_end - i_start;
     for( int i=i_start; i<i_end; ++i ){
         double ri=(double)ref[i];
         double pi=(double)pred[i];
@@ -85,11 +86,22 @@ __device__ int32x4_t amdgcn_make_buffer_resource(const T* addr)
     return buffer_resource.content;
 }
 
+#define AMDGCN_BUFFER_DEFAULT   0
+#define AMDGCN_BUFFER_GLC       1
+#define AMDGCN_BUFFER_SLC       2
+#define AMDGCN_BUFFER_GLC_SLC   3
+
 __device__ float
 llvm_amdgcn_raw_buffer_load_fp32(int32x4_t srsrc,
                                  int32_t voffset,
                                  int32_t soffset,
                                  int32_t glc_slc) __asm("llvm.amdgcn.raw.buffer.load.f32");
+
+__device__ uint32_t
+llvm_amdgcn_raw_buffer_load_u32(int32x4_t srsrc,
+                                 int32_t voffset,
+                                 int32_t soffset,
+                                 int32_t glc_slc) __asm("llvm.amdgcn.raw.buffer.load.u32");
 
 __device__ void
 llvm_amdgcn_raw_buffer_store_fp32(float vdata,
@@ -97,27 +109,89 @@ llvm_amdgcn_raw_buffer_store_fp32(float vdata,
                                   int32_t voffset,
                                   int32_t soffset,
                                   int32_t glc_slc) __asm("llvm.amdgcn.raw.buffer.store.f32");
+
+// always use tid = 0 to wait
+// assume initial value is zero
+struct workgroup_barrier {
+    __device__ workgroup_barrier(uint32_t * ptr) :
+        base_ptr(ptr)
+    {}
+
+    __device__ uint32_t aquire(int32_t offset)
+    {
+#if 0
+        float d = llvm_amdgcn_raw_buffer_load_fp32(
+                        get_res(),
+                        0,
+                        offset,
+                        AMDGCN_BUFFER_GLC);
+        union cvt {
+            float f32;
+            uint32_t u32;
+        };
+        cvt x;
+        x.f32 = d;
+        return x.u32;
+#endif
+
+        return __atomic_load_n(base_ptr + offset, __ATOMIC_RELAXED);
+    }
+
+    __device__ void wait_eq(int32_t offset, uint32_t value)
+    {
+        if(threadIdx.x == 0){
+            //#pragma unroll 1
+            while(aquire(offset) != value){}
+        }
+        __syncthreads();
+    }
+
+    __device__ void wait_lt(int32_t offset, uint32_t value)
+    {
+        if(threadIdx.x == 0){
+            //#pragma unroll 1
+            while(aquire(offset) < value){}
+        }
+        __syncthreads();
+    }
+
+    __device__ void inc(int32_t offset)
+    {
+        __syncthreads();
+        if(threadIdx.x == 0){
+            atomicAdd(base_ptr + offset, 1);
+        }
+    }
+
+    __device__ int32x4_t get_res() const
+    {
+        return amdgcn_make_buffer_resource(base_ptr);
+    }
+
+    uint32_t * base_ptr;
+};
+
 /*
 * simple example to reduce element between workgroups.
 * number of groups equal to GRID_SIZE
 * input GRID_SIZE * 256, output 256
 * 
 */
-__global__ void simple_workgroup_reduce(int * p_cnt, float* p_in, float * p_out)
+__global__ void simple_workgroup_reduce(uint32_t * p_cnt, float* p_in, float * p_out)
 {
-    while(atomicCAS(p_cnt, blockIdx.x, blockIdx.x) != blockIdx.x) ;
+    workgroup_barrier barrier(p_cnt);
+    barrier.wait_eq(0, blockIdx.x);
 
     int32x4_t i_res = amdgcn_make_buffer_resource<float>(p_in + blockIdx.x * BLOCK_SIZE);
     int32x4_t o_res = amdgcn_make_buffer_resource<float>(p_out);
 
     // slc_glc: 0-no, 1-glc, 2-slc, 3-glc+slc
-    float o_data = llvm_amdgcn_raw_buffer_load_fp32(o_res, threadIdx.x * sizeof(float), 0, 2);
-    float i_data = llvm_amdgcn_raw_buffer_load_fp32(i_res, threadIdx.x * sizeof(float), 0, 0);
-    llvm_amdgcn_raw_buffer_store_fp32(i_data + o_data, o_res,  threadIdx.x * sizeof(float), 0, 2);
-    __threadfence();
+    float o_data = llvm_amdgcn_raw_buffer_load_fp32(o_res, threadIdx.x * sizeof(float), 0, AMDGCN_BUFFER_GLC);
+    float i_data = llvm_amdgcn_raw_buffer_load_fp32(i_res, threadIdx.x * sizeof(float), 0, AMDGCN_BUFFER_DEFAULT);
+    float result = i_data + o_data;
+    llvm_amdgcn_raw_buffer_store_fp32(result, o_res,  threadIdx.x * sizeof(float), 0, AMDGCN_BUFFER_GLC);
 
-    // atomicAdd(p_cnt, (int)1); // atomic add seems fail... will stuck forever
-    atomicCAS(p_cnt, blockIdx.x, blockIdx.x+1);
+    barrier.inc(0);
 }
 
 
@@ -141,32 +215,36 @@ void rand_vector(float* v, int num){
     }
 }
 
-int main()
+int main(int argc, char ** argv)
 {
-    int * dev_cnt;
+    int reduce_groups = GRID_SIZE;
+    if(argc >= 2) {
+        reduce_groups = std::atoi(argv[1]);
+    }
+    uint32_t * dev_cnt;
     float * dev_in;
     float * dev_out;
-    
-    int i_sz = BLOCK_SIZE * GRID_SIZE;
+
+    int i_sz = BLOCK_SIZE * reduce_groups;
     int o_sz = BLOCK_SIZE;
 
     float * host_in = new float[i_sz];
     float * host_out = new float[o_sz];
     float * host_out_dev = new float[o_sz];
 
-    HIP_CALL(hipMalloc(&dev_cnt,  1 * sizeof(int)));
+    HIP_CALL(hipMalloc(&dev_cnt,  1 * sizeof(uint32_t)));
     HIP_CALL(hipMalloc(&dev_in,  i_sz * sizeof(float)));
     HIP_CALL(hipMalloc(&dev_out,  o_sz * sizeof(float)));
 
-    hipMemset(dev_cnt, 0, 1 * sizeof(int));
+    hipMemset(dev_cnt, 0, 1 * sizeof(uint32_t));
     hipMemset(dev_out, 0, o_sz * sizeof(float));
 
     rand_vector(host_in, i_sz);
     HIP_CALL(hipMemcpy(dev_in, host_in, i_sz* sizeof(float), hipMemcpyHostToDevice));
 
-    host_workgroup_reduce(host_in, host_out, GRID_SIZE, BLOCK_SIZE);
+    host_workgroup_reduce(host_in, host_out, reduce_groups, BLOCK_SIZE);
 
-    simple_workgroup_reduce<<<dim3(GRID_SIZE), dim3(BLOCK_SIZE), 0, 0>>>(dev_cnt, dev_in, dev_out);
+    simple_workgroup_reduce<<<dim3(reduce_groups), dim3(BLOCK_SIZE), 0, 0>>>(dev_cnt, dev_in, dev_out);
     HIP_CALL(hipMemcpy(host_out_dev, dev_out,  o_sz * sizeof(float), hipMemcpyDeviceToHost));
 
     bool valid = valid_vector(host_out, host_out_dev, o_sz);
