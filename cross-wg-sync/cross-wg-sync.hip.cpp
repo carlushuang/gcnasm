@@ -86,6 +86,7 @@ __device__ int32x4_t amdgcn_make_buffer_resource(const T* addr)
     return buffer_resource.content;
 }
 
+// slc_glc: 0-no, 1-glc, 2-slc, 3-glc+slc
 #define AMDGCN_BUFFER_DEFAULT   0
 #define AMDGCN_BUFFER_GLC       1
 #define AMDGCN_BUFFER_SLC       2
@@ -117,11 +118,11 @@ struct workgroup_barrier {
         base_ptr(ptr)
     {}
 
-    __device__ uint32_t aquire(int32_t offset)
+    __device__ uint32_t ld(uint32_t offset)
     {
 #if 0
         float d = llvm_amdgcn_raw_buffer_load_fp32(
-                        get_res(),
+                        amdgcn_make_buffer_resource(base_ptr),
                         0,
                         offset,
                         AMDGCN_BUFFER_GLC);
@@ -133,39 +134,51 @@ struct workgroup_barrier {
         x.f32 = d;
         return x.u32;
 #endif
-
         return __atomic_load_n(base_ptr + offset, __ATOMIC_RELAXED);
     }
 
-    __device__ void wait_eq(int32_t offset, uint32_t value)
+    __device__ void wait_eq(uint32_t offset, uint32_t value)
     {
         if(threadIdx.x == 0){
-            //#pragma unroll 1
-            while(aquire(offset) != value){}
+            while(ld(offset) != value){}
         }
         __syncthreads();
     }
 
-    __device__ void wait_lt(int32_t offset, uint32_t value)
+    __device__ void wait_lt(uint32_t offset, uint32_t value)
     {
         if(threadIdx.x == 0){
-            //#pragma unroll 1
-            while(aquire(offset) < value){}
+            while(ld(offset) < value){}
         }
         __syncthreads();
     }
 
-    __device__ void inc(int32_t offset)
+    __device__ void wait_set(uint32_t offset, uint32_t compare, uint32_t value)
+    {
+        if(threadIdx.x == 0){
+            while(atomicCAS(base_ptr, compare, value) != compare){}
+        }
+        __syncthreads();
+    }
+
+    // enter critical zoon, assume buffer is zero when launch kernel
+    __device__ void aquire(uint32_t offset)
+    {
+        wait_set(offset, 0, 1);
+    }
+
+    // exit critical zoon, assume buffer is zero when launch kernel
+    __device__ void release(uint32_t offset)
+    {
+        wait_set(offset, 1, 0);
+    }
+
+    __device__ void inc(uint32_t offset)
     {
         __syncthreads();
         if(threadIdx.x == 0){
             atomicAdd(base_ptr + offset, 1);
         }
-    }
-
-    __device__ int32x4_t get_res() const
-    {
-        return amdgcn_make_buffer_resource(base_ptr);
     }
 
     uint32_t * base_ptr;
@@ -180,18 +193,19 @@ struct workgroup_barrier {
 __global__ void simple_workgroup_reduce(uint32_t * p_cnt, float* p_in, float * p_out)
 {
     workgroup_barrier barrier(p_cnt);
-    barrier.wait_eq(0, blockIdx.x);
+    barrier.wait_eq(0, blockIdx.x);     // serialize sync
+    //barrier.aquire(0);      // out-of-order sync
 
     int32x4_t i_res = amdgcn_make_buffer_resource<float>(p_in + blockIdx.x * BLOCK_SIZE);
     int32x4_t o_res = amdgcn_make_buffer_resource<float>(p_out);
 
-    // slc_glc: 0-no, 1-glc, 2-slc, 3-glc+slc
     float o_data = llvm_amdgcn_raw_buffer_load_fp32(o_res, threadIdx.x * sizeof(float), 0, AMDGCN_BUFFER_GLC);
     float i_data = llvm_amdgcn_raw_buffer_load_fp32(i_res, threadIdx.x * sizeof(float), 0, AMDGCN_BUFFER_DEFAULT);
     float result = i_data + o_data;
     llvm_amdgcn_raw_buffer_store_fp32(result, o_res,  threadIdx.x * sizeof(float), 0, AMDGCN_BUFFER_GLC);
 
-    barrier.inc(0);
+    barrier.inc(0);     // serialize sync
+    //barrier.release(0); // out-of-order sync
 }
 
 
