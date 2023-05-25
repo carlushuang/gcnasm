@@ -21,6 +21,7 @@ template<typename T>
 __global__
 void memcpy_kernel(T* __restrict__ dst, const T* __restrict__ src, uint32_t n){
     int idx = (blockIdx.x * BLOCK_SIZE + threadIdx.x);
+    idx = idx / 184;
     if(idx < n)
         dst[idx] = src[idx];
 }
@@ -126,6 +127,25 @@ float bench_memcpy_api(void * B, void * A, int dwords)
     return ms_api;
 }
 
+float bench_memset_api(void * D, int dwords)
+{
+    // benchmark memcpy api
+    cudaEvent_t start_ev, stop_ev;
+    CALL(cudaEventCreate(&start_ev));
+    CALL(cudaEventCreate(&stop_ev));
+    for(int i=0;i<WARMUP;i++)
+        CALL(cudaMemset(D, 0, dwords * sizeof(float)));
+    CALL(cudaEventRecord( start_ev, 0));
+    for(int i=0;i<LOOP;i++)
+        CALL(cudaMemset(D, 0, dwords * sizeof(float)));
+    CALL(cudaEventRecord( stop_ev, 0 ));
+    CALL(cudaEventSynchronize(stop_ev));
+
+    float ms_api;
+    CALL(cudaEventElapsedTime(&ms_api,start_ev, stop_ev));
+    ms_api/=LOOP;
+    return ms_api;
+}
 
 int main(int argc, char ** argv) {
 	cudaSetDevice(0);
@@ -163,6 +183,14 @@ int main(int argc, char ** argv) {
     printf("%s, kernel_x1:%.3f(GB/s), kernel_x2:%.3f(GB/s), kernel_x4:%.3f(GB/s), api:%.3f(GB/s)\n",
         str, get_gbps(dwords, msx1), get_gbps(dwords, msx2), get_gbps(dwords, msx4),
        get_gbps(dwords, ms_api) );
+
+    {
+        for(int i = 1; i < 16384 ; i = i * 2){
+            float ms_memset = bench_memset_api(A, i);
+            CALL(cudaMemset(A, 0xf2, i * sizeof(float)));
+            printf("memset dwords:%d, cost:%f ms\n", i, ms_memset);
+        }
+    }
 
     free(h_A);
     free(h_B);
