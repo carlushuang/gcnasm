@@ -21,7 +21,6 @@ template<typename T>
 __global__
 void memcpy_kernel(T* __restrict__ dst, const T* __restrict__ src, uint32_t n){
     int idx = (blockIdx.x * BLOCK_SIZE + threadIdx.x);
-    idx = idx / 184;
     if(idx < n)
         dst[idx] = src[idx];
 }
@@ -184,6 +183,7 @@ int main(int argc, char ** argv) {
         str, get_gbps(dwords, msx1), get_gbps(dwords, msx2), get_gbps(dwords, msx4),
        get_gbps(dwords, ms_api) );
 
+#if 0
     {
         for(int i = 1; i < 16384 ; i = i * 2){
             float ms_memset = bench_memset_api(A, i);
@@ -191,6 +191,7 @@ int main(int argc, char ** argv) {
             printf("memset dwords:%d, cost:%f ms\n", i, ms_memset);
         }
     }
+#endif
 
     free(h_A);
     free(h_B);
