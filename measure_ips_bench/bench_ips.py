@@ -11,7 +11,7 @@ k_CPP_SRC = "bench.cpp"
 k_CPP_TARGET = "bench.exe"
 k_ASM_SRC = "kernel.s"
 k_ASM_TARGET = k_HSACO
-k_ARCH = "gfx906"
+k_ARCH = "gfx90a"
 k_INST_LOOP = [256, 512, 768, 1024]
 USE_HIP_CLANG = True
 
@@ -242,6 +242,7 @@ L_kernel_start:
     .amdhsa_next_free_sgpr 32
     .amdhsa_ieee_mode 0
     .amdhsa_dx10_clamp 0
+    .amdhsa_accum_offset 256
 .end_amdhsa_kernel
 
 .amdgpu_metadata
@@ -329,6 +330,7 @@ bench_inst_dict = [
     ("v_mul_lo_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_mul_hi_u32",     "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_mad_u32_u24",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
+    ("v_mad_u64_u32",    "v[.itr+0:.itr+1], vcc, v[.itr+2], v[.itr+3], v[.itr+0:.itr+1]"),
     ("v_mul_i32_i24",    "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_add_lshl_u32",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
 
@@ -345,6 +347,7 @@ bench_inst_dict = [
     ("v_pk_mul_f16",    "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_sin_f32",       "v[.itr], v[.itr+1]"),
     ("v_cos_f16",       "v[.itr], v[.itr+1]"),
+    ("v_exp_f16",       "v[.itr], v[.itr+1]"),
     ("v_sqrt_f32",       "v[.itr], v[.itr+1]")
 ]
 
