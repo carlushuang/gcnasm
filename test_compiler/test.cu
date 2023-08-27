@@ -231,8 +231,8 @@ int main(int argc, char ** argv) {
 
     test_kernel<BLOCK_SIZE, L0_BLOCK, L1_BLOCK, MOVE_L1_PER_ITER><<<dim3(1), dim3(BLOCK_SIZE)>>>(offset_0_device, offset_1_device, p0, p1, l0, l1, iters);
 
-    cudaMemcpy(offset_0_host, offset_0_device, sizeof(index_t) * BLOCK_SIZE, hipMemcpyDeviceToHost);
-    cudaMemcpy(offset_1_host, offset_1_device, sizeof(index_t) * BLOCK_SIZE * iters, hipMemcpyDeviceToHost);
+    cudaMemcpy(offset_0_host, offset_0_device, sizeof(index_t) * BLOCK_SIZE, cudaMemcpyDeviceToHost);
+    cudaMemcpy(offset_1_host, offset_1_device, sizeof(index_t) * BLOCK_SIZE * iters, cudaMemcpyDeviceToHost);
 
     for(auto i = 0; i < BLOCK_SIZE ; i++){
         auto os = offset_0_host[i];
