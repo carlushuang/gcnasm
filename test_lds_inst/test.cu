@@ -32,7 +32,7 @@ struct sequence;
 template<index_t...Ns>
 using integer_sequence = sequence<index_t, Ns...>;
 
-#if __has_builtin(__type_pack_element) && !defined(__CUDACC__)
+#if !defined(__CUDACC__)
 template<index_t N>
 using make_integer_sequence = __make_integer_seq<sequence, index_t, N>; // TODO: check builtin __make_integer_seq
 #else
@@ -88,7 +88,7 @@ using make_integer_sequence = typename impl::memoize_sequence<index_t, N >::type
 
 
 namespace impl {
-#if __has_builtin(__type_pack_element) && !defined(__CUDACC__)
+#if !defined(__CUDACC__)
     // TODO: check builtin __type_pack_element
     template<index_t I, typename... Ts>
     using at_index_t = __type_pack_element<I, Ts... >;
