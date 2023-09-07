@@ -223,6 +223,11 @@ struct constexpr_for<0, end, 1>
     }
 };
 
+#if !defined(__CUDACC__)
+typedef float f32x4 __attribute__((ext_vector_type(4)));
+#else
+typedef float4 f32x4;
+#endif
 
 template<index_t BLOCK_SIZE, index_t LDS_SIZE_BYTE>
 GLOBAL void test_kernel(float * __restrict__ input, float * __restrict__ output)
@@ -234,7 +239,7 @@ GLOBAL void test_kernel(float * __restrict__ input, float * __restrict__ output)
     //#pragma clang loop vectorize(disable)
     //for(auto i = 0; i < 4; i++) {
     constexpr_for<0, 4, 1>{}([&](auto iter){
-        float4 data = reinterpret_cast<float4*>(input)[blockIdx.x * BLOCK_SIZE + threadIdx.x];
+        f32x4 data = (reinterpret_cast<f32x4*>(input))[blockIdx.x * BLOCK_SIZE + threadIdx.x];
         auto i = iter.value;
 
         s_ptr[threadIdx.x + 0 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.x;
@@ -249,7 +254,7 @@ GLOBAL void test_kernel(float * __restrict__ input, float * __restrict__ output)
         data.z = s_ptr[threadIdx.x * 4 + 2 + i * 4 * BLOCK_SIZE];
         data.w = s_ptr[threadIdx.x * 4 + 3 + i * 4 * BLOCK_SIZE];
 
-        *reinterpret_cast<float4*>(output) = data;
+        (reinterpret_cast<f32x4*>(output))[blockIdx.x * BLOCK_SIZE + threadIdx.x] = data;
         input += 4 * BLOCK_SIZE;
         output += 4 * BLOCK_SIZE;
         __syncthreads();
