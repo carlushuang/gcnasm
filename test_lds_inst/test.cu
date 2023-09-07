@@ -26,6 +26,12 @@ struct integral_constant {
 template<index_t v>
 using number = integral_constant<index_t, v>;
 
+namespace impl {
+    // TODO: check builtin __type_pack_element
+    template<index_t I, typename... Ts>
+    using at_index_t = __type_pack_element<I, Ts... >;
+}
+
 template<typename T, T... Ns>
 struct sequence {
     using value_type = T;
@@ -44,6 +50,9 @@ struct sequence {
         printf("[len:%d]\n", n_element);
     }
 };
+
+template<index_t N>
+using make_integer_sequence = __make_integer_seq<sequence, index_t, N>; // TODO: check builtin __make_integer_seq
 
 template<index_t... Ns>
 using integer_sequence = sequence<index_t, Ns...>;
