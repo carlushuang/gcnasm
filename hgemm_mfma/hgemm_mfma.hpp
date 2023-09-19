@@ -24,7 +24,7 @@
 
 #include "primitives.hpp"
 
-template<index_t M_PER_BLOCK_, index_t N_PER_BLOCK_>
+template<index_t M_PER_BLOCK_, index_t N_PER_BLOCK_, index_t M01_ = 4>
 struct tile_scheduler{
     static constexpr index_t M_PER_BLOCK = M_PER_BLOCK_;
     static constexpr index_t N_PER_BLOCK = N_PER_BLOCK_;
@@ -34,9 +34,26 @@ struct tile_scheduler{
 
     DEVICE_HOST constexpr auto operator()(index_t & i_m, index_t & i_n)
     {
+#if 0
         index_t n_total_iters = (n + N_PER_BLOCK - 1) / N_PER_BLOCK;
         i_n = (blockIdx.x % n_total_iters) * N_PER_BLOCK;
         i_m = (blockIdx.x / n_total_iters) * M_PER_BLOCK;
+#else
+        index_t m0 = (m + M_PER_BLOCK - 1) / M_PER_BLOCK;
+        index_t n0 = (n + N_PER_BLOCK - 1) / N_PER_BLOCK;
+
+        index_t idx_n0 = blockIdx.x % n0;
+        index_t idx_m0 = blockIdx.x / n0;
+
+        const auto m01_adapt = (idx_m0 < m0 - m0 % M01_) ? M01_ : m0 % M01_;
+
+        index_t idx_m00          = idx_m0 / M01_;
+        index_t idx_m01          = idx_m0 % M01_;
+        index_t idx_n0_m01_local = idx_n0 + idx_m01 * n0;
+
+        i_m = (idx_n0_m01_local % m01_adapt + idx_m00 * M01_) * M_PER_BLOCK;
+        i_n = (idx_n0_m01_local / m01_adapt) * N_PER_BLOCK;
+#endif
     }
     index_t m;
     index_t n;
@@ -344,7 +361,7 @@ struct gemm_kernel
         sst_b(gld_b.buf);
         clear(acc_buf);
         sst_fence(0); wave_barrier();
-        
+
         for(auto i_k = 1; i_k < k_iters; i_k++) {
             gld_a(i_k);
             gld_b(i_k);

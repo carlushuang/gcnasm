@@ -1,5 +1,5 @@
 #!/bin/sh
-SRC=host.cc
+SRC=hgemm.cc
 OUT=hgemm.exe
 TOP=`pwd`
 BUILD="$TOP/build/"

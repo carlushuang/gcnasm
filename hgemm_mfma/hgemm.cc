@@ -153,17 +153,17 @@ int main(int argc, char ** argv)
     float ms = 0;
     if(applicable) ms = invoker.bench(karg);
 
-    float gflops = applicable ? (float)2*m*n*k/ms/(1e6) : 0;
-    printf(" ms:%f,gflops:%.3f ",ms,gflops); fflush(stdout);
+    float gflops = applicable ? (float)2*m*n*k/ms/(1e9) : 0;
+    printf(" ms:%f, tflops:%.3f ",ms,gflops); fflush(stdout);
     if(!applicable) {
-        printf("not applicable"); fflush(stdout);
+        printf(" not applicable"); fflush(stdout);
     }
 
     if(validation){
         gemm_rcr(host_c, host_a, host_b, m,n,k,lda,ldb,ldc);
         HIP_CALL(hipMemcpy(fp16_c, dev_c, ldc*m*sizeof(float16), hipMemcpyDeviceToHost));
         bool res = valid_vector( host_c, fp16_c, m*n );
-        printf(",%s",res?"valid":"fail");fflush(stdout);
+        printf(", %s",res?"valid":"fail");fflush(stdout);
     }
 
     printf("\n"); fflush(stdout);
