@@ -583,7 +583,7 @@ template<
 struct mfma_inst {
     using a_type = a_type_;
     using b_type = b_type_;
-    using c_type = c_type_;
+    using c_type = c_type_;         // This is actually acc type
     static constexpr index_t m = m_;
     static constexpr index_t n = n_;
     static constexpr index_t k = k_;
@@ -630,10 +630,10 @@ using mfma_f32_16x16x16_f16   = mfma_inst<f16, f16, f32, 16, 16, 16, 1,  2,  2, 
 using mfma_f32_32x32x8_f16    = mfma_inst<f16, f16, f32, 32, 32,  8, 1,  2,  2, 16, impl::call_mfma_f32_32x32x8_f16>;
 using mfma_f32_32x32x16_f16   = mfma_inst<f16, f16, f32, 32, 32, 16, 1,  4,  4, 16, impl::call_mfma_f32_32x32x16_f16>;
 
-template<index_t, index_t, index_t> struct mfma_f16;
-template<> struct mfma_f16<16, 16, 16> { using type = mfma_f32_16x16x16_f16; };
-template<> struct mfma_f16<32, 32, 8>  { using type = mfma_f32_32x32x8_f16; };
-template<> struct mfma_f16<32, 32, 16> { using type = mfma_f32_32x32x16_f16; };
+template<typename, typename, typename, index_t, index_t, index_t> struct mfma_selector;
+template<> struct mfma_selector<f16, f16, f32, 16, 16, 16> { using type = mfma_f32_16x16x16_f16; };
+template<> struct mfma_selector<f16, f16, f32, 32, 32, 8>  { using type = mfma_f32_32x32x8_f16; };
+template<> struct mfma_selector<f16, f16, f32, 32, 32, 16> { using type = mfma_f32_32x32x16_f16; };
 
 template<typename T, index_t N>
 constexpr void clear(vector_type<T, N> & vec)

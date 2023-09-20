@@ -178,6 +178,69 @@ struct gld_iterator_s_r {
 };
 
 template<typename DATA_TYPES_, typename BLOCK_TILE_, typename BLOCK_WAVES_, typename WAVE_TILE_>
+struct epilogue_iterator {
+    static constexpr index_t M_PER_BLOCK = BLOCK_TILE_::template get<0>();
+    static constexpr index_t N_PER_BLOCK = BLOCK_TILE_::template get<1>();
+    static constexpr index_t K_PER_BLOCK = BLOCK_TILE_::template get<2>();
+
+    static constexpr index_t BLOCK_M_WAVES = BLOCK_WAVES_::template get<0>();
+    static constexpr index_t BLOCK_N_WAVES = BLOCK_WAVES_::template get<1>();
+    static constexpr index_t BLOCK_K_WAVES = BLOCK_WAVES_::template get<2>();
+
+    static constexpr index_t M_PER_WAVE = WAVE_TILE_::template get<0>();
+    static constexpr index_t N_PER_WAVE = WAVE_TILE_::template get<1>();
+    static constexpr index_t K_PER_WAVE = WAVE_TILE_::template get<2>();
+
+    static constexpr index_t WAVE_M_REPEAT = M_PER_BLOCK / (BLOCK_M_WAVES * M_PER_WAVE);
+    static constexpr index_t WAVE_N_REPEAT = N_PER_BLOCK / (BLOCK_N_WAVES * N_PER_WAVE);
+    static constexpr index_t WAVE_K_REPEAT = K_PER_BLOCK / (BLOCK_K_WAVES * K_PER_WAVE);
+
+    using a_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<0>())>;
+    using b_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<1>())>;
+    using c_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<2>())>;
+    using acc_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<3>())>;
+
+    using mfma_inst = typename mfma_selector<a_type, b_type, acc_type, M_PER_WAVE, N_PER_WAVE, K_PER_WAVE>::type;
+
+    DEVICE index_t v_offset(const index_t stride_)
+    {
+        auto lane_id = threadIdx.x % 64;
+        auto wave_id = threadIdx.x / 64;
+        // assume C matrix is horizontal
+        index_t row_id, col_id;
+        mfma_inst::lane_rc(row_id, col_id, lane_id);
+        return ((row_id + (wave_id % BLOCK_N_WAVES) * N_PER_WAVE) + (col_id + (wave_id / BLOCK_N_WAVES) * M_PER_WAVE) * stride_) * sizeof(c_type);
+    }
+
+    DEVICE constexpr epilogue_iterator(c_type * ptr_, index_t stride_) : ptr(ptr_), stride(stride_), v_offset_base(v_offset(stride_)) {}
+
+    template<typename ACC_VECTOR>
+    DEVICE constexpr void operator()(const ACC_VECTOR& acc_buf)
+    {
+        using acc_group_t = typename vector_type<acc_type, mfma_inst::c_per_group>::type;
+        using c_group_t = typename vector_type<c_type, mfma_inst::c_per_group>::type;
+        constexpr_for<0, WAVE_M_REPEAT, 1>{}([&](auto i_m){
+            constexpr_for<0, WAVE_N_REPEAT, 1>{}([&](auto i_n){
+                constexpr_for<0, mfma_inst::groups, 1>{}([&](auto i_g){
+                    constexpr auto v_idx = number<(i_m * WAVE_N_REPEAT + i_n) * mfma_inst::c_per_group + i_g>{};
+                    auto tmp = vector_cast<c_type>(vector_type<acc_type, mfma_inst::c_per_group>{acc_buf.template to_varray<acc_group_t>()[v_idx]});
+                    gst<sizeof(c_group_t)>{}(tmp.template to_varray<c_group_t>()[number<0>{}],
+                            make_buffer_resource(ptr),
+                            v_offset_base, /*v*/
+                            (i_m * BLOCK_M_WAVES * M_PER_WAVE * stride + i_n * BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type), /*s*/
+                            i_g * mfma_inst::rows_per_group * sizeof(c_type)/*i*/ );
+                });
+            });
+        });
+        gst_fence(0);
+    }
+
+    c_type * ptr;
+    index_t stride;
+    index_t v_offset_base;
+};
+
+template<typename DATA_TYPES_, typename BLOCK_TILE_, typename BLOCK_WAVES_, typename WAVE_TILE_>
 struct gemm_kernel
 {   // only support rcr layout
     static constexpr index_t M_PER_BLOCK = BLOCK_TILE_::template get<0>();
@@ -218,7 +281,7 @@ struct gemm_kernel
     using c_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<2>())>;
     using acc_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<3>())>;
 
-    using mfma_inst = typename mfma_f16<M_PER_WAVE, N_PER_WAVE, K_PER_WAVE>::type;
+    using mfma_inst = typename mfma_selector<a_type, b_type, acc_type, M_PER_WAVE, N_PER_WAVE, K_PER_WAVE>::type;
 
     struct args
     {
@@ -320,33 +383,6 @@ struct gemm_kernel
             v_offset_a = (src_i_m * KPACK_A + src_i_k * (KPACK_A/*padding*/ + M_PER_BLOCK * KPACK_A)) * sizeof(a_type);
             v_offset_b = (src_i_n * KPACK_B + src_i_k * (KPACK_B/*padding*/ + N_PER_BLOCK * KPACK_B)) * sizeof(b_type);
         };
-        auto epilogue = [&](){
-            // write out c buffer
-            const auto offset_c_v_base = [&](){
-                auto lane_id = threadIdx.x % 64;
-                auto wave_id = threadIdx.x / 64;
-                // assume C matrix is horizontal
-                index_t row_id, col_id;
-                mfma_inst::lane_rc(row_id, col_id, lane_id);
-                return ((row_id + (wave_id % BLOCK_N_WAVES) * N_PER_WAVE) + (col_id + (wave_id / BLOCK_N_WAVES) * M_PER_WAVE) * karg.ldc) * sizeof(c_type);
-            }();
-            using acc_group_t = typename vector_type<acc_type, mfma_inst::c_per_group>::type;
-            using c_group_t = typename vector_type<c_type, mfma_inst::c_per_group>::type;
-            constexpr_for<0, WAVE_M_REPEAT, 1>{}([&](auto i_m){
-                constexpr_for<0, WAVE_N_REPEAT, 1>{}([&](auto i_n){
-                    constexpr_for<0, mfma_inst::groups, 1>{}([&](auto i_g){
-                        constexpr auto v_idx = number<(i_m * WAVE_N_REPEAT + i_n) * mfma_inst::c_per_group + i_g>{};
-                        auto tmp = vector_cast<c_type>(vector_type<acc_type, mfma_inst::c_per_group>{acc_buf.template to_varray<acc_group_t>()[v_idx]});
-                        gst<sizeof(c_group_t)>{}(tmp.template to_varray<c_group_t>()[number<0>{}],
-                                make_buffer_resource(ptr_c),
-                                offset_c_v_base, /*v*/
-                                (i_m * BLOCK_M_WAVES * M_PER_WAVE * karg.ldc + i_n * BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type), /*s*/
-                                i_g * mfma_inst::rows_per_group * sizeof(c_type)/*i*/ );
-                    });
-                });
-            });
-            gst_fence(0);
-        };
 
         index_t v_offset_a, v_offset_b;
         gld_a(0);
@@ -374,8 +410,9 @@ struct gemm_kernel
         }
         // tail
         gemm(sld_iter_a, sld_iter_b);
+        auto epilogue = epilogue_iterator<DATA_TYPES_, BLOCK_TILE_, BLOCK_WAVES_, WAVE_TILE_> {ptr_c, karg.ldc};
         // write out
         sched_barrier();  // in case mfma dest has raw harzard
-        epilogue();
+        epilogue(acc_buf);
     }
 };
