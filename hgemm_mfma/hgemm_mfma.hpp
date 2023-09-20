@@ -22,6 +22,10 @@
 #define MIN(x, y) ((x) > (y) ? (y) : (x))
 #endif
 
+#ifndef MAX
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#endif
+
 #include "primitives.hpp"
 
 template<index_t M_PER_BLOCK_, index_t N_PER_BLOCK_, index_t M01_ = 8>
@@ -195,6 +199,8 @@ struct epilogue_iterator {
     static constexpr index_t WAVE_N_REPEAT = N_PER_BLOCK / (BLOCK_N_WAVES * N_PER_WAVE);
     static constexpr index_t WAVE_K_REPEAT = K_PER_BLOCK / (BLOCK_K_WAVES * K_PER_WAVE);
 
+    static constexpr index_t BLOCK_SIZE = BLOCK_M_WAVES * BLOCK_N_WAVES * BLOCK_K_WAVES * 64;
+
     using a_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<0>())>;
     using b_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<1>())>;
     using c_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<2>())>;
@@ -202,33 +208,66 @@ struct epilogue_iterator {
 
     using mfma_inst = typename mfma_selector<a_type, b_type, acc_type, M_PER_WAVE, N_PER_WAVE, K_PER_WAVE>::type;
 
-    DEVICE index_t v_offset(const index_t stride_)
+    DEVICE index_t gst_v_offset(const index_t stride_)
     {
-        auto lane_id = threadIdx.x % 64;
-        auto wave_id = threadIdx.x / 64;
-        // assume C matrix is horizontal
-        index_t row_id, col_id;
-        mfma_inst::lane_rc(row_id, col_id, lane_id);
-        return ((row_id + (wave_id % BLOCK_N_WAVES) * N_PER_WAVE) + (col_id + (wave_id / BLOCK_N_WAVES) * M_PER_WAVE) * stride_) * sizeof(c_type);
+        index_t col_id = threadIdx.x % (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group) * mfma_inst::c_per_group;
+        index_t row_id = threadIdx.x / (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group);
+        return (row_id * stride_ + col_id) * sizeof(c_type);
+    }
+    DEVICE index_t sst_v_offset()
+    {
+        // store per repeat
+        index_t lane_id = threadIdx.x % 64;
+        index_t wave_id = threadIdx.x / 64;
+        index_t i_m = lane_id % mfma_inst::m + (wave_id / BLOCK_N_WAVES) * M_PER_WAVE;
+        index_t i_n = lane_id / mfma_inst::m * mfma_inst::c_per_group + (wave_id % BLOCK_N_WAVES) * N_PER_WAVE;
+        return (i_m * (mfma_inst::c_per_group/*padding*/ + BLOCK_N_WAVES * N_PER_WAVE) + i_n) * sizeof(c_type);
+    }
+    DEVICE index_t sld_v_offset()
+    {
+        index_t col_id = threadIdx.x % (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group) * mfma_inst::c_per_group;
+        index_t row_id = threadIdx.x / (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group);
+        return (row_id * (mfma_inst::c_per_group/*padding*/ + BLOCK_N_WAVES * N_PER_WAVE) + col_id) * sizeof(c_type);
     }
 
-    DEVICE constexpr epilogue_iterator(c_type * ptr_, index_t stride_) : ptr(ptr_), stride(stride_), v_offset_base(v_offset(stride_)) {}
+    DEVICE constexpr epilogue_iterator(c_type * ptr_, index_t stride_, char * smem_) :
+            ptr(ptr_), stride(stride_), smem(smem_), gst_v_offset_base(gst_v_offset(stride_)),
+            sst_v_offset_base(sst_v_offset()), sld_v_offset_base(sld_v_offset()){}
 
     template<typename ACC_VECTOR>
     DEVICE constexpr void operator()(const ACC_VECTOR& acc_buf)
     {
         using acc_group_t = typename vector_type<acc_type, mfma_inst::c_per_group>::type;
         using c_group_t = typename vector_type<c_type, mfma_inst::c_per_group>::type;
+        using shfl_sst_inst_type = sst<mfma_inst::c_per_group * 4 / sizeof(c_type)>;
+        using shfl_sld_inst_type = sld<mfma_inst::c_per_group * 4 / sizeof(c_type)>;
+        constexpr index_t rows_per_sld_gst = BLOCK_SIZE / (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group);
+        constexpr index_t stride_per_sld =  rows_per_sld_gst *
+                                                (mfma_inst::c_per_group/*padding*/ + BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type);
+
         constexpr_for<0, WAVE_M_REPEAT, 1>{}([&](auto i_m){
             constexpr_for<0, WAVE_N_REPEAT, 1>{}([&](auto i_n){
+                wave_barrier();
+                // store to smem
                 constexpr_for<0, mfma_inst::groups, 1>{}([&](auto i_g){
                     constexpr auto v_idx = number<(i_m * WAVE_N_REPEAT + i_n) * mfma_inst::c_per_group + i_g>{};
                     auto tmp = vector_cast<c_type>(vector_type<acc_type, mfma_inst::c_per_group>{acc_buf.template to_varray<acc_group_t>()[v_idx]});
-                    gst<sizeof(c_group_t)>{}(tmp.template to_varray<c_group_t>()[number<0>{}],
+                    shfl_sst_inst_type{}(smem, sst_v_offset_base, tmp, i_g * mfma_inst::rows_per_group * sizeof(c_type) );
+                });
+                sst_fence(0);
+                wave_barrier();
+                // load from smem
+                vector_type<c_type, mfma_inst::c_per_group * mfma_inst::groups> gst_buf;
+                constexpr_for<0, mfma_inst::groups, 1>{}([&](auto i_g){
+                    shfl_sld_inst_type{}(smem, gst_buf.template to_varray<c_group_t>()[i_g], sld_v_offset_base, i_g * stride_per_sld );
+                });
+                constexpr_for<0, mfma_inst::groups, 1>{}([&](auto i_g){
+                    sld_fence(mfma_inst::groups - i_g - 1);
+                    gst<sizeof(c_group_t)>{}(gst_buf.template to_varray<c_group_t>()[i_g],
                             make_buffer_resource(ptr),
-                            v_offset_base, /*v*/
-                            (i_m * BLOCK_M_WAVES * M_PER_WAVE * stride + i_n * BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type), /*s*/
-                            i_g * mfma_inst::rows_per_group * sizeof(c_type)/*i*/ );
+                            gst_v_offset_base, /*v*/
+                            ((i_m * BLOCK_M_WAVES * M_PER_WAVE + i_g * rows_per_sld_gst) * stride + i_n * BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type), /*s*/
+                            0/*i*/ );
                 });
             });
         });
@@ -237,7 +276,10 @@ struct epilogue_iterator {
 
     c_type * ptr;
     index_t stride;
-    index_t v_offset_base;
+    char * smem;
+    index_t gst_v_offset_base;
+    index_t sst_v_offset_base;
+    index_t sld_v_offset_base;
 };
 
 template<typename DATA_TYPES_, typename BLOCK_TILE_, typename BLOCK_WAVES_, typename WAVE_TILE_>
@@ -317,7 +359,13 @@ struct gemm_kernel
 
     DEVICE_HOST static constexpr auto smem_size()
     {
-        return smem_size_a() + smem_size_b();
+        return MAX(smem_size_a() + smem_size_b(), smem_size_shuffle());
+    }
+
+    DEVICE_HOST static constexpr auto smem_size_shuffle()
+    {
+        using shfl_type = typename vector_type<c_type, mfma_inst::c_per_group>::type;
+        return BLOCK_M_WAVES * M_PER_WAVE * (BLOCK_N_WAVES * N_PER_WAVE * sizeof(c_type) + sizeof(shfl_type));
     }
 
     DEVICE_HOST static constexpr auto block_dims()
@@ -410,7 +458,7 @@ struct gemm_kernel
         }
         // tail
         gemm(sld_iter_a, sld_iter_b);
-        auto epilogue = epilogue_iterator<DATA_TYPES_, BLOCK_TILE_, BLOCK_WAVES_, WAVE_TILE_> {ptr_c, karg.ldc};
+        auto epilogue = epilogue_iterator<DATA_TYPES_, BLOCK_TILE_, BLOCK_WAVES_, WAVE_TILE_> {ptr_c, karg.ldc, smem};
         // write out
         sched_barrier();  // in case mfma dest has raw harzard
         epilogue(acc_buf);
