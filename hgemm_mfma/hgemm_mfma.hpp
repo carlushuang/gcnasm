@@ -24,7 +24,7 @@
 
 #include "primitives.hpp"
 
-template<index_t M_PER_BLOCK_, index_t N_PER_BLOCK_, index_t M01_ = 4>
+template<index_t M_PER_BLOCK_, index_t N_PER_BLOCK_, index_t M01_ = 8>
 struct tile_scheduler{
     static constexpr index_t M_PER_BLOCK = M_PER_BLOCK_;
     static constexpr index_t N_PER_BLOCK = N_PER_BLOCK_;

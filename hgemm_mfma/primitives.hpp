@@ -504,15 +504,24 @@ DEVICE void sched_barrier()
     __builtin_amdgcn_sched_barrier(cnt);
 }
 
+#define MFMA_USE_INTRINSIC 0
+
 namespace impl {
 // clang-format off
 // here A/B/C are all ext_vector_type(...)
-#define _V_(v, s, i) \
-    v.template to_varray<typename vector_type<decltype(v)::d1_t, s>::type>
+
 struct call_mfma_f32_32x32x8_f16 {
     template<typename TA, typename TB, typename TC>
     DEVICE void operator()(const TA& a, const TB &b, TC& c)
-    {c = __builtin_amdgcn_mfma_f32_32x32x8f16(a, b, c, 0, 0, 0);}
+    {
+#if MFMA_USE_INTRINSIC
+        sched_barrier();
+        c = __builtin_amdgcn_mfma_f32_32x32x8f16(a, b, c, 0, 0, 0);
+        sched_barrier();
+#else
+        asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %0" : "+v"(c) : "v"(a), "v"(b));
+#endif
+    }
 };
 
 struct call_mfma_f32_32x32x16_f16 {
@@ -521,24 +530,24 @@ struct call_mfma_f32_32x32x16_f16 {
     {
         vector_type<f16, 8> a_pack {a};
         vector_type<f16, 8> b_pack {b};
-#if 0
+#if MFMA_USE_INTRINSIC
+        // HIP tend to use agpr as accumulator
+        sched_barrier();
         c = __builtin_amdgcn_mfma_f32_32x32x8f16(a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0],
                                                     b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0],
                                                     c, 0, 0, 0);
         c = __builtin_amdgcn_mfma_f32_32x32x8f16(a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1],
                                                     b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1],
                                                     c, 0, 0, 0);
+        sched_barrier();
 #else
-        asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %0"
-            : "+v"(c)
-            : "v"(a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0]),
-              "v"(b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0])
-        );
-        asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %0"
-            : "+v"(c)
-            : "v"(a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1]),
-              "v"(b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1])
-        );
+        vector_type<f16, 4>::type a0 = a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0];
+        vector_type<f16, 4>::type b0 = b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0];
+        vector_type<f16, 4>::type a1 = a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1];
+        vector_type<f16, 4>::type b1 = b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1];
+        // clang-17+ has ODR bug for following inline asm, we have to first move the contained data to a lvalue
+        asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %0" : "+v"(c) : "v"(a0), "v"(b0));
+        asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %0" : "+v"(c) : "v"(a1), "v"(b1));
 #endif
     }
 };
@@ -546,10 +555,17 @@ struct call_mfma_f32_32x32x16_f16 {
 struct call_mfma_f32_16x16x16_f16 {
     template<typename TA, typename TB, typename TC>
     DEVICE void operator()(const TA& a, const TB &b, TC& c)
-    {c = __builtin_amdgcn_mfma_f32_16x16x16f16(a, b, c, 0, 0, 0);}
+    {
+#if MFMA_USE_INTRINSIC
+        sched_barrier();
+        c = __builtin_amdgcn_mfma_f32_16x16x16f16(a, b, c, 0, 0, 0);
+        sched_barrier();
+#else
+        asm volatile("v_mfma_f32_16x16x16f16 %0, %1, %2, %0" : "+v"(c) : "v"(a), "v"(b));
+#endif
+    }
 };
 // clang-format on
-#undef _V_
 }
 
 template<
