@@ -30,11 +30,11 @@ struct gemm_invoker {
         return kernel_type::is_applicable(karg);
     }
 
-    void operator()(typename kernel_type::args karg) {
-        kernel_entry<kernel_type><<<kernel_type::grid_dims(karg), kernel_type::block_dims()>>>(karg);
+    void operator()(typename kernel_type::args karg, hipStream_t stream = nullptr) {
+        kernel_entry<kernel_type><<<kernel_type::grid_dims(karg), kernel_type::block_dims(), 0/*no runtime lds*/, stream>>>(karg);
     }
 
-    float bench(typename kernel_type::args karg, int warmup = 5, int loops = 10) {
+    float bench(typename kernel_type::args karg, hipStream_t stream = nullptr, int warmup = 3, int loops = 10) {
         for(auto i=0 ; i < warmup ; i++)
             operator()(karg);
         hipEvent_t evt_00, evt_11;
@@ -44,10 +44,9 @@ struct gemm_invoker {
         HIP_CALL(hipEventRecord(evt_00, NULL));
         for(auto i=0 ; i < loops ; i++)
             operator()(karg);
-        float ms;
         HIP_CALL(hipEventRecord(evt_11, NULL));
         HIP_CALL(hipEventSynchronize(evt_11));
-        HIP_CALL(hipDeviceSynchronize());
+        float ms;
         HIP_CALL(hipEventElapsedTime(&ms, evt_00, evt_11));
         HIP_CALL(hipEventDestroy(evt_00));
         HIP_CALL(hipEventDestroy(evt_11));
