@@ -134,33 +134,65 @@ struct sst_iterator_r0_s_r1 {
                         i_offset(i_issue));
         });
     }
-    // vector_type<dtype_, R_PACK_ * n_bufs> buf;
     void * smem;
     index_t base_addr;
 };
 
+#define USE_GLD_IF 1
 template<typename dtype_, index_t BLOCK_SIZE_, index_t S_PER_BLOCK_, index_t R_PER_BLOCK_, index_t ALIGNMENT_>
 struct gld_iterator_s_r {
     static constexpr index_t issues = S_PER_BLOCK_ * R_PER_BLOCK_ / BLOCK_SIZE_ / ALIGNMENT_;
     static constexpr index_t n_bufs = issues;
+#if USE_GLD_IF
+    using gld_inst_type = gld_if<ALIGNMENT_ * 4 / sizeof(dtype_)>;
+#else
     using gld_inst_type = gld<ALIGNMENT_ * 4 / sizeof(dtype_)>;
+#endif
     using gld_vector_type = typename vector_type<dtype_, ALIGNMENT_>::type;
-    DEVICE constexpr gld_iterator_s_r(dtype_ * base_ptr_, index_t r_stride_) : base_ptr(base_ptr_), r_stride(r_stride_) {}
+    DEVICE constexpr gld_iterator_s_r(dtype_ * base_ptr_, index_t s_dim_, index_t r_dim_, index_t s_stride_)
+    {
+        base_ptr = base_ptr_;
+        base_offset = 0;
+        s_dim = s_dim_;
+        r_dim = r_dim_;
+        s_stride = s_stride_;
+        i_r = (threadIdx.x % (R_PER_BLOCK_ / ALIGNMENT_)) * ALIGNMENT_;
+        i_s = threadIdx.x / (R_PER_BLOCK_ / ALIGNMENT_);
+        constexpr_for<0, issues, 1>{}([&](auto i_issue){
+            flags[i_issue] = (i_r < r_dim) & ((i_s + i_issue * (BLOCK_SIZE_ / (R_PER_BLOCK_ / ALIGNMENT_))) < s_dim) ;
+        });
+    }
     DEVICE constexpr auto v_offset() {
-        index_t i_r = threadIdx.x % (R_PER_BLOCK_ / ALIGNMENT_);
-        index_t i_s = threadIdx.x / (R_PER_BLOCK_ / ALIGNMENT_);
-        return (i_s * r_stride + i_r * ALIGNMENT_) * sizeof(dtype_);
+        return (i_s * s_stride + i_r) * sizeof(dtype_);
     }
     DEVICE constexpr auto s_offset(index_t issue) {
-        const index_t stride_per_issue = (BLOCK_SIZE_ / (R_PER_BLOCK_ / ALIGNMENT_)) * r_stride* sizeof(dtype_);
-        return issue * stride_per_issue;
+        const index_t stride_per_issue = (BLOCK_SIZE_ / (R_PER_BLOCK_ / ALIGNMENT_)) * s_stride;
+        return issue * stride_per_issue * sizeof(dtype_);;
     }
-    DEVICE constexpr auto operator()(size_t k_iter)
+    DEVICE constexpr auto clear_buf()
+    {
+        clear(buf);
+    }
+    DEVICE constexpr auto operator()()
     {
         constexpr_for<0, issues, 1>{}([&](auto i_issue){
+#if USE_GLD_IF
             gld_inst_type{}(buf.template to_varray<gld_vector_type>()[i_issue],
-                            make_buffer_resource(base_ptr + k_iter * R_PER_BLOCK_), v_offset(),
+                            make_buffer_resource(base_ptr + base_offset), v_offset(),
+                            s_offset(i_issue), 0, flags[i_issue]);
+#else
+            gld_inst_type{}(buf.template to_varray<gld_vector_type>()[i_issue],
+                            make_buffer_resource(base_ptr + base_offset), v_offset(),
                             s_offset(i_issue), 0);
+#endif
+        });
+    }
+    DEVICE constexpr auto move_slice_window(index_t r_step)
+    {
+        base_offset += r_step;
+        // we only move along 1 dim, so only need to re-calculate flag based on 1 dim.
+        constexpr_for<0, issues, 1>{}([&](auto i_issue){
+            flags[i_issue] = flags[i_issue] & ((i_r + base_offset) < r_dim);
         });
     }
     template<index_t i_buf>
@@ -176,8 +208,14 @@ struct gld_iterator_s_r {
         return buf.template to_varray<v_type>()[number<i_buf>{}];
     }
     dtype_ * base_ptr;
-    index_t r_stride;
+    index_t base_offset;
+    index_t s_dim;
+    index_t r_dim;
+    index_t s_stride;
+    index_t i_s;
+    index_t i_r;
 
+    static_buffer<index_t, issues> flags;
     vector_type<dtype_, ALIGNMENT_ * issues> buf;
 };
 
@@ -388,9 +426,9 @@ struct gemm_kernel
         b_type * ptr_b = reinterpret_cast<b_type*>(karg.ptr_b) + i_n * karg.ldb;
         c_type * ptr_c = reinterpret_cast<c_type*>(karg.ptr_c) + i_m * karg.ldc + i_n;
 
-        auto k_iters = karg.k / K_PER_BLOCK;
-        auto gld_a = gld_iterator_s_r<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_A>{ptr_a, karg.lda};
-        auto gld_b = gld_iterator_s_r<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_B>{ptr_b, karg.ldb};
+        auto k_iters = (karg.k + K_PER_BLOCK - 1) / K_PER_BLOCK;
+        auto gld_a = gld_iterator_s_r<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_A>{ptr_a, karg.m, karg.k, karg.lda};
+        auto gld_b = gld_iterator_s_r<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_B>{ptr_b, karg.n, karg.k, karg.ldb};
 
         auto sst_a = sst_iterator_r0_s_r1<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, KPACK_A>{smem};
         auto sst_b = sst_iterator_r0_s_r1<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, KPACK_B>{smem, smem_size_a()};
@@ -431,10 +469,22 @@ struct gemm_kernel
             v_offset_a = (src_i_m * KPACK_A + src_i_k * (KPACK_A/*padding*/ + M_PER_BLOCK * KPACK_A)) * sizeof(a_type);
             v_offset_b = (src_i_n * KPACK_B + src_i_k * (KPACK_B/*padding*/ + N_PER_BLOCK * KPACK_B)) * sizeof(b_type);
         };
+        auto gld_buf_clear = [&]()
+        {
+#if USE_GLD_IF
+            if constexpr (M_PER_BLOCK > N_PER_BLOCK)
+                gld_b.clear_buf();
+            else
+                gld_a.clear_buf();
+#endif
+        };
+
+        gld_a.clear_buf();
+        gld_a(); gld_a.move_slice_window(K_PER_BLOCK);
+        gld_b.clear_buf();
+        gld_b(); gld_b.move_slice_window(K_PER_BLOCK);
 
         index_t v_offset_a, v_offset_b;
-        gld_a(0);
-        gld_b(0);
         mfma_src_dist_offset(v_offset_a, v_offset_b);
         auto sld_iter_a = sld_iter_a_type{smem, v_offset_a};
         auto sld_iter_b = sld_iter_b_type{smem, v_offset_b, smem_size_a()};
@@ -445,15 +495,23 @@ struct gemm_kernel
         sst_b(gld_b.buf);
         clear(acc_buf);
         sst_fence(0); wave_barrier();
+        gld_buf_clear();
 
         for(auto i_k = 1; i_k < k_iters; i_k++) {
-            gld_a(i_k);
-            gld_b(i_k);
-            gemm(sld_iter_a, sld_iter_b); wave_barrier();
+            gld_a();
+            gld_b();
+
+            gemm(sld_iter_a, sld_iter_b);
+
+            gld_a.move_slice_window(K_PER_BLOCK);
+            gld_b.move_slice_window(K_PER_BLOCK);
+            
+            wave_barrier();
             gld_fence(gld_b.issues);
             sst_a(gld_a.buf);
             gld_fence(0);
             sst_b(gld_b.buf);
+            gld_buf_clear();
             sst_fence(0); wave_barrier();
         }
         // tail

@@ -313,6 +313,13 @@ kernel_entry(typename kernel_type::args karg)
 
 ///////////////////////////////////////////////////////////////////////////
 
+template<typename TDst, typename TSrc0, typename TSrc1, index_t op_sel_0 = 0, index_t op_sel_1 = 1>
+DEVICE void v_pk_mov_b32(TDst & dst, const TSrc0 & src0, const TSrc1 & src1)
+{
+    static_assert(sizeof(TDst) == 8 && sizeof(TSrc0) == 8 && sizeof(TSrc1) == 8);
+    asm volatile("v_pk_mov_b32 %0, %1, %2 op_sel:[%3,%4]" : "+v"(dst) : "v"(src0), "v"(src1), "n"(op_sel_0), "n"(op_sel_1));
+}
+
 #define BUFFER_LOAD_DWORD3 0x00020000
 
 DEVICE dwordx4_t make_buffer_resource(const void * ptr)
@@ -326,6 +333,10 @@ DEVICE dwordx4_t make_buffer_resource(const void * ptr)
     return __builtin_bit_cast(dwordx4_t, res);
 }
 
+
+// NOTE: we give the output-operand in gld a "+" clobber flag (read/write) instead of "=" (write)
+//       in case we may first write into this register, like clear with zero, then use gld
+//       if only have "=", compiler may optimze out the first write zero operation.
 template<index_t bytes>
 struct gld;
 
@@ -334,9 +345,7 @@ template<> struct gld<16>{
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
         static_assert(sizeof(T) == 16);
         asm volatile("buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4"
-            : "=v"(value)
-            : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset)
-            : "memory");
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
     }
 };
 
@@ -345,9 +354,7 @@ template<> struct gld<8>{
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
         static_assert(sizeof(T) == 8);
         asm volatile("buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4"
-            : "=v"(value)
-            : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset)
-            : "memory");
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
     }
 };
 
@@ -356,9 +363,44 @@ template<> struct gld<4>{
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
         static_assert(sizeof(T) == 4);
         asm volatile("buffer_load_dword %0, %1, %2, %3 offen offset:%4"
-            : "=v"(value)
-            : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset)
-            : "memory");
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+template<index_t bytes>
+struct gld_if;
+
+template<> struct gld_if<16>{
+    template<typename T>
+    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
+        static_assert(sizeof(T) == 16);
+        auto save_exec = __builtin_amdgcn_read_exec();
+        asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
+                     "buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4\n"
+                     "s_mov_b64 exec, %6"
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+    }
+};
+
+template<> struct gld_if<8>{
+    template<typename T>
+    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
+        static_assert(sizeof(T) == 8);
+        asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
+                     "buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4\n"
+                     "s_mov_b64 exec, -1"
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag) : "memory");
+    }
+};
+
+template<> struct gld_if<4>{
+    template<typename T>
+    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
+        static_assert(sizeof(T) == 4);
+        asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
+                     "buffer_load_dwordx1 %0, %1, %2, %3 offen offset:%4\n"
+                     "s_mov_b64 exec, -1"
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag) : "memory");
     }
 };
 
@@ -638,10 +680,27 @@ template<> struct mfma_selector<f16, f16, f32, 32, 32, 16> { using type = mfma_f
 template<typename T, index_t N>
 constexpr void clear(vector_type<T, N> & vec)
 {
-    constexpr_for<0, N, 1>{}(
-        [&](auto i){
+#if 1
+    if constexpr (sizeof(T) * N % 8 == 0){
+        // b64 fast path
+        using chunk_type = typename vector_type<T, 8 / sizeof(T)>::type;
+        static_assert(sizeof(chunk_type) == 8);
+        constexpr index_t chunks = sizeof(T) * N / sizeof(chunk_type);
+        chunk_type z{0};
+        constexpr_for<0, chunks, 1>{}([&](auto i_chunk){
+            v_pk_mov_b32(vec.template to_varray<chunk_type>()[i_chunk], z, z);
+        });
+    }
+    else {
+        constexpr_for<0, N, 1>{}([&](auto i){
             vec.template to_varray<T>()[i] = static_cast<T>(0);
         });
+    }
+#else
+    constexpr_for<0, N, 1>{}([&](auto i){
+        vec.template to_varray<T>()[i] = static_cast<T>(0);
+    });
+#endif
 }
 
 template<typename DstType, typename SrcType, index_t N>
