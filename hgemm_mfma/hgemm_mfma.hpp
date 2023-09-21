@@ -246,12 +246,6 @@ struct epilogue_iterator {
 
     using mfma_inst = typename mfma_selector<a_type, b_type, acc_type, M_PER_WAVE, N_PER_WAVE, K_PER_WAVE>::type;
 
-    DEVICE index_t gst_v_offset(const index_t stride_)
-    {
-        index_t col_id = threadIdx.x % (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group) * mfma_inst::c_per_group;
-        index_t row_id = threadIdx.x / (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group);
-        return (row_id * stride_ + col_id) * sizeof(c_type);
-    }
     DEVICE index_t sst_v_offset()
     {
         // store per repeat
@@ -261,16 +255,19 @@ struct epilogue_iterator {
         index_t i_n = lane_id / mfma_inst::m * mfma_inst::c_per_group + (wave_id % BLOCK_N_WAVES) * N_PER_WAVE;
         return (i_m * (mfma_inst::c_per_group/*padding*/ + BLOCK_N_WAVES * N_PER_WAVE) + i_n) * sizeof(c_type);
     }
-    DEVICE index_t sld_v_offset()
+    DEVICE constexpr epilogue_iterator(c_type * ptr_, index_t m_dim_, index_t n_dim_, index_t stride_, char * smem_)
     {
-        index_t col_id = threadIdx.x % (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group) * mfma_inst::c_per_group;
-        index_t row_id = threadIdx.x / (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group);
-        return (row_id * (mfma_inst::c_per_group/*padding*/ + BLOCK_N_WAVES * N_PER_WAVE) + col_id) * sizeof(c_type);
+        ptr = ptr_;
+        m_dim = m_dim_;
+        n_dim = n_dim_;
+        stride = stride_;
+        smem = smem_;
+        col_id = threadIdx.x % (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group) * mfma_inst::c_per_group;
+        row_id = threadIdx.x / (BLOCK_N_WAVES * N_PER_WAVE / mfma_inst::c_per_group);
+        gst_v_offset_base = (row_id * stride_ + col_id) * sizeof(c_type);
+        sst_v_offset_base = sst_v_offset();
+        sld_v_offset_base = (row_id * (mfma_inst::c_per_group/*padding*/ + BLOCK_N_WAVES * N_PER_WAVE) + col_id) * sizeof(c_type);
     }
-
-    DEVICE constexpr epilogue_iterator(c_type * ptr_, index_t stride_, char * smem_) :
-            ptr(ptr_), stride(stride_), smem(smem_), gst_v_offset_base(gst_v_offset(stride_)),
-            sst_v_offset_base(sst_v_offset()), sld_v_offset_base(sld_v_offset()){}
 
     template<typename ACC_VECTOR>
     DEVICE constexpr void operator()(const ACC_VECTOR& acc_buf)
@@ -301,11 +298,22 @@ struct epilogue_iterator {
                 });
                 constexpr_for<0, mfma_inst::groups, 1>{}([&](auto i_g){
                     sld_fence(mfma_inst::groups - i_g - 1);
+#if 0
                     gst<sizeof(c_group_t)>{}(gst_buf.template to_varray<c_group_t>()[i_g],
                             make_buffer_resource(ptr),
                             gst_v_offset_base, /*v*/
                             ((i_m * BLOCK_M_WAVES * M_PER_WAVE + i_g * rows_per_sld_gst) * stride + i_n * BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type), /*s*/
                             0/*i*/ );
+#else
+                    index_t flag = ((i_m * BLOCK_M_WAVES * M_PER_WAVE + i_g * rows_per_sld_gst + row_id) < m_dim) && 
+                                    ((i_n * BLOCK_N_WAVES * N_PER_WAVE + col_id) < n_dim);
+                    gst_if<sizeof(c_group_t)>{}(gst_buf.template to_varray<c_group_t>()[i_g],
+                            make_buffer_resource(ptr),
+                            gst_v_offset_base, /*v*/
+                            ((i_m * BLOCK_M_WAVES * M_PER_WAVE + i_g * rows_per_sld_gst) * stride + i_n * BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type), /*s*/
+                            0/*i*/,
+                            flag);
+#endif
                 });
             });
         });
@@ -313,8 +321,14 @@ struct epilogue_iterator {
     }
 
     c_type * ptr;
+    index_t m_dim;
+    index_t n_dim;
     index_t stride;
     char * smem;
+
+    index_t col_id;
+    index_t row_id;
+
     index_t gst_v_offset_base;
     index_t sst_v_offset_base;
     index_t sld_v_offset_base;
@@ -419,16 +433,16 @@ struct gemm_kernel
 
     DEVICE auto operator()(const args & karg, char * smem){
         auto ts = tile_scheduler<M_PER_BLOCK, N_PER_BLOCK>{karg.m, karg.n};
-        index_t i_m, i_n;
-        ts(i_m, i_n);
+        index_t block_i_m, block_i_n;
+        ts(block_i_m, block_i_n);
 
-        a_type * ptr_a = reinterpret_cast<a_type*>(karg.ptr_a) + i_m * karg.lda;
-        b_type * ptr_b = reinterpret_cast<b_type*>(karg.ptr_b) + i_n * karg.ldb;
-        c_type * ptr_c = reinterpret_cast<c_type*>(karg.ptr_c) + i_m * karg.ldc + i_n;
+        a_type * ptr_a = reinterpret_cast<a_type*>(karg.ptr_a) + block_i_m * karg.lda;
+        b_type * ptr_b = reinterpret_cast<b_type*>(karg.ptr_b) + block_i_n * karg.ldb;
+        c_type * ptr_c = reinterpret_cast<c_type*>(karg.ptr_c) + block_i_m * karg.ldc + block_i_n;
 
         auto k_iters = (karg.k + K_PER_BLOCK - 1) / K_PER_BLOCK;
-        auto gld_a = gld_iterator_s_r<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_A>{ptr_a, karg.m, karg.k, karg.lda};
-        auto gld_b = gld_iterator_s_r<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_B>{ptr_b, karg.n, karg.k, karg.ldb};
+        auto gld_a = gld_iterator_s_r<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_A>{ptr_a, karg.m - block_i_m, karg.k, karg.lda};
+        auto gld_b = gld_iterator_s_r<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_B>{ptr_b, karg.n - block_i_n, karg.k, karg.ldb};
 
         auto sst_a = sst_iterator_r0_s_r1<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, KPACK_A>{smem};
         auto sst_b = sst_iterator_r0_s_r1<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, KPACK_B>{smem, smem_size_a()};
@@ -516,7 +530,7 @@ struct gemm_kernel
         }
         // tail
         gemm(sld_iter_a, sld_iter_b);
-        auto epilogue = epilogue_iterator<DATA_TYPES_, BLOCK_TILE_, BLOCK_WAVES_, WAVE_TILE_> {ptr_c, karg.ldc, smem};
+        auto epilogue = epilogue_iterator<DATA_TYPES_, BLOCK_TILE_, BLOCK_WAVES_, WAVE_TILE_> {ptr_c, karg.m - block_i_m, karg.n - block_i_n, karg.ldc, smem};
         // write out
         sched_barrier();  // in case mfma dest has raw harzard
         epilogue(acc_buf);

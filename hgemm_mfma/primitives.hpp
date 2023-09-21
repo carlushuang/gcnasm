@@ -386,10 +386,11 @@ template<> struct gld_if<8>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 8);
+        auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4\n"
-                     "s_mov_b64 exec, -1"
-            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag) : "memory");
+                     "s_mov_b64 exec, %6"
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
     }
 };
 
@@ -397,10 +398,11 @@ template<> struct gld_if<4>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 4);
+        auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_load_dwordx1 %0, %1, %2, %3 offen offset:%4\n"
-                     "s_mov_b64 exec, -1"
-            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag) : "memory");
+                     "s_mov_b64 exec, %6"
+            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
     }
 };
 
@@ -412,9 +414,7 @@ template<> struct gst<16>{
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
         static_assert(sizeof(T) == 16);
         asm volatile("buffer_store_dwordx4 %0, %1, %2, %3 offen offset:%4"
-            :
-            : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset)
-            : "memory");
+            : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
     }
 };
 
@@ -423,9 +423,7 @@ template<> struct gst<8>{
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
         static_assert(sizeof(T) == 8);
         asm volatile("buffer_store_dwordx2 %0, %1, %2, %3 offen offset:%4"
-            :
-            : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset)
-            : "memory");
+            : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
     }
 };
 
@@ -434,9 +432,46 @@ template<> struct gst<4>{
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
         static_assert(sizeof(T) == 4);
         asm volatile("buffer_store_dword %0, %1, %2, %3 offen offset:%4"
-            :
-            : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset)
-            : "memory");
+            : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+template<index_t bytes>
+struct gst_if;
+
+template<> struct gst_if<16>{
+    template<typename T>
+    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
+        static_assert(sizeof(T) == 16);
+        auto save_exec = __builtin_amdgcn_read_exec();
+        asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
+                     "buffer_store_dwordx4 %0, %1, %2, %3 offen offset:%4\n"
+                     "s_mov_b64 exec %6"
+            : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+    }
+};
+
+template<> struct gst_if<8>{
+    template<typename T>
+    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
+        static_assert(sizeof(T) == 8);
+        auto save_exec = __builtin_amdgcn_read_exec();
+        asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
+                     "buffer_store_dwordx2 %0, %1, %2, %3 offen offset:%4\n"
+                     "s_mov_b64 exec %6"
+            : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+    }
+};
+
+template<> struct gst_if<4>{
+    template<typename T>
+    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
+        static_assert(sizeof(T) == 4);
+        auto save_exec = __builtin_amdgcn_read_exec();
+        asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
+                     "buffer_store_dword %0, %1, %2, %3 offen offset:%4\n"
+                     "s_mov_b64 exec %6"
+            : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
     }
 };
 
