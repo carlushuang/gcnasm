@@ -715,7 +715,7 @@ template<> struct mfma_selector<f16, f16, f32, 32, 32, 16> { using type = mfma_f
 template<typename T, index_t N>
 constexpr void clear(vector_type<T, N> & vec)
 {
-#if 1
+#if 0
     if constexpr (sizeof(T) * N % 8 == 0){
         // b64 fast path
         using chunk_type = typename vector_type<T, 8 / sizeof(T)>::type;

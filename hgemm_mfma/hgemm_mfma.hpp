@@ -138,7 +138,7 @@ struct sst_iterator_r0_s_r1 {
     index_t base_addr;
 };
 
-#define USE_GLD_IF 1
+#define USE_GLD_IF 0
 template<typename dtype_, index_t BLOCK_SIZE_, index_t S_PER_BLOCK_, index_t R_PER_BLOCK_, index_t ALIGNMENT_>
 struct gld_iterator_s_r {
     static constexpr index_t issues = S_PER_BLOCK_ * R_PER_BLOCK_ / BLOCK_SIZE_ / ALIGNMENT_;
@@ -453,7 +453,7 @@ struct gemm_kernel
         vector_type<acc_type, WAVE_M_REPEAT * WAVE_N_REPEAT * mfma_inst::num_v_c> acc_buf;
         using acc_t = typename vector_type<acc_type, mfma_inst::num_v_c>::type;
 
-        auto gemm = [&](auto & sld_iter_a, auto & sld_iter_b)
+        auto gemm = [&](auto & sld_iter_a, auto & sld_iter_b, auto do_gld = bool_const<true>{})
         {
             // a use all buffer, b at most use 2 buffers
             auto mfma = mfma_inst{};
@@ -470,6 +470,9 @@ struct gemm_kernel
                                  acc_buf.template to_varray<acc_t>()[number<i_m * WAVE_N_REPEAT + i_n>{}], bool_const<true>{});
                 });
                 sld_fence(0);
+                if constexpr (i_k == 0 && do_gld) {
+                    gld_b();
+                }
                 mfma(sld_iter_a.template get<WAVE_M_REPEAT - 1>(), sld_iter_b.template get<(WAVE_N_REPEAT - 1) % 2>(),
                              acc_buf.template to_varray<acc_t>()[number<(WAVE_M_REPEAT - 1) * WAVE_N_REPEAT + WAVE_N_REPEAT - 1>{}], bool_const<true>{});
             });
@@ -511,14 +514,17 @@ struct gemm_kernel
         sst_fence(0); wave_barrier();
         gld_buf_clear();
 
+        #pragma clang loop vectorize(disable)
+        #pragma clang loop interleave(disable)
         for(auto i_k = 1; i_k < k_iters; i_k++) {
             gld_a();
-            gld_b();
+            //gld_b();
 
-            gemm(sld_iter_a, sld_iter_b);
-
+            gemm(sld_iter_a, sld_iter_b, bool_const<true>{});
+            //sched_barrier();
             gld_a.move_slice_window(K_PER_BLOCK);
             gld_b.move_slice_window(K_PER_BLOCK);
+            //sched_barrier();
             
             wave_barrier();
             gld_fence(gld_b.issues);
@@ -529,7 +535,7 @@ struct gemm_kernel
             sst_fence(0); wave_barrier();
         }
         // tail
-        gemm(sld_iter_a, sld_iter_b);
+        gemm(sld_iter_a, sld_iter_b, bool_const<false>{});
         auto epilogue = epilogue_iterator<DATA_TYPES_, BLOCK_TILE_, BLOCK_WAVES_, WAVE_TILE_> {ptr_c, karg.m - block_i_m, karg.n - block_i_n, karg.ldc, smem};
         // write out
         sched_barrier();  // in case mfma dest has raw harzard
