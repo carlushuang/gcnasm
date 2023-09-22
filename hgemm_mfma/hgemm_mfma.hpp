@@ -447,42 +447,6 @@ struct gemm_kernel
 
         auto gemm = [&](auto & sld_iter_a, auto & sld_iter_b, auto & sst_iter_a, auto & sst_iter_b, auto & gld_iter_a, auto & gld_iter_b, auto & gld_buf_clear, auto is_hot_loop = bool_const<true>{})
         {
-#if 0
-            // a use all buffer, b at most use 2 buffers
-            auto mfma = mfma_inst{};
-            if constexpr (is_hot_loop)
-                gld_a();
-            constexpr_for<0, WAVE_K_REPEAT, 1>{}([&](auto i_k){
-                sld_iter_a.template load_all<i_k>();
-                sld_iter_b.template load<0, i_k, 0>();
-                constexpr_for<0, WAVE_M_REPEAT * WAVE_N_REPEAT - 1, 1>{}([&](auto i_2d){
-                    auto i_m = number<i_2d / WAVE_N_REPEAT>{};
-                    auto i_n = number<i_2d % WAVE_N_REPEAT>{};
-                    auto i_next_n = number<(i_2d + 1) % WAVE_N_REPEAT>{};
-                    sld_iter_b.template load<i_next_n, i_k, i_next_n % 2>();
-                    sld_fence(sld_iter_b.issues);
-                    mfma(sld_iter_a.template get<i_m>(), sld_iter_b.template get<i_n % 2>(),
-                                 acc_buf.template to_varray<acc_t>()[number<i_m * WAVE_N_REPEAT + i_n>{}], bool_const<true>{});
-                });
-                sld_fence(0);
-                if constexpr (i_k == 0 && is_hot_loop) {
-                    gld_b();
-                }
-                mfma(sld_iter_a.template get<WAVE_M_REPEAT - 1>(), sld_iter_b.template get<(WAVE_N_REPEAT - 1) % 2>(),
-                             acc_buf.template to_varray<acc_t>()[number<(WAVE_M_REPEAT - 1) * WAVE_N_REPEAT + WAVE_N_REPEAT - 1>{}], bool_const<true>{});
-            });
-            if constexpr (is_hot_loop) {
-                gld_a.move_slice_window(K_PER_BLOCK);
-                gld_b.move_slice_window(K_PER_BLOCK);
-                wave_barrier();
-                gld_fence(gld_b.issues);
-                sst_a(gld_a.buf);
-                gld_fence(0);
-                sst_b(gld_b.buf);
-                gld_buf_clear();
-                sst_fence(0); wave_barrier();
-            }
-#else
             auto mfma = mfma_inst{};
             // let everything into 1 dim, easy to control the sld/gld/sst slot
             constexpr_for<0, WAVE_K_REPEAT * WAVE_M_REPEAT * WAVE_N_REPEAT, 1>{}([&](auto i_3d){
@@ -504,6 +468,11 @@ struct gemm_kernel
                     gld_iter_a();
                 if constexpr(need_gld_b)
                     gld_iter_b();
+
+                if constexpr(i_3d == 0) {
+                    // it is good to self contains this barrier inside constexpr for
+                    sst_fence(0); wave_barrier();
+                }
 
                 // conditionally do sld
                 if constexpr(need_sld_a)
@@ -536,10 +505,6 @@ struct gemm_kernel
                 mfma(sld_iter_a.template get<i_m>(), sld_iter_b.template get<i_n % 2>(),
                                 acc_buf.template to_varray<acc_t>()[number<i_m * WAVE_N_REPEAT + i_n>{}], bool_const<true>{});
             });
-            if constexpr (is_hot_loop) {
-                sst_fence(0); wave_barrier();
-            }
-#endif
         };
         auto mfma_src_dist_offset = [&](index_t & v_offset_a, index_t & v_offset_b){
             index_t lane_id = threadIdx.x % 64;
@@ -575,7 +540,6 @@ struct gemm_kernel
         gld_fence(0);
         sst_b(gld_b.buf);
         clear(acc_buf);
-        sst_fence(0); wave_barrier();
         gld_buf_clear();
 
         for(auto i_k = 1; i_k < k_iters; i_k++) {

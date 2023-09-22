@@ -571,6 +571,11 @@ DEVICE void sst_fence(index_t cnt)
     asm volatile("s_waitcnt lgkmcnt(%0)" : : "n"(cnt) : "memory");
 }
 
+DEVICE void setprio(index_t prio)
+{
+    asm volatile("s_setprio %0" : : "n"(prio));
+}
+
 DEVICE void wave_barrier()
 {
     __builtin_amdgcn_s_barrier();

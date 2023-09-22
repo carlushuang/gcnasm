@@ -8,7 +8,7 @@
     }                       \
 } while(0)
 
-using kernel = gemm_kernel<tuple<f16, f16, f16, f32>, seq<128, 256, 32>, seq<2, 2, 1>, seq<32, 32, 16>>;
+using kernel = gemm_kernel<tuple<f16, f16, f16, f32>, seq<256, 128, 32>, seq<2, 2, 1>, seq<32, 32, 16>>;
 
 template<typename kernel_type>
 struct gemm_invoker {
