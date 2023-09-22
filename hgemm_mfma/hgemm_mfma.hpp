@@ -497,7 +497,7 @@ struct gemm_kernel
                 constexpr auto need_sld_b_prefetch = bool_const<!(i_m == WAVE_M_REPEAT - 1 && i_n == WAVE_N_REPEAT - 1)>{};
                 constexpr auto need_gld_a = bool_const<i_k == 0 && i_m == 0 && i_n == 0 && is_hot_loop>{};
                 constexpr auto need_gld_b = bool_const<i_k == 0 && (i_m == WAVE_M_REPEAT - 1 && i_n == WAVE_N_REPEAT - 1) && is_hot_loop>{};
-                constexpr auto need_wait_gld_sst = bool_const<i_3d == WAVE_K_REPEAT * WAVE_M_REPEAT * WAVE_N_REPEAT - 1>{};
+                constexpr auto need_wait_gld_sst = bool_const<(i_3d == WAVE_K_REPEAT * WAVE_M_REPEAT * WAVE_N_REPEAT - 1) && is_hot_loop>{};
 
                 // conditionally do gld
                 if constexpr(need_gld_a)
@@ -515,6 +515,13 @@ struct gemm_kernel
                 if constexpr(need_sld_b_prefetch)
                     sld_iter_b.template load<i_next_n, i_k, i_next_n % 2>();
 
+                // TODO: this may have bugs if repeat if not large (?)
+                auto sld_fence_cnt = [&](){
+                    if constexpr(need_sld_b_prefetch)
+                        return sld_iter_b.issues;
+                    return index_t(0); }();
+                sld_fence(sld_fence_cnt);
+
                 // conditionally do sst, should be the last one
                 if constexpr(need_wait_gld_sst) {
                     gld_a.move_slice_window(K_PER_BLOCK);
@@ -524,17 +531,12 @@ struct gemm_kernel
                     sst_a(gld_a.buf);
                     gld_fence(0);
                     sst_b(gld_b.buf);
+                    gld_buf_clear();
                 }
-
-                auto sld_fence_cnt = [&](){
-                    if constexpr(need_sld_b_prefetch) return sld_iter_b.issues;
-                    else return 0; }();
-                sld_fence(sld_fence_cnt);
                 mfma(sld_iter_a.template get<i_m>(), sld_iter_b.template get<i_n % 2>(),
                                 acc_buf.template to_varray<acc_t>()[number<i_m * WAVE_N_REPEAT + i_n>{}], bool_const<true>{});
             });
             if constexpr (is_hot_loop) {
-                gld_buf_clear();
                 sst_fence(0); wave_barrier();
             }
 #endif
