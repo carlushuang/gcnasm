@@ -130,6 +130,10 @@ struct tuple_element<idx, T, false> {
 };
 
 template <std::size_t I, class T>
+DEVICE_HOST constexpr T getv(tuple_element<I, T, true> const& x)
+{ return {}; }
+
+template <std::size_t I, class T>
 DEVICE_HOST constexpr T const& getv(tuple_element<I, T, false> const& x)
 { return x.element; }
 
@@ -177,13 +181,13 @@ struct tuple : impl::tuple_base<make_integer_sequence<sizeof...(T)>, T...>
         : impl::tuple_base<make_integer_sequence<sizeof...(T)>, T...>(static_cast<impl::tuple_base<U...> const&>(u)) {}
 
     template<index_t I>
-    DEVICE_HOST constexpr const auto & get() const
+    DEVICE_HOST constexpr decltype(auto) get() const
     {
         return impl::getv<I>(*this);
     }
 
     template<index_t I>
-    DEVICE_HOST constexpr auto & get()
+    DEVICE_HOST constexpr decltype(auto) get()
     {
         return impl::getv<I>(*this);
     }
@@ -342,7 +346,7 @@ struct gld;
 
 template<> struct gld<16>{
     template<typename T>
-    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
+    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 16);
         asm volatile("buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
@@ -351,7 +355,7 @@ template<> struct gld<16>{
 
 template<> struct gld<8>{
     template<typename T>
-    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
+    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 8);
         asm volatile("buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
@@ -360,7 +364,7 @@ template<> struct gld<8>{
 
 template<> struct gld<4>{
     template<typename T>
-    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
+    DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 4);
         asm volatile("buffer_load_dword %0, %1, %2, %3 offen offset:%4"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
@@ -411,7 +415,7 @@ struct gst;
 
 template<> struct gst<16>{
     template<typename T>
-    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
+    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 16);
         asm volatile("buffer_store_dwordx4 %0, %1, %2, %3 offen offset:%4"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
@@ -420,7 +424,7 @@ template<> struct gst<16>{
 
 template<> struct gst<8>{
     template<typename T>
-    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
+    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 8);
         asm volatile("buffer_store_dwordx2 %0, %1, %2, %3 offen offset:%4"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
@@ -429,7 +433,7 @@ template<> struct gst<8>{
 
 template<> struct gst<4>{
     template<typename T>
-    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/){
+    DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 4);
         asm volatile("buffer_store_dword %0, %1, %2, %3 offen offset:%4"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
@@ -581,9 +585,14 @@ DEVICE void wave_barrier()
     __builtin_amdgcn_s_barrier();
 }
 template<index_t cnt = 0>
-DEVICE void sched_barrier()
+DEVICE void sched_barrier(number<cnt> = number<0>{})
 {
     __builtin_amdgcn_sched_barrier(cnt);
+}
+
+DEVICE void s_nop(index_t cnt = 0)
+{
+    asm volatile("s_nop %0" : : "n"(cnt) : "memory");
 }
 
 #define MFMA_USE_INTRINSIC 0
