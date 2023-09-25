@@ -726,8 +726,10 @@ template<> struct mfma_selector<f16, f16, f32, 16, 16, 16> { using type = mfma_f
 template<> struct mfma_selector<f16, f16, f32, 32, 32, 8>  { using type = mfma_f32_32x32x8_f16; };
 template<> struct mfma_selector<f16, f16, f32, 32, 32, 16> { using type = mfma_f32_32x32x16_f16; };
 
-template<typename T, index_t N>
-constexpr void clear(vector_type<T, N> & vec)
+#include "set_buf_predef.hpp"
+
+template<typename T, index_t N, bool disable_inline_asm = false>
+constexpr void clear(vector_type<T, N> & vec, bool_const<disable_inline_asm> = bool_const<false>{})
 {
 #if 0
     if constexpr (sizeof(T) * N % 8 == 0){
@@ -746,9 +748,7 @@ constexpr void clear(vector_type<T, N> & vec)
         });
     }
 #else
-    constexpr_for<0, N, 1>{}([&](auto i){
-        vec.template to_varray<T>()[i] = static_cast<T>(0);
-    });
+    set_buf<T, N, disable_inline_asm>{}(vec);
 #endif
 }
 
