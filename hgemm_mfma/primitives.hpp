@@ -95,6 +95,11 @@ struct sequence {
     {
         return impl::at_index_t<I, integral_constant<T, Ns>...>{};
     }
+    template<index_t I>
+    DEVICE_HOST static constexpr T get(number<I>)
+    {
+        return get<I>();
+    }
     DEVICE_HOST static constexpr T back()
     {
         return get<n_element - 1>();
@@ -247,6 +252,58 @@ struct static_buffer : public detail::static_buffer_impl_t<T, N>
         return base::template get<I>();
     }
 };
+
+
+template<typename T, index_t n_element_>
+struct array {
+    using type = array;
+    static constexpr index_t n_element = n_element_;
+    T data[n_element];
+
+    template<index_t idx>
+    DEVICE_HOST constexpr T& get() {
+        static_assert(idx < n_element);
+        return data[idx];
+    }
+    template<index_t idx>
+    DEVICE_HOST constexpr const T& get() const {
+        static_assert(idx < n_element);
+        return data[idx];
+    }
+    DEVICE_HOST constexpr T& operator[](index_t i) { return data[i]; }
+    DEVICE_HOST constexpr const T& operator[](index_t i) const { return data[i]; }
+
+    template<index_t I>
+    DEVICE_HOST constexpr T& operator[](number<I>) { return data[I]; }
+    template<index_t I>
+    DEVICE_HOST constexpr const T& operator[](number<I>) const { return data[I]; }
+
+    DEVICE_HOST constexpr auto operator+=(const type & rhs) 
+    {
+        #pragma unroll
+        for(auto i = 0; i < n_element; i++)
+        {
+            data[i] += rhs[i];
+        }
+    }
+};
+// TODO: better use aggregate initialization
+
+#define TO_SEQ(a_)                                                                                                          \
+    [a_] {                                                                                                                  \
+        if constexpr(a_.n_element == 0) { return seq<>{}; }                                                                 \
+        else if constexpr(a_.n_element == 1) { return seq<a_[0]>{}; }                                                       \
+        else if constexpr(a_.n_element == 2) { return seq<a_[0], a_[1]>{}; }                                                \
+        else if constexpr(a_.n_element == 3) { return seq<a_[0], a_[1], a_[2]>{}; }                                         \
+        else if constexpr(a_.n_element == 4) { return seq<a_[0], a_[1], a_[2], a_[3]>{}; }                                  \
+        else if constexpr(a_.n_element == 5) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4]>{}; }                           \
+        else if constexpr(a_.n_element == 6) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5]>{}; }                    \
+        else if constexpr(a_.n_element == 7) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6]>{}; }             \
+        else if constexpr(a_.n_element == 8) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7]>{}; }      \
+        else if constexpr(a_.n_element == 9) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8]>{}; }               \
+        else if constexpr(a_.n_element == 10) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9]>{}; }       \
+    }()
+
 
 template <class T>
 struct remove_cvref {

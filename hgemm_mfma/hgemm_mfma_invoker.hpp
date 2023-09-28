@@ -8,9 +8,12 @@
     }                       \
 } while(0)
 
+using tile_sched = tile_scheduler<8>;
 using gld_traits = tuple<gld_trait<false, true>, gld_trait<false>>;
-// using kernel = gemm_kernel<tuple<f16, f16, f16, f32>, seq<256, 128, 32>, seq<2, 2, 1>, seq<32, 32, 16>, seq<8, 8, 8>, gld_traits>;
-using kernel = gemm_kernel<tuple<f16, f16, f16, f32>, seq<128, 256, 32>, seq<4, 1, 1>, seq<32, 32, 16>, seq<8, 8, 8>, gld_traits>;
+using pipeline_trait = gemm_pipeline_traits<>;
+// using kernel = gemm_kernel<tuple<f16, f16, f16, f32>, seq<256, 128, 32>, seq<2, 2, 1>, seq<32, 32, 16>, seq<8, 8, 8>, gld_traits, pipeline_trait>;
+using kernel = gemm_kernel<tuple<f16, f16, f16, f32>, seq<128, 256, 32>, seq<4, 1, 1>, seq<32, 32, 16>, seq<8, 8, 8>,
+            tile_sched, gld_traits, pipeline_trait>;
 
 template<typename kernel_type>
 struct gemm_invoker {

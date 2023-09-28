@@ -99,7 +99,7 @@ void gemm_rcr(
 
 int main(int argc, char ** argv)
 {
-    int validation = 1;
+    int validation = 0;
     int m = 3840;
     int n = 4096;
     int k = 4096;
