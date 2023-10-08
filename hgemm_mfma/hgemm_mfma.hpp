@@ -223,7 +223,6 @@ struct gld_iterator_s_r {
     static_buffer<index_t, n_issue> flags;
     vector_type<dtype_, ALIGNMENT_ * n_issue> buf;
 };
-#if 1
 template<typename dtype_, index_t BLOCK_SIZE_, index_t S_PER_BLOCK_, index_t BLOCK_S_WAVES_, index_t S_PER_WAVE_,
                     index_t R_PER_BLOCK_, index_t BLOCK_R_WAVES_, index_t R_PER_WAVE_, index_t ALIGNMENT_, typename mfma_inst_, typename TRAITS_>
 struct gld_iterator_s_r_direct_to_reg {
@@ -325,7 +324,6 @@ struct gld_iterator_s_r_direct_to_reg {
     template<typename v_type, index_t i_issue, index_t i_prefetch>
     DEVICE constexpr auto & getv()
     {
-        // static_assert(i_issue < n_bufs);
         return buf[number<i_prefetch>{}].template to_varray<v_type>()[number<i_issue>{}];
     }
     dtype_ * base_ptr;
@@ -339,7 +337,6 @@ struct gld_iterator_s_r_direct_to_reg {
     static_buffer<index_t, n_issue> flags;
     static_buffer<vector_type<dtype_, n_issue * ALIGNMENT_>, N_PREFETCH> buf;
 };
-#endif
 template<typename DATA_TYPES_, typename BLOCK_TILE_, typename BLOCK_WAVES_, typename WAVE_TILE_>
 struct epilogue_iterator {
     static constexpr index_t M_PER_BLOCK = BLOCK_TILE_::template get<0>();
@@ -366,6 +363,8 @@ struct epilogue_iterator {
     using acc_type = remove_cvref_t<decltype(DATA_TYPES_{}.template get<3>())>;
 
     using mfma_inst = typename mfma_selector<a_type, b_type, acc_type, M_PER_WAVE, N_PER_WAVE, K_PER_WAVE>::type;
+
+    struct args {}; // empty args
 
     DEVICE index_t sst_v_offset()
     {
@@ -425,8 +424,7 @@ struct epilogue_iterator {
                             make_buffer_resource(ptr),
                             gst_v_offset_base, /*v*/
                             ((i_m * BLOCK_M_WAVES * M_PER_WAVE + i_g * rows_per_sld_gst) * stride + i_n * BLOCK_N_WAVES * N_PER_WAVE) * sizeof(c_type), /*s*/
-                            0/*i*/,
-                            flag);
+                            0/*i*/, flag);
                 });
             });
         });
@@ -503,20 +501,12 @@ struct gld_clear_oneside_lds {
     {
         if constexpr (GLD_A_::USE_GLD_IF && GLD_B_::USE_GLD_IF) {
             if constexpr (M_PER_BLOCK_ > N_PER_BLOCK_){
-                if constexpr (X_IS_M_) {
-                    gld_b.clear_buf();
-                }
-                else {
-                    gld_b.clear_single_buf(number<i_prefetch>{});
-                }
+                if constexpr (X_IS_M_) gld_b.clear_buf();
+                else gld_b.clear_single_buf(number<i_prefetch>{});
             }
             else {
-                if constexpr (X_IS_M_) {
-                    gld_a.clear_single_buf(number<i_prefetch>{});
-                }
-                else {
-                    gld_a.clear_buf();
-                }
+                if constexpr (X_IS_M_) gld_a.clear_single_buf(number<i_prefetch>{});
+                else gld_a.clear_buf();
             }
         }
     }
@@ -556,7 +546,7 @@ struct gemm_pipeline_traits {
 
     template<index_t is_first,  index_t second_start_distance, index_t slots,
                 index_t issues, index_t issues_per_group, index_t issue_distance>
-    struct detail {
+    struct traits_util {
         DEVICE constexpr auto operator()(){
             constexpr array<index_t, gld_slots> mask = [](){
                 array<index_t, gld_slots> mask_ {};  // value initialize this array, which is zero
@@ -571,8 +561,7 @@ struct gemm_pipeline_traits {
                             index_t issue_bit = i * issues_per_group + j;
                             tmp |= (1 << issue_bit);
                         }
-                        return tmp;
-                    }();
+                        return tmp; }();
                     mask_[current_idx] = current_mask_value;
                 }
                 return mask_;
@@ -581,19 +570,46 @@ struct gemm_pipeline_traits {
         }
     };
 
-    static constexpr auto gld_x_mask = detail<gld_x_first, gld_second_start_distance, gld_slots,
+    static constexpr auto gld_x_mask = traits_util<gld_x_first, gld_second_start_distance, gld_slots,
                                             gld_x_issues, gld_x_issues_per_group, gld_x_issue_distance>{}();
-    static constexpr auto gld_y_mask = detail<!gld_x_first, gld_second_start_distance, gld_slots,
+    static constexpr auto gld_y_mask = traits_util<!gld_x_first, gld_second_start_distance, gld_slots,
                                             gld_y_issues, gld_y_issues_per_group, gld_y_issue_distance>{}();
 
-    template<typename GLD_MASK, index_t i_slot>
-    DEVICE constexpr auto decode_mask(GLD_MASK, number<i_slot>)
+    template<index_t mask>
+    static DEVICE constexpr auto decode_mask(number<mask>)
     {
-        constexpr index_t value = GLD_MASK::get(number<i_slot>{});
-        constexpr uint32_t pos = __builtin_ffs(value);
-        constexpr uint32_t clz = __builtin_clz(value);
+        // if mask is zero, the builtin will report fail in constexpr, which is ambiguous
+        static_assert(mask != 0);
+        constexpr uint32_t pos = __builtin_ffs(mask);
+        constexpr uint32_t clz = __builtin_clz(mask);
         constexpr uint32_t len = (32 - clz) - pos + 1;
-        return gld_issue_info<pos, len>{};
+        return gld_issue_info<pos - 1, len>{};
+    }
+    template<typename GLD_MASK, index_t i_slot>
+    static DEVICE constexpr auto decode_mask(GLD_MASK, number<i_slot>)
+    {
+        return decode_mask(number<GLD_MASK::get(number<i_slot>{})>{});
+    }
+
+    template<typename MASK_FIRST, typename MASK_SECOND, index_t i_current_slot>
+    static DEVICE constexpr auto get_waitcnt_before(MASK_FIRST, MASK_SECOND, number<i_current_slot>)
+    {
+        index_t cnt = 0;
+        static_assert(MASK_FIRST::n_element == MASK_SECOND::n_element);
+        constexpr auto len = [&](){
+            if constexpr ((i_current_slot + 1) <= MASK_FIRST::n_element) return (i_current_slot + 1);
+            else return MASK_FIRST::n_element;}();
+        constexpr_for<0, len, 1>{}([&](auto i_slot){
+            constexpr auto mask_first = MASK_FIRST::get(number<i_slot>{});
+            constexpr auto mask_second = MASK_SECOND::get(number<i_slot>{});
+            if constexpr (mask_first != 0) cnt = 0;
+            if constexpr (mask_second != 0)
+            {
+                constexpr auto info = decode_mask(number<mask_second>{});
+                cnt += info.num_issues;
+            }
+        });
+        return cnt;
     }
 };
 
@@ -628,10 +644,7 @@ struct gemm_pipeline_flat {
                     gld_b(gld_b_){}
 
     template<typename karg_>
-    static constexpr bool is_applicable(const karg_ & /*karg*/ )
-    {
-        return true;
-    }
+    static constexpr bool is_applicable(const karg_ & /*karg*/ ) { return true; }
 
     template<typename ACC_BUF_>
     DEVICE void operator()(ACC_BUF_ & acc_buf, index_t k_iters)
@@ -737,9 +750,7 @@ template<bool X_IS_M_, index_t M_REPEAT_, index_t N_REPEAT_, index_t K_REPEAT_, 
 struct gemm_pipeline_oneside_lds {
     // one side of A/B use LDS, the other side just direct store data into register.
     // we use X for the side not using LDS, Y for the side using LDS.
-
     // k_iter_mod means n_span  k_iters
-    // e.g. 
 
     static constexpr bool X_IS_M = X_IS_M_;
 
@@ -768,7 +779,6 @@ struct gemm_pipeline_oneside_lds {
     static constexpr bool is_applicable(const karg_ & karg)
     {
         index_t k_iters = (karg.k + K_PER_BLOCK - 1) / K_PER_BLOCK;
-        // printf("@@@ %d, mod:%d, prefetch:%d\n", k_iter_mod, k_iters % GLD_X::N_PREFETCH, GLD_X::N_PREFETCH);
         return k_iter_mod == k_iters % GLD_X::N_PREFETCH;
     }
 
@@ -804,10 +814,12 @@ struct gemm_pipeline_oneside_lds {
         auto sld_y = SLD_Y{smem, v_offset_y};
 
         clear(acc_buf);
-        gld_fence(0);
+        if constexpr (TRAITS_::gld_x_first) gld_fence(0);
+        else gld_fence(gld_x.n_issue);
         sst_y(gld_y.buf);
         GLD_BUF_CLEAR{}(gld_x, gld_y);
 #if 1
+        // TODO: have to specialize 2 versions, due to compiler limitation
         if constexpr (GLD_X::N_PREFETCH == 2 && k_iter_mod == 0) {
             for(index_t i_k = 2; i_k < k_iters; i_k+= 2) {
                 gemm_(acc_buf, gld_x, number<0>{}, number<1>{}, gld_y, sld_y, sst_y, bool_const<true>{});
@@ -850,6 +862,10 @@ struct gemm_pipeline_oneside_lds {
 
         // let everything into 1 dim, easy to control the sld/gld/sst slot
         constexpr index_t total_repeats =  K_REPEAT * X_REPEAT * Y_REPEAT;
+        constexpr auto y_x_last_gld_cnt = TRAITS_::get_waitcnt_before(TRAITS_::gld_y_mask, TRAITS_::gld_x_mask, number<total_repeats - 1>{});
+        // if last y_x is zero, means in y->x order, some of y issue will be later than x issue, hence y->x order is partial broken
+        if constexpr (y_x_last_gld_cnt == 0) {gld_fence(0);}
+
         constexpr_for<0, total_repeats, 1>{}([&](auto i_3d){
             constexpr auto i_k = number<i_3d / ( X_REPEAT * Y_REPEAT)>{};
             constexpr auto i_2d = number<i_3d % ( X_REPEAT * Y_REPEAT)>{};
@@ -857,33 +873,56 @@ struct gemm_pipeline_oneside_lds {
             constexpr auto i_y = number<i_2d % Y_REPEAT>{};
             constexpr auto i_next_k = number<(i_3d + 1) / ( X_REPEAT * Y_REPEAT)>{};
             constexpr auto i_next_2d = number<(i_3d + 1) % ( X_REPEAT * Y_REPEAT)>{};
-            // constexpr auto i_next_x = number<i_next_2d / Y_REPEAT>{};
             constexpr auto i_next_y = number<i_next_2d % Y_REPEAT>{};
 
-            constexpr auto need_sld_y_first = bool_const<i_3d == 0>{};
             constexpr auto need_sld_y_prefetch = bool_const<i_3d != total_repeats - 1>{};
 
-            constexpr auto need_gld_x = bool_const<i_k == 0 && i_x == 0 && i_y == 0 && is_hot_loop>{};
-            constexpr auto need_gld_y = bool_const<i_k == 0 && (i_x == X_REPEAT - 1 && i_y == Y_REPEAT - 1) && is_hot_loop>{};
-            // constexpr auto need_gld_x = need_gld_y;
+            constexpr auto need_gld_0 = bool_const<i_k == 0 && i_x == 0 && i_y == 0 && is_hot_loop>{};
+            constexpr auto need_gld_1 = bool_const<i_k == 0 && (i_x == X_REPEAT - 1 && i_y == Y_REPEAT - 1) && is_hot_loop>{};
+            constexpr auto need_gld_x_default = [&](){if constexpr (TRAITS_::gld_x_first) return need_gld_0; else return need_gld_1; }();
+            constexpr auto need_gld_y_default = [&](){if constexpr (TRAITS_::gld_x_first) return need_gld_1; else return need_gld_0; }();
+
             constexpr auto need_wait_gld_sst = bool_const<(i_3d == total_repeats - 1) && is_hot_loop>{};
 
-            // conditionally do gld
-            if constexpr(need_gld_y)
-                gld_iter_y();
-            if constexpr(need_gld_x)
-                gld_iter_x.load(number<i_next_x_buf>{});
+            constexpr index_t gld_x_mask = [&]{ if constexpr (i_3d < TRAITS_::gld_x_mask.n_element)
+                                                return TRAITS_::gld_x_mask.get(i_3d); else return 0;}();
+            constexpr index_t gld_y_mask = [&]{ if constexpr (i_3d < TRAITS_::gld_y_mask.n_element)
+                                                return TRAITS_::gld_y_mask.get(i_3d); else return 0;}();
+            auto try_gld_x = [&]{
+                if constexpr (TRAITS_::use_default) { if constexpr (need_gld_x_default)
+                        {   gld_iter_x.load(number<i_next_x_buf>{});    }}
+                else { if constexpr (gld_x_mask && is_hot_loop) {
+                        constexpr auto gld_x_info = TRAITS_::decode_mask(number<gld_x_mask>{});
+                        constexpr_for<0, gld_x_info.num_issues, 1>{}([&](auto i_issue){
+                            gld_iter_x.issue(number<gld_x_info.issue_id + i_issue>{}, number<i_next_x_buf>{});
+                    });
+                }}};
+            auto try_gld_y = [&]{
+                if constexpr (TRAITS_::use_default) { if constexpr (need_gld_y_default)
+                        {   gld_iter_y();   }}
+                else { if constexpr (gld_y_mask && is_hot_loop) {
+                        constexpr auto gld_y_info = TRAITS_::decode_mask(number<gld_y_mask>{});
+                        constexpr_for<0, gld_y_info.num_issues, 1>{}([&](auto i_issue){
+                            gld_iter_y.issue(number<gld_y_info.issue_id + i_issue>{});
+                    });
+                }}};
+
+            if constexpr (TRAITS_::gld_x_first) { try_gld_x(); try_gld_y();}
+            else                                { try_gld_y(); try_gld_x();}
 
             if constexpr(i_3d == 0) {
                 // it is good to self contains this barrier inside constexpr for
                 sst_fence(0); wave_barrier();
-            }
-
-            if constexpr(need_sld_y_first)
                 sld_iter_y.template load<0, i_k, 0>();
+            }
 
             if constexpr(need_sld_y_prefetch)
                 sld_iter_y.template load<i_next_y, i_next_k, i_next_y % 2>();
+
+            if constexpr(i_3d == 0) {
+                // after first y issue, then wait for previous x, before entering main loop
+                if constexpr (!TRAITS_::gld_x_first && y_x_last_gld_cnt != 0) gld_fence(TRAITS_::gld_y_issues_per_group);
+            }
 
             // TODO: this may have bugs if repeat if not large (?)
             auto sld_fence_cnt = [&](){
@@ -892,14 +931,12 @@ struct gemm_pipeline_oneside_lds {
                 return index_t(0); }();
             sld_fence(sld_fence_cnt);
 
-            // conditionally do sst, should be the last one
             if constexpr(need_wait_gld_sst) {
                 gld_iter_y.move_slice_window(K_PER_BLOCK_);
                 gld_iter_x.move_slice_window(K_PER_BLOCK_);
                 wave_barrier();
-                // gld_fence(gld_iter_x.n_issue);
-                
-                gld_fence(0);
+                if constexpr (TRAITS_::gld_x_first) gld_fence(0);
+                else gld_fence(y_x_last_gld_cnt);
                 sst_iter_y(gld_iter_y.buf);
                 GLD_BUF_CLEAR{}(gld_iter_x, gld_iter_y);
             }
@@ -910,7 +947,7 @@ struct gemm_pipeline_oneside_lds {
 };
 
 template<typename DATA_TYPES_, typename BLOCK_TILE_, typename BLOCK_WAVES_, typename WAVE_TILE_, typename ALIGNMENT_,
-    typename TILE_SCHEDULER_, typename GLD_TRAITS_, typename PIPELINE_TRAIT_>
+    typename TILE_SCHEDULER_, typename GLD_TRAITS_, typename PIPELINE_TRAIT_, typename EPILOGUE_>
 struct gemm_kernel
 {   // only support rcr layout
     static constexpr index_t M_PER_BLOCK = BLOCK_TILE_::template get<0>();
@@ -943,6 +980,7 @@ struct gemm_kernel
     using GLD_TRAIT_A = remove_cvref_t<decltype(GLD_TRAITS_{}.template get<0>())>;
     using GLD_TRAIT_B = remove_cvref_t<decltype(GLD_TRAITS_{}.template get<1>())>;
     using PIPELINE_TRAIT = remove_cvref_t<PIPELINE_TRAIT_>;
+    using EPILOGUE = remove_cvref_t<EPILOGUE_>;
     static constexpr bool one_side_lds = GLD_TRAIT_A::BYPASS_LDS ^ GLD_TRAIT_B::BYPASS_LDS;
 
     // for simplicity, we just use the same vector size as k_pack
@@ -994,7 +1032,9 @@ struct gemm_kernel
 
     using gemm_pipeline_t = std::conditional_t<one_side_lds, gemm_pipeline_oneside_lds_type, gemm_pipepine_type>;
 
-    struct args
+    // NOTE: use multi inheritance to pass karg to any fused operators.
+    // If fused operator has zero bytes, this technique will take no extra space
+    struct args : public EPILOGUE::args
     {
         void * ptr_a;
         void * ptr_b;
@@ -1069,7 +1109,7 @@ struct gemm_kernel
 
         auto gemm = gemm_pipeline_t{smem, lds_offset, gld_a, gld_b};
         gemm(acc_buf, k_iters);
-        auto epilogue = epilogue_iterator<DATA_TYPES_, BLOCK_TILE_, BLOCK_WAVES_, WAVE_TILE_> {ptr_c, karg.m - block_i_m, karg.n - block_i_n, karg.ldc, smem};
+        auto epilogue = EPILOGUE{ptr_c, karg.m - block_i_m, karg.n - block_i_n, karg.ldc, smem};
         // write out
         sched_barrier();  // in case mfma dest has raw harzard
         epilogue(acc_buf);

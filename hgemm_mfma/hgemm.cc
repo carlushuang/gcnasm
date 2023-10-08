@@ -147,7 +147,7 @@ int main(int argc, char ** argv)
 
     printf("m:%d,n:%d,k:%d,lda:%d,ldb:%d,ldc:%d",  m, n, k, lda, ldb, ldc); fflush(stdout);
 
-    auto invoker = gemm_invoker<kernel>{};
+    auto invoker = gemm_invoker<kernel_t>{};
     auto karg = invoker.make_karg(dev_a, dev_b, dev_c, m, n, k, lda, ldb, ldc);
     bool applicable = invoker.is_applicable(karg);
     float ms = 0;

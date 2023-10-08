@@ -287,10 +287,12 @@ struct array {
         }
     }
 };
-// TODO: better use aggregate initialization
 
+#if 1
+// TODO: use nontype template if c++20
 #define TO_SEQ(a_)                                                                                                          \
     [a_] {                                                                                                                  \
+        static_assert(a_.n_element <= 18);                                                                                  \
         if constexpr(a_.n_element == 0) { return seq<>{}; }                                                                 \
         else if constexpr(a_.n_element == 1) { return seq<a_[0]>{}; }                                                       \
         else if constexpr(a_.n_element == 2) { return seq<a_[0], a_[1]>{}; }                                                \
@@ -302,8 +304,24 @@ struct array {
         else if constexpr(a_.n_element == 8) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7]>{}; }      \
         else if constexpr(a_.n_element == 9) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8]>{}; }               \
         else if constexpr(a_.n_element == 10) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9]>{}; }       \
+        else if constexpr(a_.n_element == 11) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10]>{}; }                                                                       \
+        else if constexpr(a_.n_element == 12) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10], a_[11]>{}; }                                                               \
+        else if constexpr(a_.n_element == 13) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10], a_[11], a_[12]>{}; }                                                       \
+        else if constexpr(a_.n_element == 14) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10], a_[11], a_[12], a_[13]>{}; }                                               \
+        else if constexpr(a_.n_element == 15) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10], a_[11], a_[12], a_[13], a_[14]>{}; }                                       \
+        else if constexpr(a_.n_element == 16) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10], a_[11], a_[12], a_[13], a_[14], a_[15]>{}; }                               \
+        else if constexpr(a_.n_element == 17) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10], a_[11], a_[12], a_[13], a_[14], a_[15], a_[16]>{}; }                       \
+        else if constexpr(a_.n_element == 18) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
+                                                         a_[10], a_[11], a_[12], a_[13], a_[14], a_[15], a_[16], a_[17]>{}; }               \
     }()
-
+#endif
 
 template <class T>
 struct remove_cvref {
