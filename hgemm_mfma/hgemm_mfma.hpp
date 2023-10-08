@@ -649,24 +649,37 @@ struct gemm_pipeline_flat {
     template<typename ACC_BUF_>
     DEVICE void operator()(ACC_BUF_ & acc_buf, index_t k_iters)
     {
-        gld_a.clear_buf();
-        gld_a(); gld_a.move_slice_window(K_PER_BLOCK_);
-        gld_b.clear_buf();
-        gld_b(); gld_b.move_slice_window(K_PER_BLOCK_);
+        if constexpr (TRAITS::gld_x_first) {
+            gld_a.clear_buf();
+            gld_a(); gld_a.move_slice_window(K_PER_BLOCK_);
+            gld_b.clear_buf();
+            gld_b(); gld_b.move_slice_window(K_PER_BLOCK_);
+        } else {
+            gld_b.clear_buf();
+            gld_b(); gld_b.move_slice_window(K_PER_BLOCK_);
+            gld_a.clear_buf();
+            gld_a(); gld_a.move_slice_window(K_PER_BLOCK_);
+        }
 
         index_t v_offset_a, v_offset_b;
         MFMA_MAPPING_FOR_SLD{}(v_offset_a, v_offset_b);
         auto sst_a = SST_A{smem, 0};
         auto sst_b = SST_B{smem, lds_b_offset};
-
         auto sld_a = SLD_A{smem, v_offset_a, 0};
         auto sld_b = SLD_B{smem, v_offset_b, lds_b_offset};
 
         clear(acc_buf);
-        gld_fence(gld_b.n_issue);
-        sst_a(gld_a.buf);
-        gld_fence(0);
-        sst_b(gld_b.buf);
+        if constexpr (TRAITS::gld_x_first) {
+            gld_fence(gld_b.n_issue);
+            sst_a(gld_a.buf);
+            gld_fence(0);
+            sst_b(gld_b.buf);
+        } else {
+            gld_fence(gld_a.n_issue);
+            sst_b(gld_b.buf);
+            gld_fence(0);
+            sst_a(gld_a.buf);
+        }
         GLD_BUF_CLEAR{}(gld_a, gld_b);
 
         for(auto i_k = 1; i_k < k_iters; i_k++) {
@@ -684,26 +697,56 @@ struct gemm_pipeline_flat {
         using acc_t = typename vector_type<acc_type, mfma_inst::num_v_c>::type;
         auto mfma = mfma_inst{};
 
+        constexpr auto total_repeats = K_REPEAT_ * M_REPEAT_ * N_REPEAT_;
+        constexpr auto last_gld_cnt = [&](){
+            if constexpr (TRAITS_::gld_x_first)
+                return TRAITS_::get_waitcnt_before(TRAITS_::gld_x_mask, TRAITS_::gld_y_mask, number<total_repeats - 1>{});
+            else
+                return TRAITS_::get_waitcnt_before(TRAITS_::gld_y_mask, TRAITS_::gld_x_mask, number<total_repeats - 1>{});
+        }();
         // let everything into 1 dim, easy to control the sld/gld/sst slot
-        constexpr_for<0, K_REPEAT_ * M_REPEAT_ * N_REPEAT_, 1>{}([&](auto i_3d){
+        constexpr_for<0, total_repeats, 1>{}([&](auto i_3d){
             constexpr auto i_k = number<i_3d / ( M_REPEAT_ * N_REPEAT_)>{};
             constexpr auto i_2d = number<i_3d % ( M_REPEAT_ * N_REPEAT_)>{};
             constexpr auto i_m = number<i_2d / N_REPEAT_>{};
             constexpr auto i_n = number<i_2d % N_REPEAT_>{};
             constexpr auto i_next_n = number<(i_2d + 1) % N_REPEAT_>{};
 
-            constexpr auto need_sld_a = bool_const<i_m == 0 && i_n == 0>{};
-            constexpr auto need_sld_b_first = bool_const<i_m == 0 && i_n == 0>{};
+            constexpr auto need_sld_a_first = bool_const<i_2d == 0>{};
+            constexpr auto need_sld_b_first = bool_const<i_2d == 0>{};
             constexpr auto need_sld_b_prefetch = bool_const<!(i_m == M_REPEAT_ - 1 && i_n == N_REPEAT_ - 1)>{};
-            constexpr auto need_gld_a = bool_const<i_k == 0 && i_m == 0 && i_n == 0 && is_hot_loop>{};
-            constexpr auto need_gld_b = bool_const<i_k == 0 && (i_m == M_REPEAT_ - 1 && i_n == N_REPEAT_ - 1) && is_hot_loop>{};
-            constexpr auto need_wait_gld_sst = bool_const<(i_3d == K_REPEAT_ * M_REPEAT_ * N_REPEAT_ - 1) && is_hot_loop>{};
+            constexpr auto need_gld_0 = bool_const<i_k == 0 && i_m == 0 && i_n == 0 && is_hot_loop>{};
+            constexpr auto need_gld_1 = bool_const<i_k == 0 && (i_m == M_REPEAT_ - 1 && i_n == N_REPEAT_ - 1) && is_hot_loop>{};
+            constexpr auto need_gld_a_default = [&](){if constexpr (TRAITS_::gld_x_first) return need_gld_0; else return need_gld_1; }();
+            constexpr auto need_gld_b_default = [&](){if constexpr (TRAITS_::gld_x_first) return need_gld_1; else return need_gld_0; }();
+            constexpr auto need_wait_gld_sst = bool_const<(i_3d == total_repeats - 1) && is_hot_loop>{};
 
-            // conditionally do gld
-            if constexpr(need_gld_a)
-                gld_iter_a();
-            if constexpr(need_gld_b)
-                gld_iter_b();
+            constexpr index_t gld_x_mask = [&]{ if constexpr (i_3d < TRAITS_::gld_x_mask.n_element)
+                                                return TRAITS_::gld_x_mask.get(i_3d); else return 0;}();
+            constexpr index_t gld_y_mask = [&]{ if constexpr (i_3d < TRAITS_::gld_y_mask.n_element)
+                                                return TRAITS_::gld_y_mask.get(i_3d); else return 0;}();
+
+            auto try_gld_x = [&]{
+                if constexpr (TRAITS_::use_default) { if constexpr (need_gld_a_default)
+                        {   gld_iter_a();    }}
+                else { if constexpr (gld_x_mask && is_hot_loop) {
+                        constexpr auto gld_x_info = TRAITS_::decode_mask(number<gld_x_mask>{});
+                        constexpr_for<0, gld_x_info.num_issues, 1>{}([&](auto i_issue){
+                            gld_iter_a.issue(number<gld_x_info.issue_id + i_issue>{});
+                    });
+                }}};
+            auto try_gld_y = [&]{
+                if constexpr (TRAITS_::use_default) { if constexpr (need_gld_b_default)
+                        {   gld_iter_b();   }}
+                else { if constexpr (gld_y_mask && is_hot_loop) {
+                        constexpr auto gld_y_info = TRAITS_::decode_mask(number<gld_y_mask>{});
+                        constexpr_for<0, gld_y_info.num_issues, 1>{}([&](auto i_issue){
+                            gld_iter_b.issue(number<gld_y_info.issue_id + i_issue>{});
+                    });
+                }}};
+
+            if constexpr (TRAITS_::gld_x_first) { try_gld_x(); try_gld_y();}
+            else                                { try_gld_y(); try_gld_x();}
 
             if constexpr(i_3d == 0) {
                 // it is good to self contains this barrier inside constexpr for
@@ -711,14 +754,9 @@ struct gemm_pipeline_flat {
             }
 
             // conditionally do sld
-            if constexpr(need_sld_a)
-                sld_iter_a.template load_all<i_k>();
-
-            if constexpr(need_sld_b_first)
-                sld_iter_b.template load<0, i_k, 0>();
-
-            if constexpr(need_sld_b_prefetch)
-                sld_iter_b.template load<i_next_n, i_k, i_next_n % 2>();
+            if constexpr(need_sld_a_first)      sld_iter_a.template load_all<i_k>();
+            if constexpr(need_sld_b_first)      sld_iter_b.template load<0, i_k, 0>();
+            if constexpr(need_sld_b_prefetch)   sld_iter_b.template load<i_next_n, i_k, i_next_n % 2>();
 
             // TODO: this may have bugs if repeat if not large (?)
             auto sld_fence_cnt = [&](){
@@ -732,10 +770,17 @@ struct gemm_pipeline_flat {
                 gld_iter_a.move_slice_window(K_PER_BLOCK_);
                 gld_iter_b.move_slice_window(K_PER_BLOCK_);
                 wave_barrier();
-                gld_fence(gld_iter_b.n_issue);
-                sst_iter_a(gld_iter_a.buf);
-                gld_fence(0);
-                sst_iter_b(gld_iter_b.buf);
+                if constexpr (TRAITS_::gld_x_first) {
+                    gld_fence(last_gld_cnt);
+                    sst_iter_a(gld_iter_a.buf);
+                    gld_fence(0);
+                    sst_iter_b(gld_iter_b.buf);
+                } else {
+                    gld_fence(last_gld_cnt);
+                    sst_iter_b(gld_iter_b.buf);
+                    gld_fence(0);
+                    sst_iter_a(gld_iter_a.buf);
+                }
                 GLD_BUF_CLEAR{}(gld_iter_a, gld_iter_b);
             }
             mfma(sld_iter_a.template get<i_m>(), sld_iter_b.template get<i_n % 2>(),
@@ -1046,6 +1091,18 @@ struct gemm_kernel
         index_t ldb;
         index_t ldc;
     };
+    static args make_karg(void * ptr_a,
+        void * ptr_b,
+        void * ptr_c,
+        index_t m,
+        index_t n,
+        index_t k,
+        index_t lda,    // in unit of pixel
+        index_t ldb,
+        index_t ldc)
+    {
+        return args{{}, ptr_a, ptr_b, ptr_c, m, n, k, lda, ldb, ldc};
+    }
 
     static bool is_applicable(args karg)
     {

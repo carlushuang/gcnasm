@@ -22,7 +22,7 @@ using block_waves_t = seq<4, 1, 1>;
 using wave_tile_t = seq<32, 32, 16>;
 using alignments_t = seq<8, 8, 8>;
 using tile_sched_t = tile_scheduler<8>;
-using gld_traits_t = tuple<gld_trait<false/*gld if*/, true/*bypass LDS*/>, gld_trait<false>>;
+using gld_traits_t = tuple<gld_trait<false/*gld if*/, false/*bypass LDS*/>, gld_trait<false>>;
 // template<bool gld_x_first_ = true,
 //          index_t gld_second_start_distance_ = 0,
 //          index_t gld_slots_ = 1,
@@ -34,25 +34,22 @@ using gld_traits_t = tuple<gld_trait<false/*gld if*/, true/*bypass LDS*/>, gld_t
 //          index_t gld_y_issue_distance_ = 0,
 //          /* for oneside lds */
 //          index_t k_iter_mod_ = 0>
-using pipeline_trait_t = gemm_pipeline_traits<false, 5, 16 - 1, 2, 4, 2, 2, 1, 2, 0/*k_iter_mod*/>;
-// using pipeline_trait = gemm_pipeline_traits<true, 3, 16 - 1, 2, 4, 2, 2, 1, 4, 0/*k_iter_mod*/>;
+// using pipeline_trait_t = gemm_pipeline_traits<false, 5, 16 - 1, 2, 4, 2, 2, 1, 2, 0/*k_iter_mod*/>; /* use this for one-LDS */
+// using pipeline_trait_t = gemm_pipeline_traits<true, 3, 16 - 1, 2, 4, 2, 2, 1, 4, 0/*k_iter_mod*/>; /* use this for one-LDS */
+using pipeline_trait_t = gemm_pipeline_traits<true, 5, 16 - 1, 2, 4, 2, 2, 1, 6, 0/*k_iter_mod*/>; /* use this for dual-LDS */
+
+
+
 using epilogue_t = epilogue_iterator<data_type_t, block_tile_t, block_waves_t, wave_tile_t>;
 using kernel_t = gemm_kernel<data_type_t, block_tile_t, block_waves_t, wave_tile_t, alignments_t,
             tile_sched_t, gld_traits_t, pipeline_trait_t, epilogue_t>;
 
 template<typename kernel_type>
 struct gemm_invoker {
-    typename kernel_type::args make_karg(void * ptr_a,
-        void * ptr_b,
-        void * ptr_c,
-        index_t m,
-        index_t n,
-        index_t k,
-        index_t lda,    // in unit of pixel
-        index_t ldb,
-        index_t ldc)
+    template<typename... ARGS>
+    static typename kernel_type::args make_karg(ARGS... args)
     {
-        return typename kernel_type::args{{}, ptr_a, ptr_b, ptr_c, m, n, k, lda, ldb, ldc};
+        return kernel_type::make_karg(args...);
     }
 
     static bool is_applicable(typename kernel_type::args karg)
