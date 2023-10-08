@@ -68,6 +68,7 @@ struct gld_trait {
 
 template<typename dtype_, index_t S_PER_BLOCK_, index_t BLOCK_S_WAVES_, index_t S_PER_WAVE_, index_t R_PACK_, index_t R0_PER_ROW_, bool load_all_s_repeat = true>
 struct sld_iterator_r0_s_r1 {
+    // This version will load one r_repeat, and conditionally load all s_repeat
     static constexpr index_t WAVE_S_REPEAT = S_PER_BLOCK_ / (BLOCK_S_WAVES_ * S_PER_WAVE_);
     static constexpr index_t n_issue = [](){if constexpr(load_all_s_repeat) return WAVE_S_REPEAT; else return 1;}();
     static constexpr index_t n_bufs = [](){if constexpr(load_all_s_repeat) return WAVE_S_REPEAT; else return MIN(2, WAVE_S_REPEAT); }();
@@ -101,6 +102,54 @@ struct sld_iterator_r0_s_r1 {
     {
         // static_assert(i_buf < n_bufs);
         return buf.template to_varray<v_type>()[number<i_buf>{}];
+    }
+    vector_type<dtype_, R_PACK_ * n_bufs> buf;
+    void * smem;
+    index_t v_offset;
+    index_t base_addr;
+};
+
+template<typename dtype_, index_t S_PER_BLOCK_, index_t BLOCK_S_WAVES_, index_t S_PER_WAVE_, index_t R_PACK_, index_t R0_PER_ROW_, index_t R_REPEAT_, bool load_all_r_repeat = true, index_t DUP_BUFS = 1>
+struct sld_iterator_r0_s_r1_nr {
+    // this version will load all s_repeat, and conditionally load all r_repeat TODO: modify sld_iterator_r0_s_r1 to support this.
+    static constexpr index_t WAVE_S_REPEAT = S_PER_BLOCK_ / (BLOCK_S_WAVES_ * S_PER_WAVE_);
+    static constexpr index_t n_issue_r = [](){if constexpr(load_all_r_repeat) return R_REPEAT_; else return 1;}();
+    static constexpr index_t n_issue_s = WAVE_S_REPEAT;
+    static constexpr index_t n_issue = n_issue_r * n_issue_s;
+    static constexpr index_t n_bufs = n_issue * DUP_BUFS;
+    using sld_inst_type = sld<R_PACK_ * (4 / sizeof(dtype_))>;
+    using sld_vector_type = typename vector_type<dtype_, R_PACK_>::type;
+    DEVICE constexpr sld_iterator_r0_s_r1_nr(void * smem_, index_t v_offset_, index_t base_addr_ = 0) : smem(smem_), v_offset(v_offset_), base_addr(base_addr_) {}
+    template<index_t i_s_repeat, index_t i_r_repeat>
+    DEVICE constexpr auto i_offset() {
+        return (i_s_repeat * BLOCK_S_WAVES_ * S_PER_WAVE_ * R_PACK_ + i_r_repeat * R0_PER_ROW_ * (R_PACK_/*padding*/ + S_PER_BLOCK_ * R_PACK_)) * sizeof(dtype_);
+    }
+    template<index_t i_buf = 0>
+    DEVICE constexpr auto load_all(){
+        constexpr_for<0, n_issue_r, 1>{}([&](auto i_issue_r){
+            constexpr_for<0, n_issue_s, 1>{}([&](auto i_issue_s){
+                sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[number<(i_issue_r * n_issue_s + i_issue_s) + i_buf * n_issue>{}],
+                                v_offset + base_addr, i_offset<i_issue_s, i_issue_r>());
+            });
+        });
+    }
+    template<index_t i_s_repeat, index_t i_r_repeat, index_t i_buf = 0>
+    DEVICE constexpr auto load()
+    {
+        static_assert(i_buf < DUP_BUFS);
+        sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[number<(i_r_repeat * n_issue_s + i_s_repeat) + i_buf * n_issue>{}],
+                                v_offset + base_addr, i_offset<i_s_repeat, i_r_repeat>());
+    }
+    template<index_t i_s_repeat, index_t i_r_repeat, index_t i_buf = 0>
+    DEVICE constexpr auto & get()
+    {
+        static_assert(i_buf < DUP_BUFS);
+        return buf.template to_varray<sld_vector_type>()[number<(i_r_repeat * n_issue_s + i_s_repeat) + i_buf * n_issue>{}];
+    }
+    template<typename v_type, index_t i_s_repeat, index_t i_r_repeat, index_t i_buf = 0>
+    DEVICE constexpr auto & getv()
+    {
+        return buf.template to_varray<v_type>()[number<(i_r_repeat * n_issue_s + i_s_repeat) + i_buf * n_issue>{}];
     }
     vector_type<dtype_, R_PACK_ * n_bufs> buf;
     void * smem;
@@ -529,7 +578,8 @@ template<bool gld_x_first_ = true,
          index_t gld_x_issue_distance_ = 0,
          index_t gld_y_issue_distance_ = 0,
          /* for oneside lds */
-         index_t k_iter_mod_ = 0>
+         index_t k_iter_mod_ = 0,
+         bool prio_fma_ = false>
 struct gemm_pipeline_traits {
     static constexpr bool gld_x_first = gld_x_first_;
     static constexpr index_t gld_second_start_distance = gld_second_start_distance_;
@@ -541,8 +591,9 @@ struct gemm_pipeline_traits {
     static constexpr index_t gld_x_issue_distance = gld_x_issue_distance_;
     static constexpr index_t gld_y_issue_distance = gld_y_issue_distance_;
     static constexpr index_t k_iter_mod = k_iter_mod_;
-    static constexpr bool use_default = gld_x_issues == 0 && gld_y_issues == 0 &&
-                                    gld_x_issue_distance == 0 && gld_y_issue_distance == 0;
+    static constexpr bool prio_fma = prio_fma_;
+    static constexpr bool use_default = gld_slots == 0 && gld_x_issues == 0 && gld_y_issues == 0 &&
+                        gld_x_issue_distance == 0 && gld_y_issue_distance == 0 && prio_fma == false;
 
     template<index_t is_first,  index_t second_start_distance, index_t slots,
                 index_t issues, index_t issues_per_group, index_t issue_distance>
@@ -550,21 +601,24 @@ struct gemm_pipeline_traits {
         DEVICE constexpr auto operator()(){
             constexpr array<index_t, gld_slots> mask = [](){
                 array<index_t, gld_slots> mask_ {};  // value initialize this array, which is zero
-                constexpr index_t start_idx = is_first ? 0 : gld_second_start_distance;
-                constexpr index_t issue_groups = issues / issues_per_group;
-                static_assert(start_idx < slots);
-                for(index_t i = 0 ; i < issue_groups; i++){
-                    index_t current_idx = start_idx + i * issue_distance;
-                    index_t current_mask_value = [&](){
-                        index_t tmp = 0;
-                        for(index_t j = 0; j < issues_per_group; j++) {
-                            index_t issue_bit = i * issues_per_group + j;
-                            tmp |= (1 << issue_bit);
-                        }
-                        return tmp; }();
-                    mask_[current_idx] = current_mask_value;
+                if constexpr (gld_slots == 0) return mask_; // empty mask
+                else {
+                    constexpr index_t start_idx = is_first ? 0 : gld_second_start_distance;
+                    constexpr index_t issue_groups = issues / issues_per_group;
+                    static_assert(start_idx < slots);
+                    for(index_t i = 0 ; i < issue_groups; i++){
+                        index_t current_idx = start_idx + i * issue_distance;
+                        index_t current_mask_value = [&](){
+                            index_t tmp = 0;
+                            for(index_t j = 0; j < issues_per_group; j++) {
+                                index_t issue_bit = i * issues_per_group + j;
+                                tmp |= (1 << issue_bit);
+                            }
+                            return tmp; }();
+                        mask_[current_idx] = current_mask_value;
+                    }
+                    return mask_;
                 }
-                return mask_;
             }();
             return TO_SEQ(mask);
         }
@@ -690,7 +744,63 @@ struct gemm_pipeline_flat {
     }
 
     template<typename ACC_BUF_, typename HOT_LOOP_ = bool_const<true>>
-    DEVICE void gemm_(ACC_BUF_ & acc_buf, GLD_A & gld_iter_a, GLD_B & gld_iter_b, SLD_A & sld_iter_a, SLD_B & sld_iter_b, SST_A & sst_iter_a, SST_B & sst_iter_b,
+    DEVICE void gemm_prio_fma(ACC_BUF_ & acc_buf, GLD_A & gld_iter_a, GLD_B & gld_iter_b, SLD_A & sld_iter_a, SLD_B & sld_iter_b, SST_A & sst_iter_a, SST_B & sst_iter_b,
+                                HOT_LOOP_ is_hot_loop = bool_const<true>{})
+    {
+        using acc_type = typename ACC_BUF_::d1_t;
+        using acc_t = typename vector_type<acc_type, mfma_inst::num_v_c>::type;
+        auto mfma = mfma_inst{};
+        constexpr auto total_repeats = K_REPEAT_ * M_REPEAT_ * N_REPEAT_;
+        constexpr_for<0, total_repeats, 1>{}([&](auto i_3d){
+            constexpr auto i_k = number<i_3d / ( M_REPEAT_ * N_REPEAT_)>{};
+            constexpr auto i_2d = number<i_3d % ( M_REPEAT_ * N_REPEAT_)>{};
+            constexpr auto i_m = number<i_2d / N_REPEAT_>{};
+            constexpr auto i_n = number<i_2d % N_REPEAT_>{};
+
+            auto try_gld_x = [&]{ if constexpr (i_3d == 0 && is_hot_loop) gld_iter_a();};
+            auto try_gld_y = [&]{ if constexpr (i_3d == 0 && is_hot_loop) gld_iter_b();};
+
+            if constexpr (TRAITS_::gld_x_first) { try_gld_x(); try_gld_y();}
+            else                                { try_gld_y(); try_gld_x();}
+
+            if constexpr(i_3d == 0) {
+                // it is good to self contains this barrier inside constexpr for
+                sst_fence(0); wave_barrier();
+            }
+
+            // conditionally do sld
+            if constexpr(i_3d == 0)      sld_iter_a.template load_all<0>();
+            if constexpr(i_3d == 0)      sld_iter_b.template load_all<0>();
+
+            // TODO: ugly
+            if constexpr(i_3d == 0) sld_fence(0);
+
+            mfma(sld_iter_a.template get<i_m, i_k>(), sld_iter_b.template get<i_n, i_k>(),
+                            acc_buf.template to_varray<acc_t>()[number<i_m * N_REPEAT_ + i_n>{}], bool_const<true>{});
+            if constexpr (i_3d == 0) setprio(1);
+            if constexpr (i_3d == total_repeats - 1) setprio(0);
+        });
+        if constexpr (is_hot_loop){
+            gld_iter_a.move_slice_window(K_PER_BLOCK_);
+            gld_iter_b.move_slice_window(K_PER_BLOCK_);
+            wave_barrier();
+            if constexpr (TRAITS_::gld_x_first) {
+                gld_fence(gld_iter_b.n_issue);
+                sst_iter_a(gld_iter_a.buf);
+                gld_fence(0);
+                sst_iter_b(gld_iter_b.buf);
+            } else {
+                gld_fence(gld_iter_a.n_issue);
+                sst_iter_b(gld_iter_b.buf);
+                gld_fence(0);
+                sst_iter_a(gld_iter_a.buf);
+            }
+            GLD_BUF_CLEAR{}(gld_iter_a, gld_iter_b);
+        }
+    }
+
+    template<typename ACC_BUF_, typename HOT_LOOP_ = bool_const<true>>
+    DEVICE void gemm(ACC_BUF_ & acc_buf, GLD_A & gld_iter_a, GLD_B & gld_iter_b, SLD_A & sld_iter_a, SLD_B & sld_iter_b, SST_A & sst_iter_a, SST_B & sst_iter_b,
                                 HOT_LOOP_ is_hot_loop = bool_const<true>{})
     {
         using acc_type = typename ACC_BUF_::d1_t;
@@ -786,6 +896,16 @@ struct gemm_pipeline_flat {
             mfma(sld_iter_a.template get<i_m>(), sld_iter_b.template get<i_n % 2>(),
                             acc_buf.template to_varray<acc_t>()[number<i_m * N_REPEAT_ + i_n>{}], bool_const<true>{});
         });
+    }
+
+    template<typename ACC_BUF_, typename HOT_LOOP_ = bool_const<true>>
+    DEVICE void gemm_(ACC_BUF_ & acc_buf, GLD_A & gld_iter_a, GLD_B & gld_iter_b, SLD_A & sld_iter_a, SLD_B & sld_iter_b, SST_A & sst_iter_a, SST_B & sst_iter_b,
+                                HOT_LOOP_ is_hot_loop = bool_const<true>{})
+    {
+        if constexpr(TRAITS::prio_fma) 
+            gemm_prio_fma(acc_buf, gld_iter_a, gld_iter_b, sld_iter_a, sld_iter_b, sst_iter_a, sst_iter_b, is_hot_loop);
+        else
+            gemm(acc_buf, gld_iter_a, gld_iter_b, sld_iter_a, sld_iter_b, sst_iter_a, sst_iter_b, is_hot_loop);
     }
 };
 
@@ -1042,8 +1162,13 @@ struct gemm_kernel
     using sst_iter_a_type = sst_iterator_r0_s_r1<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, KPACK_A>;
     using sst_iter_b_type = sst_iterator_r0_s_r1<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, KPACK_B>;
 
-    using sld_iter_a_type = sld_iterator_r0_s_r1<a_type, M_PER_BLOCK, BLOCK_M_WAVES, M_PER_WAVE, KPACK_A, mfma_inst::k / KPACK_A, true>;
-    using sld_iter_b_type = sld_iterator_r0_s_r1<b_type, N_PER_BLOCK, BLOCK_N_WAVES, N_PER_WAVE, KPACK_B, mfma_inst::k / KPACK_B, false>;
+    // TODO: this is ugly
+    using sld_iter_a_type = std::conditional_t<PIPELINE_TRAIT::prio_fma,
+                    sld_iterator_r0_s_r1_nr<a_type, M_PER_BLOCK, BLOCK_M_WAVES, M_PER_WAVE, KPACK_A, mfma_inst::k / KPACK_A, WAVE_K_REPEAT, true, 1>,
+                    sld_iterator_r0_s_r1<a_type, M_PER_BLOCK, BLOCK_M_WAVES, M_PER_WAVE, KPACK_A, mfma_inst::k / KPACK_A, true>>;
+    using sld_iter_b_type = std::conditional_t<PIPELINE_TRAIT::prio_fma,
+                    sld_iterator_r0_s_r1_nr<b_type, N_PER_BLOCK, BLOCK_N_WAVES, N_PER_WAVE, KPACK_B, mfma_inst::k / KPACK_B, WAVE_K_REPEAT, true, 1>,
+                    sld_iterator_r0_s_r1<b_type, N_PER_BLOCK, BLOCK_N_WAVES, N_PER_WAVE, KPACK_B, mfma_inst::k / KPACK_B, false>>;
 
     using gld_iter_a_type = gld_iterator_s_r<a_type, BLOCK_SIZE, M_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_A, GLD_TRAIT_A>;
     using gld_iter_b_type = gld_iterator_s_r<b_type, BLOCK_SIZE, N_PER_BLOCK, K_PER_BLOCK, ALIGNMENT_B, GLD_TRAIT_B>;
