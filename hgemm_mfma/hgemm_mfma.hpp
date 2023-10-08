@@ -10,7 +10,7 @@
 #ifdef HALF
 #include "half.hpp"
 #endif
-#define PER_PIXEL_CHECK
+// #define PER_PIXEL_CHECK
 #define ASSERT_ON_FAIL
 #define MFMA
 //#define ASM_PRINT
