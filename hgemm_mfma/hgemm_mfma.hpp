@@ -604,6 +604,7 @@ struct gemm_pipeline_traits {
                 if constexpr (gld_slots == 0) return mask_; // empty mask
                 else {
                     constexpr index_t start_idx = is_first ? 0 : gld_second_start_distance;
+                    static_assert(issues % issues_per_group == 0);
                     constexpr index_t issue_groups = issues / issues_per_group;
                     static_assert(start_idx < slots);
                     for(index_t i = 0 ; i < issue_groups; i++){
@@ -1018,7 +1019,59 @@ struct gemm_pipeline_oneside_lds {
     }
 
     template<typename ACC_BUF_, index_t i_curr_x_buf, index_t i_next_x_buf, typename HOT_LOOP_ = bool_const<true>>
-    DEVICE void gemm_(ACC_BUF_ & acc_buf, GLD_X & gld_iter_x, number<i_curr_x_buf>, number<i_next_x_buf>, GLD_Y & gld_iter_y, SLD_Y & sld_iter_y, SST_Y & sst_iter_y,
+    DEVICE void gemm_prio_fma(ACC_BUF_ & acc_buf, GLD_X & gld_iter_x, number<i_curr_x_buf>, number<i_next_x_buf>, GLD_Y & gld_iter_y, SLD_Y & sld_iter_y, SST_Y & sst_iter_y,
+                        HOT_LOOP_ is_hot_loop = bool_const<true>{})
+    {
+        using acc_type = typename ACC_BUF_::d1_t;
+        using acc_t = typename vector_type<acc_type, mfma_inst::num_v_c>::type;
+        auto mfma = mfma_inst{};
+        constexpr index_t total_repeats =  K_REPEAT * X_REPEAT * Y_REPEAT;
+        constexpr_for<0, total_repeats, 1>{}([&](auto i_3d){
+            constexpr auto i_k = number<i_3d / ( X_REPEAT * Y_REPEAT)>{};
+            constexpr auto i_2d = number<i_3d % ( X_REPEAT * Y_REPEAT)>{};
+            constexpr auto i_x = number<i_2d / Y_REPEAT>{};
+            constexpr auto i_y = number<i_2d % Y_REPEAT>{};
+
+            auto try_gld_x = [&]{ if constexpr (i_3d == 0 && is_hot_loop) gld_iter_x.load(number<i_next_x_buf>{}); };
+            auto try_gld_y = [&]{ if constexpr (i_3d == 0 && is_hot_loop) gld_iter_y();};
+
+            if constexpr (TRAITS_::gld_x_first) { try_gld_x(); try_gld_y();}
+            else                                { try_gld_y(); try_gld_x();}
+
+            if constexpr(i_3d == 0) {
+                // it is good to self contains this barrier inside constexpr for
+                sst_fence(0); wave_barrier();
+            }
+
+            // conditionally do sld
+            if constexpr(i_3d == 0)      sld_iter_y.template load_all<0>();
+
+            if constexpr(i_3d == 0 && !TRAITS_::gld_x_first) {
+                if constexpr (is_hot_loop) gld_fence(gld_iter_x.n_issue + gld_iter_y.n_issue);
+                else gld_fence(0);
+            }
+
+            // TODO: ugly
+            if constexpr(i_3d == 0) sld_fence(0);
+
+            mfma(gld_iter_x.template get<i_x * GLD_X::issues_r + i_k, i_curr_x_buf>(), sld_iter_y.template get<i_y, i_k>(),
+                            acc_buf.template to_varray<acc_t>()[number<i_x * N_REPEAT_ + i_y>{}], bool_const<true>{});
+            if constexpr (i_3d == 0) setprio(number<1>{});
+            if constexpr (i_3d == total_repeats - 1) setprio(number<0>{});
+        });
+        if constexpr (is_hot_loop){
+            gld_iter_x.move_slice_window(K_PER_BLOCK_);
+            gld_iter_y.move_slice_window(K_PER_BLOCK_);
+            wave_barrier();
+            if constexpr (TRAITS_::gld_x_first) gld_fence(0);
+            else gld_fence(gld_iter_x.n_issue);
+            sst_iter_y(gld_iter_y.buf);
+            GLD_BUF_CLEAR{}(gld_iter_x, gld_iter_y);
+        }
+    }
+
+    template<typename ACC_BUF_, index_t i_curr_x_buf, index_t i_next_x_buf, typename HOT_LOOP_ = bool_const<true>>
+    DEVICE void gemm(ACC_BUF_ & acc_buf, GLD_X & gld_iter_x, number<i_curr_x_buf>, number<i_next_x_buf>, GLD_Y & gld_iter_y, SLD_Y & sld_iter_y, SST_Y & sst_iter_y,
                         HOT_LOOP_ is_hot_loop = bool_const<true>{})
     {
         using acc_type = typename ACC_BUF_::d1_t;
@@ -1030,7 +1083,6 @@ struct gemm_pipeline_oneside_lds {
         constexpr auto y_x_last_gld_cnt = TRAITS_::get_waitcnt_before(TRAITS_::gld_y_mask, TRAITS_::gld_x_mask, number<total_repeats - 1>{});
         // if last y_x is zero, means in y->x order, some of y issue will be later than x issue, hence y->x order is partial broken
         if constexpr (y_x_last_gld_cnt == 0) {gld_fence(0);}
-
         constexpr_for<0, total_repeats, 1>{}([&](auto i_3d){
             constexpr auto i_k = number<i_3d / ( X_REPEAT * Y_REPEAT)>{};
             constexpr auto i_2d = number<i_3d % ( X_REPEAT * Y_REPEAT)>{};
@@ -1108,6 +1160,16 @@ struct gemm_pipeline_oneside_lds {
             mfma(gld_iter_x.template get<i_x * GLD_X::issues_r + i_k, i_curr_x_buf>(), sld_iter_y.template get<i_y % 2>(),
                             acc_buf.template to_varray<acc_t>()[number<i_x * Y_REPEAT + i_y>{}], bool_const<true>{});
         });
+    }
+
+    template<typename ACC_BUF_, index_t i_curr_x_buf, index_t i_next_x_buf, typename HOT_LOOP_ = bool_const<true>>
+    DEVICE void gemm_(ACC_BUF_ & acc_buf, GLD_X & gld_iter_x, number<i_curr_x_buf>, number<i_next_x_buf>, GLD_Y & gld_iter_y, SLD_Y & sld_iter_y, SST_Y & sst_iter_y,
+                        HOT_LOOP_ is_hot_loop = bool_const<true>{})
+    {
+        if constexpr(TRAITS::prio_fma) 
+            gemm_prio_fma(acc_buf, gld_iter_x, number<i_curr_x_buf>{}, number<i_next_x_buf>{},  gld_iter_y, sld_iter_y, sst_iter_y, is_hot_loop);
+        else
+            gemm(acc_buf, gld_iter_x, number<i_curr_x_buf>{}, number<i_next_x_buf>{},  gld_iter_y, sld_iter_y, sst_iter_y, is_hot_loop);
     }
 };
 
