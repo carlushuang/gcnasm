@@ -229,6 +229,99 @@ typedef float f32x4 __attribute__((ext_vector_type(4)));
 typedef float4 f32x4;
 #endif
 
+//#if !defined(__CUDACC__)
+typedef uint32_t u32x4 __attribute__((ext_vector_type(4)));
+//#else
+//typedef uint4 u32x4;
+//#endif
+
+typedef uint32_t u32x2 __attribute__((ext_vector_type(2)));
+
+
+DEVICE u32x4 make_buffer_resource(const void * ptr)
+{
+    union buffer_resource {
+        struct {
+            const void * ptr;
+            uint32_t range;
+            uint32_t config;
+        };
+        u32x4 content;
+    };
+
+    buffer_resource res {ptr, 0xffffffff, 0x00020000};
+    res.ptr = ptr;
+    res.range = 0xffffffff;
+    res.config = 0x00020000;
+    return res.content;
+}
+
+DEVICE void s_load(uint32_t & value, void * base, uint32_t i_offset)
+{
+    asm volatile("s_load_dwordx2 %0, %1 offset:%2"
+        : "=s" (value)
+        : "s" (base), "n"(i_offset)
+        : "memory"
+    );
+}
+
+DEVICE void gld_b128(f32x4 & value, u32x4 res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/)
+{
+    asm volatile("buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4"
+        : "=v"(value)
+        : "v"(v_offset), "s"(res), "n"(s_offset), "n"(i_offset)
+        : "memory");
+}
+
+DEVICE void gld_fence(index_t cnt)
+{
+    asm volatile("s_waitcnt vmcnt(%0)"
+        :
+        : "n" (cnt)
+        : "memory");
+}
+
+// lds read/write must start from base
+DEVICE void sst_b32(index_t v_offset, index_t i_offset, float value)
+{
+    asm volatile("ds_write_b32 %0, %1, offset:%2"
+        :
+        : "v"(v_offset), "v"(value), "n"(i_offset)
+        : "memory");
+}
+
+DEVICE void sld_b32(float & value, index_t v_offset, index_t i_offset)
+{
+    asm volatile("ds_read_b32 %0, %1, offset:%2"
+        : "=v"(value)
+        : "v"(v_offset), "n"(i_offset)
+        : "memory");
+}
+
+DEVICE void sld_b128(f32x4 & value, index_t v_offset, index_t i_offset)
+{
+    asm volatile("ds_read_b128 %0, %1, offset:%2"
+        : "=v"(value)
+        : "v"(v_offset), "n"(i_offset)
+        : "memory");
+}
+
+DEVICE void sld_barrier(index_t cnt)
+{
+    asm volatile("s_waitcnt lgkmcnt(%0)"
+        :
+        : "n"(cnt)
+        : "memory");
+}
+
+DEVICE void sst_barrier(index_t cnt)
+{
+    asm volatile("s_waitcnt lgkmcnt(%0)"
+        :
+        : "n"(cnt)
+        : "memory");
+}
+
 template<index_t BLOCK_SIZE, index_t LDS_SIZE_BYTE>
 GLOBAL void test_kernel(float * __restrict__ input, float * __restrict__ output)
 {
@@ -237,28 +330,38 @@ GLOBAL void test_kernel(float * __restrict__ input, float * __restrict__ output)
     float * s_ptr = reinterpret_cast<float*>(smem);
 
     //#pragma clang loop vectorize(disable)
-    //for(auto i = 0; i < 4; i++) {
-    constexpr_for<0, 4, 1>{}([&](auto iter){
-        f32x4 data = (reinterpret_cast<f32x4*>(input))[blockIdx.x * BLOCK_SIZE + threadIdx.x];
-        auto i = iter.value;
+    for(auto i = 0; i < 4; i++) {
+    //constexpr_for<0, 4, 1>{}([&](auto iter){
+        // f32x4 data = (reinterpret_cast<f32x4*>(input))[blockIdx.x * BLOCK_SIZE + threadIdx.x];
+        f32x4 data;
+        gld_b128(data, make_buffer_resource(input), threadIdx.x,  0, i * 4 * BLOCK_SIZE);
+        //auto i = iter.value;
 
-        s_ptr[threadIdx.x + 0 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.x;
-        s_ptr[threadIdx.x + 1 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.y;
-        s_ptr[threadIdx.x + 2 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.z;
-        s_ptr[threadIdx.x + 3 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.w;
+        // s_ptr[threadIdx.x + 0 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.x;
+        // s_ptr[threadIdx.x + 1 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.y;
+        // s_ptr[threadIdx.x + 2 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.z;
+        // s_ptr[threadIdx.x + 3 * BLOCK_SIZE + i * 4 * BLOCK_SIZE] = data.w;
+        gld_fence(0);
+        sst_b32(threadIdx.x,  0 * BLOCK_SIZE + i * 4 * BLOCK_SIZE, data.x);
+        sst_b32(threadIdx.x,  1 * BLOCK_SIZE + i * 4 * BLOCK_SIZE, data.y);
+        sst_b32(threadIdx.x,  2 * BLOCK_SIZE + i * 4 * BLOCK_SIZE, data.z);
+        sst_b32(threadIdx.x,  3 * BLOCK_SIZE + i * 4 * BLOCK_SIZE, data.w);
 
         __syncthreads();
 
-        data.x = s_ptr[threadIdx.x * 4 + 0 + i * 4 * BLOCK_SIZE];
-        data.y = s_ptr[threadIdx.x * 4 + 1 + i * 4 * BLOCK_SIZE];
-        data.z = s_ptr[threadIdx.x * 4 + 2 + i * 4 * BLOCK_SIZE];
-        data.w = s_ptr[threadIdx.x * 4 + 3 + i * 4 * BLOCK_SIZE];
+        // data.x = s_ptr[threadIdx.x * 4 + 0 + i * 4 * BLOCK_SIZE];
+        // data.y = s_ptr[threadIdx.x * 4 + 1 + i * 4 * BLOCK_SIZE];
+        // data.z = s_ptr[threadIdx.x * 4 + 2 + i * 4 * BLOCK_SIZE];
+        // data.w = s_ptr[threadIdx.x * 4 + 3 + i * 4 * BLOCK_SIZE];
+        sld_b128(data, threadIdx.x * 4,  i * 4 * BLOCK_SIZE);
+        sld_barrier(0);
 
         (reinterpret_cast<f32x4*>(output))[blockIdx.x * BLOCK_SIZE + threadIdx.x] = data;
-        input += 4 * BLOCK_SIZE;
+        // input += 4 * BLOCK_SIZE;
         output += 4 * BLOCK_SIZE;
         __syncthreads();
-    });
+    //});
+    }
 }
 
 

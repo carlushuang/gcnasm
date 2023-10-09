@@ -17,6 +17,29 @@ using index_t = u32;
 #define GLOBAL __global__
 #define DEVICE __device__
 
+#ifndef GLD_USE_INLINE_ASM
+#define GLD_USE_INLINE_ASM 1
+#endif
+#ifndef GST_USE_INLINE_ASM
+#define GST_USE_INLINE_ASM 1
+#endif
+#ifndef SLD_USE_INLINE_ASM
+#define SLD_USE_INLINE_ASM 1
+#endif
+#ifndef SST_USE_INLINE_ASM
+#define SST_USE_INLINE_ASM 1
+#endif
+#ifndef SETPRIO_USE_INLINE_ASM
+#define SETPRIO_USE_INLINE_ASM 1
+#endif
+#ifndef MFMA_USE_INLINE_ASM
+#define MFMA_USE_INLINE_ASM 1
+#endif
+#ifndef WAVE_BARRIER_USE_INLINE_ASM
+#define WAVE_BARRIER_USE_INLINE_ASM 0
+#endif
+
+
 #if 1
 typedef f32 f32x16 __attribute__((ext_vector_type(16)));
 typedef f32 f32x8 __attribute__((ext_vector_type(8)));
@@ -400,18 +423,30 @@ DEVICE void v_pk_mov_b32(TDst & dst, const TSrc0 & src0, const TSrc1 & src1)
 }
 
 #define BUFFER_LOAD_DWORD3 0x00020000
-
+struct buffer_resource {
+    const void * ptr;
+    dword_t range;
+    dword_t config;
+};
 DEVICE dwordx4_t make_buffer_resource(const void * ptr)
 {
-    struct buffer_resource {
-        const void * ptr;
-        dword_t range;
-        dword_t config;
-    };
     buffer_resource res {ptr, 0xffffffff, BUFFER_LOAD_DWORD3};
     return __builtin_bit_cast(dwordx4_t, res);
 }
 
+DEVICE f32 llvm_amdgcn_raw_buffer_load_fp32(dwordx4_t srsrc, index_t voffset, index_t soffset, index_t glc_slc)
+                            __asm("llvm.amdgcn.raw.buffer.load.f32");
+DEVICE f32x2 llvm_amdgcn_raw_buffer_load_fp32x2(dwordx4_t srsrc, index_t voffset, index_t soffset, index_t glc_slc)
+                            __asm("llvm.amdgcn.raw.buffer.load.v2f32");                            
+DEVICE f32x4 llvm_amdgcn_raw_buffer_load_fp32x4(dwordx4_t srsrc, index_t voffset, index_t soffset, index_t glc_slc)
+                            __asm("llvm.amdgcn.raw.buffer.load.v4f32");
+
+DEVICE void llvm_amdgcn_raw_buffer_store_fp32(f32 vdata, dwordx4_t rsrc, index_t voffset, index_t soffset, index_t glc_slc)
+                            __asm("llvm.amdgcn.raw.buffer.store.f32");
+DEVICE void llvm_amdgcn_raw_buffer_store_fp32x2(f32x2 vdata, dwordx4_t rsrc, index_t voffset, index_t soffset, index_t glc_slc)
+                            __asm("llvm.amdgcn.raw.buffer.store.v2f32");
+DEVICE void llvm_amdgcn_raw_buffer_store_fp32x4(f32x4 vdata, dwordx4_t rsrc, index_t voffset, index_t soffset, index_t glc_slc)
+                            __asm("llvm.amdgcn.raw.buffer.store.v4f32");
 
 // NOTE: we give the output-operand in gld a "+" clobber flag (read/write) instead of "=" (write)
 //       in case we may first write into this register, like clear with zero, then use gld
@@ -423,8 +458,13 @@ template<> struct gld<16>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 16);
+#if GLD_USE_INLINE_ASM
         asm volatile("buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+#else
+        auto tmp = llvm_amdgcn_raw_buffer_load_fp32x4(res, v_offset, s_offset + i_offset, 0);
+        value =  __builtin_bit_cast(T, tmp);
+#endif
     }
 };
 
@@ -432,8 +472,13 @@ template<> struct gld<8>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 8);
+#if GLD_USE_INLINE_ASM
         asm volatile("buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+#else
+        auto tmp = llvm_amdgcn_raw_buffer_load_fp32x2(res, v_offset, s_offset + i_offset, 0);
+        value =  __builtin_bit_cast(T, tmp);
+#endif
     }
 };
 
@@ -441,8 +486,13 @@ template<> struct gld<4>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 4);
+#if GLD_USE_INLINE_ASM
         asm volatile("buffer_load_dword %0, %1, %2, %3 offen offset:%4"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+#else
+        auto tmp = llvm_amdgcn_raw_buffer_load_fp32(res, v_offset, s_offset + i_offset, 0);
+        value =  __builtin_bit_cast(T, tmp);
+#endif
     }
 };
 
@@ -453,11 +503,14 @@ template<> struct gld_if<16>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 16);
+#if GLD_USE_INLINE_ASM
         auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4\n"
                      "s_mov_b64 exec, %6"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+#else
+#endif
     }
 };
 
@@ -465,11 +518,14 @@ template<> struct gld_if<8>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 8);
+#if GLD_USE_INLINE_ASM
         auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4\n"
                      "s_mov_b64 exec, %6"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+#else
+#endif
     }
 };
 
@@ -477,11 +533,14 @@ template<> struct gld_if<4>{
     template<typename T>
     DEVICE void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 4);
+#if GLD_USE_INLINE_ASM
         auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_load_dwordx1 %0, %1, %2, %3 offen offset:%4\n"
                      "s_mov_b64 exec, %6"
             : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+#else
+#endif
     }
 };
 
@@ -492,8 +551,12 @@ template<> struct gst<16>{
     template<typename T>
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 16);
+#if GST_USE_INLINE_ASM
         asm volatile("buffer_store_dwordx4 %0, %1, %2, %3 offen offset:%4"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+#else
+        llvm_amdgcn_raw_buffer_store_fp32x4(__builtin_bit_cast(f32x4, value), res, v_offset, s_offset + i_offset, 0);
+#endif
     }
 };
 
@@ -501,8 +564,12 @@ template<> struct gst<8>{
     template<typename T>
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 8);
+#if GST_USE_INLINE_ASM
         asm volatile("buffer_store_dwordx2 %0, %1, %2, %3 offen offset:%4"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+#else
+        llvm_amdgcn_raw_buffer_store_fp32x2(__builtin_bit_cast(f32x2, value), res, v_offset, s_offset + i_offset, 0);
+#endif
     }
 };
 
@@ -510,8 +577,12 @@ template<> struct gst<4>{
     template<typename T>
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 4);
+#if GST_USE_INLINE_ASM
         asm volatile("buffer_store_dword %0, %1, %2, %3 offen offset:%4"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+#else
+        llvm_amdgcn_raw_buffer_store_fp32(__builtin_bit_cast(f32, value), res, v_offset, s_offset + i_offset, 0);
+#endif
     }
 };
 
@@ -522,11 +593,14 @@ template<> struct gst_if<16>{
     template<typename T>
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 16);
+#if GST_USE_INLINE_ASM
         auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_store_dwordx4 %0, %1, %2, %3 offen offset:%4\n"
                      "s_mov_b64 exec %6"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+#else
+#endif
     }
 };
 
@@ -534,11 +608,14 @@ template<> struct gst_if<8>{
     template<typename T>
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 8);
+#if GST_USE_INLINE_ASM
         auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_store_dwordx2 %0, %1, %2, %3 offen offset:%4\n"
                      "s_mov_b64 exec %6"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+#else
+#endif
     }
 };
 
@@ -546,11 +623,14 @@ template<> struct gst_if<4>{
     template<typename T>
     DEVICE void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t flag){
         static_assert(sizeof(T) == 4);
+#if GST_USE_INLINE_ASM
         auto save_exec = __builtin_amdgcn_read_exec();
         asm volatile("v_cmpx_le_u32 exec, 1, %5\n"
                      "buffer_store_dword %0, %1, %2, %3 offen offset:%4\n"
                      "s_mov_b64 exec %6"
             : : "v"(value), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset), "v"(flag), "s"(save_exec) : "memory");
+#else
+#endif
     }
 };
 
@@ -562,10 +642,14 @@ template<> struct sst<16> {
     DEVICE void operator()(void * smem, index_t v_offset, T value, index_t i_offset)
     {
         static_assert(sizeof(T) == 16);
+#if SST_USE_INLINE_ASM
         asm volatile("ds_write_b128 %1, %2, offset:%3"
             : "=r" (smem) /*dummy memory(ptr) dependency*/
             : "v"(v_offset), "v"(value), "n"(i_offset)
             : "memory");
+#else
+        *reinterpret_cast<T*>(reinterpret_cast<char*>(smem) + v_offset + i_offset) = value;
+#endif
     }
 };
 template<> struct sst<8> {
@@ -573,10 +657,14 @@ template<> struct sst<8> {
     DEVICE void operator()(void * smem, index_t v_offset, T value, index_t i_offset)
     {
         static_assert(sizeof(T) == 8);
+#if SST_USE_INLINE_ASM
         asm volatile("ds_write_b64 %1, %2, offset:%3"
             : "=r" (smem) /*dummy memory(ptr) dependency*/
             : "v"(v_offset), "v"(value), "n"(i_offset)
             : "memory");
+#else
+        *reinterpret_cast<T*>(reinterpret_cast<char*>(smem) + v_offset + i_offset) = value;
+#endif
     }
 };
 template<> struct sst<4> {
@@ -584,10 +672,14 @@ template<> struct sst<4> {
     DEVICE void operator()(void * smem, index_t v_offset, T value, index_t i_offset)
     {
         static_assert(sizeof(T) == 4);
+#if SST_USE_INLINE_ASM
         asm volatile("ds_write_b32 %1, %2, offset:%3"
             : "=r" (smem) /*dummy memory(ptr) dependency*/
             : "v"(v_offset), "v"(value), "n"(i_offset)
             : "memory");
+#else
+        *reinterpret_cast<T*>(reinterpret_cast<char*>(smem) + v_offset + i_offset) = value;
+#endif
     }
 };
 
@@ -599,10 +691,14 @@ template<> struct sld<16> {
     DEVICE void operator()(void * smem, T & value, index_t v_offset, index_t i_offset)
     {
         static_assert(sizeof(T) == 16);
+#if SLD_USE_INLINE_ASM
         asm volatile("ds_read_b128 %0, %1, offset:%2"
             : "=v"(value)
             : "v"(v_offset), "n"(i_offset), "r"(smem) /*dummy memory(ptr) dependency*/
             : "memory");
+#else
+        value = *reinterpret_cast<T*>(reinterpret_cast<char*>(smem) + v_offset + i_offset);
+#endif
     }
 };
 
@@ -611,10 +707,14 @@ template<> struct sld<8> {
     DEVICE void operator()(void * smem, T & value, index_t v_offset, index_t i_offset)
     {
         static_assert(sizeof(T) == 8);
+#if SLD_USE_INLINE_ASM
         asm volatile("ds_read_b64 %0, %1, offset:%2"
             : "=v"(value)
             : "v"(v_offset), "n"(i_offset), "r"(smem) /*dummy memory(ptr) dependency*/
             : "memory");
+#else
+        value = *reinterpret_cast<T*>(reinterpret_cast<char*>(smem) + v_offset + i_offset);
+#endif
     }
 };
 
@@ -623,41 +723,69 @@ template<> struct sld<4> {
     DEVICE void operator()(void * smem, T & value, index_t v_offset, index_t i_offset)
     {
         static_assert(sizeof(T) == 4);
+#if SLD_USE_INLINE_ASM
         asm volatile("ds_read_b32 %0, %1, offset:%2"
             : "=v"(value)
             : "v"(v_offset), "n"(i_offset), "r"(smem) /*dummy memory(ptr) dependency*/
             : "memory");
+#else
+        value = *reinterpret_cast<T*>(reinterpret_cast<char*>(smem) + v_offset + i_offset);
+#endif
     }
 };
 
 DEVICE void gld_fence(index_t cnt)
 {
+#if GLD_USE_INLINE_ASM
     asm volatile("s_waitcnt vmcnt(%0)" : : "n" (cnt) : "memory");
+#else
+    (void)cnt;
+#endif
 }
 
 DEVICE void gst_fence(index_t cnt)
 {
+#if GST_USE_INLINE_ASM
     asm volatile("s_waitcnt vmcnt(%0)" : : "n" (cnt) : "memory");
+#else
+    (void)cnt;
+#endif
 }
 
 DEVICE void sld_fence(index_t cnt)
 {
+#if SLD_USE_INLINE_ASM
     asm volatile("s_waitcnt lgkmcnt(%0)" : : "n"(cnt) : "memory");
+#else
+    (void)cnt;
+#endif
 }
 
 DEVICE void sst_fence(index_t cnt)
 {
+#if SST_USE_INLINE_ASM
     asm volatile("s_waitcnt lgkmcnt(%0)" : : "n"(cnt) : "memory");
+#else
+    (void)cnt;
+#endif
 }
-
-DEVICE void setprio(index_t prio)
+template<index_t prio>
+DEVICE void setprio(number<prio>)
 {
+#if SETPRIO_USE_INLINE_ASM
     asm volatile("s_setprio %0" : : "n"(prio));
+#else
+    __builtin_amdgcn_s_setprio(prio);
+#endif
 }
 
 DEVICE void wave_barrier()
 {
+#if WAVE_BARRIER_USE_INLINE_ASM
+    asm volatile("s_waitcnt lgkmcnt(0)\n  s_barrier" : : : "memory"); // NOTE: need add extra lgkmcnt
+#else
     __builtin_amdgcn_s_barrier();
+#endif
 }
 template<index_t cnt = 0>
 DEVICE void sched_barrier(number<cnt> = number<0>{})
@@ -670,8 +798,6 @@ DEVICE void s_nop(index_t cnt = 0)
     asm volatile("s_nop %0" : : "n"(cnt) : "memory");
 }
 
-#define MFMA_USE_INTRINSIC 0
-
 namespace impl {
 // clang-format off
 // here A/B/C are all ext_vector_type(...)
@@ -680,10 +806,10 @@ struct call_mfma_f32_32x32x8_f16 {
     template<typename TA, typename TB, typename TC>
     DEVICE void operator()(const TA& a, const TB &b, TC& c)
     {
-#if MFMA_USE_INTRINSIC
-        sched_barrier();
+#if !MFMA_USE_INLINE_ASM
+        //sched_barrier();
         c = __builtin_amdgcn_mfma_f32_32x32x8f16(a, b, c, 0, 0, 0);
-        sched_barrier();
+        //sched_barrier();
 #else
         asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %0" : "+v"(c) : "v"(a), "v"(b));
 #endif
@@ -696,16 +822,14 @@ struct call_mfma_f32_32x32x16_f16 {
     {
         vector_type<f16, 8> a_pack {a};
         vector_type<f16, 8> b_pack {b};
-#if MFMA_USE_INTRINSIC
+#if !MFMA_USE_INLINE_ASM
         // HIP tend to use agpr as accumulator
-        sched_barrier();
         c = __builtin_amdgcn_mfma_f32_32x32x8f16(a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0],
                                                     b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0],
                                                     c, 0, 0, 0);
         c = __builtin_amdgcn_mfma_f32_32x32x8f16(a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1],
                                                     b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1],
                                                     c, 0, 0, 0);
-        sched_barrier();
 #else
         vector_type<f16, 4>::type a0 = a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0];
         vector_type<f16, 4>::type b0 = b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0];
@@ -722,10 +846,10 @@ struct call_mfma_f32_16x16x16_f16 {
     template<typename TA, typename TB, typename TC>
     DEVICE void operator()(const TA& a, const TB &b, TC& c)
     {
-#if MFMA_USE_INTRINSIC
-        sched_barrier();
+#if !MFMA_USE_INLINE_ASM
+        //sched_barrier();
         c = __builtin_amdgcn_mfma_f32_16x16x16f16(a, b, c, 0, 0, 0);
-        sched_barrier();
+        //sched_barrier();
 #else
         asm volatile("v_mfma_f32_16x16x16f16 %0, %1, %2, %0" : "+v"(c) : "v"(a), "v"(b));
 #endif

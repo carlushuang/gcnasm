@@ -12,6 +12,7 @@ using index_t = int;
 
 #define DEVICE_HOST __device__ __host__
 #define GLOBAL __global__
+#define DEVICE __device__
 
 template<typename T, index_t N>
 struct Array {
@@ -58,6 +59,7 @@ struct Unmerge {
     template<typename UpIdx>
     DEVICE_HOST constexpr auto calculate_lower_idx(const UpIdx & upper_idx) const
     {
+        // return IndexArray<1>{upper_idx.template at<0>() * L1 + upper_idx.template at<1>()};
         return IndexArray<1>{upper_idx.template at<0>() * L1 + upper_idx.template at<1>()};
     }
 
@@ -172,7 +174,7 @@ DEVICE_HOST constexpr auto make_tensor_coord(const IndexArray<2>& upper_coord, c
     return tensor_cooord<unmerge_t, pad_0_t, pad_1_t>{upper_coord, unmerge, pad_0, pad_1};
 }
 
-template<index_t BLOCK_SIZE, index_t L0_BLOCK, index_t L1_BLOCK, index_t MOVE_L1_PER_ITER = 8>
+template<index_t BLOCK_SIZE, index_t L0_BLOCK, index_t L1_BLOCK,  index_t MOVE_L0_PER_ITER, index_t MOVE_L1_PER_ITER>
 GLOBAL void test_kernel(index_t * __restrict__ offset_0, index_t * __restrict__ offset_1, index_t p0, index_t p1, index_t l0, index_t l1, index_t iters)
 {
     //if(blockIdx.x == 0) {
@@ -184,7 +186,7 @@ GLOBAL void test_kernel(index_t * __restrict__ offset_0, index_t * __restrict__ 
 
         offset_0[tid] = coord.get_offset();
 
-        IndexArray<2> step {0, MOVE_L1_PER_ITER};
+        IndexArray<2> step {MOVE_L0_PER_ITER, MOVE_L1_PER_ITER};
 
         // we want each loop be independently. clang by default will choose to unrool it if possible, 
         // result in more register usage, and longer code
@@ -198,6 +200,8 @@ GLOBAL void test_kernel(index_t * __restrict__ offset_0, index_t * __restrict__ 
         
     //}
 }
+
+
 
 int main(int argc, char ** argv) {
     index_t p0 = 1;
@@ -217,7 +221,8 @@ int main(int argc, char ** argv) {
     constexpr index_t BLOCK_SIZE = 256;
     constexpr index_t L0_BLOCK = 32;
     constexpr index_t L1_BLOCK = 8;
-    constexpr index_t MOVE_L1_PER_ITER = L1_BLOCK;
+    constexpr index_t MOVE_L0_PER_ITER = L0_BLOCK;
+    constexpr index_t MOVE_L1_PER_ITER = 0;
 
     index_t * offset_0_host;
     index_t * offset_0_device;
@@ -229,7 +234,8 @@ int main(int argc, char ** argv) {
     offset_0_host = (index_t*)malloc(sizeof(index_t) * BLOCK_SIZE);
     offset_1_host = (index_t*)malloc(sizeof(index_t) * BLOCK_SIZE * iters);
 
-    test_kernel<BLOCK_SIZE, L0_BLOCK, L1_BLOCK, MOVE_L1_PER_ITER><<<dim3(1), dim3(BLOCK_SIZE)>>>(offset_0_device, offset_1_device, p0, p1, l0, l1, iters);
+    test_kernel<BLOCK_SIZE, L0_BLOCK, L1_BLOCK, MOVE_L0_PER_ITER, MOVE_L1_PER_ITER><<<dim3(1), dim3(BLOCK_SIZE)>>>(
+        offset_0_device, offset_1_device, p0, p1, l0, l1, iters);
 
     cudaMemcpy(offset_0_host, offset_0_device, sizeof(index_t) * BLOCK_SIZE, cudaMemcpyDeviceToHost);
     cudaMemcpy(offset_1_host, offset_1_device, sizeof(index_t) * BLOCK_SIZE * iters, cudaMemcpyDeviceToHost);
