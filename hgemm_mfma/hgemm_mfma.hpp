@@ -777,8 +777,8 @@ struct gemm_pipeline_flat {
 
             mfma(sld_iter_a.template get<i_m, i_k>(), sld_iter_b.template get<i_n, i_k>(),
                             acc_buf.template to_varray<acc_t>()[number<i_m * N_REPEAT_ + i_n>{}], bool_const<true>{});
-            if constexpr (i_3d == 0) setprio(1);
-            if constexpr (i_3d == total_repeats - 1) setprio(0);
+            if constexpr (i_3d == 0) setprio(number<1>{});
+            if constexpr (i_3d == total_repeats - 1) setprio(number<0>{});
         });
         if constexpr (is_hot_loop){
             gld_iter_a.move_slice_window(K_PER_BLOCK_);
