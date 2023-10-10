@@ -7,7 +7,7 @@
 #include <iostream>
 #include <stdlib.h>
 #include <math.h>
-
+// #define PER_PIXEL_CHECK
 
 using float16=half_float::half;
 
@@ -58,6 +58,7 @@ void rand_vector_2d(float* v, int row, int col, int ld, float min_v = 0, float m
         for(c=0;c<col;c++){
             float tmp = float(std::rand()) / float(RAND_MAX);
             v[r*ld+c] = static_cast<float>(min_v + tmp * (max_v - min_v));
+            // v[r*ld+c] =   ((float)(r*ld+c)) / (row/2 * col/2) - 5;
         }
     }
 }

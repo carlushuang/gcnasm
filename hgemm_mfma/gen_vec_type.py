@@ -7,13 +7,14 @@ import enum
 OUTPUT_FILE = 'vector_type_predef.hpp'
 STATIC_BUFFER_TYPE = 'static_buffer'
 DEVICE_HOST_MACRO = 'DEVICE_HOST'
+N_TOTAL = 64
+N_FACTOR = 4
 
 def gen_p2_array(n):
     i = 1
-    rtn = []
-    while i <= n:
-        rtn.append(i)
-        i = i * 2
+    rtn = [1, 2]
+    for x in range(n // N_FACTOR):
+        rtn.append((x + 1) * N_FACTOR)
     return rtn
 
 class vector_type(object):
@@ -24,6 +25,8 @@ class vector_type(object):
         n = self.n
         fp.write(f'template <typename T> struct vector_type<T, {n}> {{\n')
         for d in gen_p2_array(n):
+            if n % d != 0:
+                continue
             if d == 1:
                 fp.write(f'    using d1_t = T;\n')
             else:
@@ -32,6 +35,8 @@ class vector_type(object):
         fp.write(f'    union {{\n')
         fp.write(f'        type d{n}_;\n')
         for d in gen_p2_array(n):
+            if n % d != 0:
+                continue
             fp.write(f'        {STATIC_BUFFER_TYPE}<d{d}_t, {n // d}> d{d}x{n // d}_;\n')
         fp.write(f'    }} data_;\n')
         fp.write(f'    {DEVICE_HOST_MACRO} constexpr vector_type() : data_{{type{{0}}}} {{}}\n')
@@ -40,6 +45,8 @@ class vector_type(object):
         fp.write(f'    template<typename VEC> {DEVICE_HOST_MACRO} constexpr auto&       to_varray()       {{ return data_.d{n}_; }}\n')
 
         for d in gen_p2_array(n):
+            if n % d != 0:
+                continue
             fp.write(f'    template<> {DEVICE_HOST_MACRO} constexpr const auto& to_varray<d{d}_t>() const {{ return data_.d{d}x{n//d}_;}}\n')
             fp.write(f'    template<> {DEVICE_HOST_MACRO} constexpr auto&       to_varray<d{d}_t>()       {{ return data_.d{d}x{n//d}_;}}\n')
         fp.write(f'}};\n')
@@ -55,8 +62,11 @@ def gen(file_name):
     fp.write(f'struct vector_type;\n')
     fp.write(f'\n')
     fp.write(f'// clang-format off\n')
-    for n in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
+    for n in [1, 2]:
         vector_type(n)(fp)
+        fp.write(f'\n')
+    for n in range(N_TOTAL):
+        vector_type((n + 1) * N_FACTOR)(fp)
         fp.write(f'\n')
     fp.write(f'// clang-format on\n')
 
