@@ -18,7 +18,10 @@
 
 using data_type_t = tuple<f16, f16, f16, f32>;
 using block_tile_t =  seq<128, 256, 32>;
+// using block_tile_t =  seq<160, 160, 32>;
 using block_waves_t = seq<4, 1, 1>;
+// using wave_tile_t = seq<16, 16, 16>;
+// using alignments_t = seq<4, 4, 4>;
 using wave_tile_t = seq<32, 32, 16>;
 using alignments_t = seq<8, 8, 8>;
 using tile_sched_t = tile_scheduler<8>;
@@ -26,6 +29,7 @@ using gld_traits_t = tuple<gld_trait<false/*gld if*/, false/*bypass LDS*/>, gld_
 // template<bool gld_x_first_ = true,
 //          index_t gld_second_start_distance_ = 0,
 //          index_t gld_slots_ = 1,
+//          index_t other_slots_ = 1,
 //          index_t gld_x_issues_ = 0,
 //          index_t gld_y_issues_ = 0,
 //          index_t gld_x_issues_per_group_ = 1,
@@ -34,11 +38,14 @@ using gld_traits_t = tuple<gld_trait<false/*gld if*/, false/*bypass LDS*/>, gld_
 //          index_t gld_y_issue_distance_ = 0,
 //          /* for oneside lds */
 //          index_t k_iter_mod_ = 0>
-// using pipeline_trait_t = gemm_pipeline_traits<false, 5, 16 - 1, 2, 4, 2, 2, 1, 2, 0/*k_iter_mod*/>; /* use this for one-LDS */
-// using pipeline_trait_t = gemm_pipeline_traits<true, 3, 16 - 1, 2, 4, 2, 2, 1, 4, 0/*k_iter_mod*/>; /* use this for one-LDS */
-using pipeline_trait_t = gemm_pipeline_traits<true, 5, 16 - 1, 2, 4, 2, 2, 1, 6, 0/*k_iter_mod*/>; /* use this for dual-LDS */
-
-
+// using pipeline_trait_t = gemm_pipeline_traits<false, 5, 16 - 1, 1, 2, 4, 2, 2, 1, 2, 0/*k_iter_mod*/>; /* use this for one-LDS */
+// using pipeline_trait_t = gemm_pipeline_traits<true, 3, 16 - 1, 1, 2, 4, 2, 2, 1, 4, 0/*k_iter_mod*/>; /* use this for one-LDS */
+using pipeline_trait_t = gemm_pipeline_traits<true, 5, 16 - 1, 1, 2, 4, 2, 2, 1, 6, 0/*k_iter_mod*/>; /* use this for dual-LDS */
+// using pipeline_trait_t = gemm_pipeline_traits<true, 13, 32 - 1, 1, 2, 4, 2, 2, 1, 10, 0/*k_iter_mod*/>; /* use this for dual-LDS, 32x32x8 */
+// using pipeline_trait_t = gemm_pipeline_traits<true, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0/*k_iter_mod*/, true>; /* use this for dual-LDS + setprio */
+// using pipeline_trait_t = gemm_pipeline_traits<false, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0/*k_iter_mod*/, true>; /* use this for one-LDS + setprio */
+// using pipeline_trait_t = gemm_pipeline_traits<true, 13, 32 - 1, 1, 4, 8, 2, 4, 1, 10, 0/*k_iter_mod*/>; /* use this for dual-LDS, 16x16x32, 64 kperblock */
+// using pipeline_trait_t = gemm_pipeline_traits<false, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0/*k_iter_mod*/>; /* used for default dual-LDS  */
 
 using epilogue_t = epilogue_iterator<data_type_t, block_tile_t, block_waves_t, wave_tile_t>;
 using kernel_t = gemm_kernel<data_type_t, block_tile_t, block_waves_t, wave_tile_t, alignments_t,

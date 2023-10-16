@@ -313,37 +313,7 @@ struct array {
 
 #if 1
 // TODO: use nontype template if c++20
-#define TO_SEQ(a_)                                                                                                          \
-    [a_] {                                                                                                                  \
-        static_assert(a_.n_element <= 18);                                                                                  \
-        if constexpr(a_.n_element == 0) { return seq<>{}; }                                                                 \
-        else if constexpr(a_.n_element == 1) { return seq<a_[0]>{}; }                                                       \
-        else if constexpr(a_.n_element == 2) { return seq<a_[0], a_[1]>{}; }                                                \
-        else if constexpr(a_.n_element == 3) { return seq<a_[0], a_[1], a_[2]>{}; }                                         \
-        else if constexpr(a_.n_element == 4) { return seq<a_[0], a_[1], a_[2], a_[3]>{}; }                                  \
-        else if constexpr(a_.n_element == 5) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4]>{}; }                           \
-        else if constexpr(a_.n_element == 6) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5]>{}; }                    \
-        else if constexpr(a_.n_element == 7) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6]>{}; }             \
-        else if constexpr(a_.n_element == 8) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7]>{}; }      \
-        else if constexpr(a_.n_element == 9) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8]>{}; }               \
-        else if constexpr(a_.n_element == 10) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9]>{}; }       \
-        else if constexpr(a_.n_element == 11) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10]>{}; }                                                                       \
-        else if constexpr(a_.n_element == 12) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10], a_[11]>{}; }                                                               \
-        else if constexpr(a_.n_element == 13) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10], a_[11], a_[12]>{}; }                                                       \
-        else if constexpr(a_.n_element == 14) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10], a_[11], a_[12], a_[13]>{}; }                                               \
-        else if constexpr(a_.n_element == 15) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10], a_[11], a_[12], a_[13], a_[14]>{}; }                                       \
-        else if constexpr(a_.n_element == 16) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10], a_[11], a_[12], a_[13], a_[14], a_[15]>{}; }                               \
-        else if constexpr(a_.n_element == 17) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10], a_[11], a_[12], a_[13], a_[14], a_[15], a_[16]>{}; }                       \
-        else if constexpr(a_.n_element == 18) { return seq<a_[0], a_[1], a_[2], a_[3], a_[4], a_[5], a_[6], a_[7], a_[8], a_[9],            \
-                                                         a_[10], a_[11], a_[12], a_[13], a_[14], a_[15], a_[16], a_[17]>{}; }               \
-    }()
+#include "to_seq_predef.hpp"
 #endif
 
 template <class T>
@@ -855,6 +825,28 @@ struct call_mfma_f32_16x16x16_f16 {
 #endif
     }
 };
+
+struct call_mfma_f32_16x16x32_f16 {
+    template<typename TA, typename TB, typename TC>
+    DEVICE void operator()(const TA& a, const TB &b, TC& c)
+    {
+        vector_type<f16, 8> a_pack {a};
+        vector_type<f16, 8> b_pack {b};
+#if !MFMA_USE_INLINE_ASM
+        //sched_barrier();
+        c = __builtin_amdgcn_mfma_f32_16x16x16f16(a, b, c, 0, 0, 0);
+        //sched_barrier();
+#else
+        vector_type<f16, 4>::type a0 = a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0];
+        vector_type<f16, 4>::type b0 = b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I0];
+        vector_type<f16, 4>::type a1 = a_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1];
+        vector_type<f16, 4>::type b1 = b_pack.template to_varray<typename vector_type<f16, 4>::type>()[I1];
+        // clang-17+ has ODR bug for following inline asm, we have to first move the contained data to a lvalue
+        asm volatile("v_mfma_f32_16x16x16f16 %0, %1, %2, %0" : "+v"(c) : "v"(a0), "v"(b0));
+        asm volatile("v_mfma_f32_16x16x16f16 %0, %1, %2, %0" : "+v"(c) : "v"(a1), "v"(b1));
+#endif
+    }
+};
 // clang-format on
 }
 
@@ -917,11 +909,13 @@ struct mfma_inst {
 // clang-format off
 //                                  atype  btype  ctype   m   n   k  b  va  vb  vc
 using mfma_f32_16x16x16_f16   = mfma_inst<f16, f16, f32, 16, 16, 16, 1,  2,  2,  4, impl::call_mfma_f32_16x16x16_f16>;
+using mfma_f32_16x16x32_f16   = mfma_inst<f16, f16, f32, 16, 16, 32, 1,  4,  4,  4, impl::call_mfma_f32_16x16x32_f16>;
 using mfma_f32_32x32x8_f16    = mfma_inst<f16, f16, f32, 32, 32,  8, 1,  2,  2, 16, impl::call_mfma_f32_32x32x8_f16>;
 using mfma_f32_32x32x16_f16   = mfma_inst<f16, f16, f32, 32, 32, 16, 1,  4,  4, 16, impl::call_mfma_f32_32x32x16_f16>;
 
 template<typename, typename, typename, index_t, index_t, index_t> struct mfma_selector;
 template<> struct mfma_selector<f16, f16, f32, 16, 16, 16> { using type = mfma_f32_16x16x16_f16; };
+template<> struct mfma_selector<f16, f16, f32, 16, 16, 32> { using type = mfma_f32_16x16x32_f16; };
 template<> struct mfma_selector<f16, f16, f32, 32, 32, 8>  { using type = mfma_f32_32x32x8_f16; };
 template<> struct mfma_selector<f16, f16, f32, 32, 32, 16> { using type = mfma_f32_32x32x16_f16; };
 
