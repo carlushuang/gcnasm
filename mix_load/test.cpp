@@ -58,7 +58,56 @@ struct static_buffer {
     __host__ __device__ const auto & get(index_t i) const {return data[i]; }
 };
 
-#define TO_SBUF(type_, n_, v_) reinterpret_cast<static_buffer<type_, n_>&>(v_)
+template<typename T, index_t N>
+struct vector_type {
+    using type = T __attribute__((ext_vector_type(N)));
+    type data;
+
+    template<typename Tx>
+    __device__ __host__ auto & as(){
+        static_assert(sizeof(T) * N % sizeof(Tx) == 0);
+        constexpr int vx = sizeof(T) * N / sizeof(Tx);
+        return reinterpret_cast<static_buffer<Tx, vx>&>(data);
+    }
+    template<typename Tx>
+    __device__ __host__ const auto & as() const {
+        static_assert(sizeof(T) * N % sizeof(Tx) == 0);
+        constexpr int vx = sizeof(T) * N / sizeof(Tx);
+        return reinterpret_cast<const static_buffer<Tx, vx>&>(data);
+    }
+
+    __device__ __host__ auto & to(){
+        return reinterpret_cast<static_buffer<T, N>&>(data);
+    }
+
+    __device__ __host__ const auto & to() const {
+        return reinterpret_cast<const static_buffer<T, N>&>(data);
+    }
+
+    template<typename Tx>
+    __device__ __host__ auto & at(index_t i){
+        return as<Tx>().get(i);
+    }
+
+    template<typename Tx>
+    __device__ __host__ const auto & at(index_t i) const {
+        return as<Tx>().get(i);
+    }
+
+    __device__ __host__ auto &at(index_t i) {
+        return to().get(i);
+    }
+    __device__ __host__ const auto &at(index_t i) const {
+        return to().get(i);
+    }
+
+    __device__ __host__ auto & get() {
+        return data;
+    }
+    __device__ __host__ const auto & get() const {
+        return data;
+    }
+};
 
 //  128x32 tile
 __global__ void /* __launch_bounds__(THREADS) */
@@ -73,12 +122,15 @@ compute_gemm_gemm(const void* __restrict__ ptr_q,
 
     __shared__  uint32_t smem_0[8192] __attribute__((address_space(3)));
     __shared__  uint32_t smem_1[8192] __attribute__((address_space(3)));
-    fp16x16 q;
+    vector_type<fp16, 16> q;
 
-    TO_SBUF(fp16x8, 2, q).get(0) = reinterpret_cast<const fp16x8*>(ptr_q)[threadIdx.x];
-    TO_SBUF(fp16x8, 2, q).get(1) = reinterpret_cast<const fp16x8*>(ptr_q)[threadIdx.x + 256];
+    q.template at<fp16x8>(0) = reinterpret_cast<const fp16x8*>(ptr_q)[threadIdx.x];
+    q.template at<fp16x8>(1) = reinterpret_cast<const fp16x8*>(ptr_q)[threadIdx.x + 256];
 
-    fp32x16 acc;  // no clear zero
+    vector_type<fp32, 16> acc;  // no clear zero
+    for(auto i = 0; i < 16; i++) {
+        acc.at(i) = .0f;
+    }
 
     // load K
     for(auto i = 0; i < 8; i++)
@@ -87,7 +139,7 @@ compute_gemm_gemm(const void* __restrict__ ptr_q,
             sizeof(dword_t), (threadIdx.x + i * 256) * sizeof(dword_t), 0, 0, 0);
 
     while (loops > 0) {
-        fp32x16 acc_0;  // no clear zero
+        vector_type<fp32, 16> acc_0;  // no clear zero
 
         // load V
         __builtin_amdgcn_s_barrier();
@@ -98,14 +150,14 @@ compute_gemm_gemm(const void* __restrict__ ptr_q,
 
         // compute gemm_0
         {
-            fp16x16 k;
-            TO_SBUF(fp16x8, 2, k).get(0) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_0)[threadIdx.x];
-            TO_SBUF(fp16x8, 2, k).get(1) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_0)[threadIdx.x + 256];
+            vector_type<fp16, 16> k;
+            k.template at<fp16x8>(0) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_0)[threadIdx.x];
+            k.template at<fp16x8>(1) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_0)[threadIdx.x + 256];
 
             for(auto i = 0; i < 4; i++)
-                acc_0 = __builtin_amdgcn_mfma_f32_32x32x8f16(TO_SBUF(fp16x4, 4, q).get(i),
-                                                            TO_SBUF(fp16x4, 4, k).get(i),
-                                                            acc_0, 0, 0, 0);
+                acc_0.get() = __builtin_amdgcn_mfma_f32_32x32x8f16(q.template at<fp16x4>(i),
+                                                            k.template at<fp16x4>(i),
+                                                            acc_0.get(), 0, 0, 0);
         }
 
         __builtin_amdgcn_s_barrier();
@@ -120,29 +172,29 @@ compute_gemm_gemm(const void* __restrict__ ptr_q,
 
         // compute gemm 1
         {
-            fp16x16 v;
-            TO_SBUF(fp16x8, 2, v).get(0) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_1)[threadIdx.x];
-            TO_SBUF(fp16x8, 2, v).get(1) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_1)[threadIdx.x + 256];
+            vector_type<fp16, 16> v;
+            v.template at<fp16x8>(0) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_1)[threadIdx.x];
+            v.template at<fp16x8>(1) = reinterpret_cast<__attribute__((address_space(3))) fp16x8*>(smem_1)[threadIdx.x + 256];
             for(auto i = 0; i < 4; i++) {
-                fp16x16 tmp;
+                vector_type<fp16, 16> tmp;
                 for(auto j = 0; j < 16; j++) {
-                    TO_SBUF(fp16, 16, tmp).get(j) = static_cast<fp16>(TO_SBUF(fp32, 16, acc_0).get(j));
+                    tmp.at(j) = static_cast<fp16>(acc_0.template at<fp32>(j));
                 }
-                acc = __builtin_amdgcn_mfma_f32_32x32x8f16(TO_SBUF(fp16x4, 4, tmp).get(i),
-                                                TO_SBUF(fp16x4, 4, v).get(i),
-                                                acc, 0, 0, 0);
+                acc.get() = __builtin_amdgcn_mfma_f32_32x32x8f16(tmp.template at<fp16x4>(i),
+                                                v.template at<fp16x4>(i),
+                                                acc.get(), 0, 0, 0);
             }
         }
 
         // __builtin_amdgcn_s_barrier();
     }
 
-    fp16x16 o;
+    vector_type<fp16, 16> o;
     for(auto j = 0; j < 16; j++) {
-        TO_SBUF(fp16, 16, o).get(j) = static_cast<fp16>(TO_SBUF(fp32, 16, acc).get(j));
+        o.at(j) = static_cast<fp16>(acc.at(j));
     }
-    reinterpret_cast<fp16x8*>(ptr_o)[threadIdx.x] = TO_SBUF(fp16x8, 2, o).get(0);
-    reinterpret_cast<fp16x8*>(ptr_o)[threadIdx.x + 256] = TO_SBUF(fp16x8, 2, o).get(1);
+    reinterpret_cast<fp16x8*>(ptr_o)[threadIdx.x] = o.template at<fp16x8>(0);
+    reinterpret_cast<fp16x8*>(ptr_o)[threadIdx.x + 256] = o.template at<fp16x8>(1);
 }
 
 
