@@ -39,6 +39,8 @@ using index_t = u32;
 #define WAVE_BARRIER_USE_INLINE_ASM 0
 #endif
 
+#define VECTOR_TYPE_USE_REFERENCE 1
+#define USE_C_ARRAY 1
 
 #if 1
 typedef f32 f32x16 __attribute__((ext_vector_type(16)));
@@ -255,6 +257,7 @@ using static_buffer_impl_t = typename static_buffer_impl<T, N>::type;
 
 } // namespace detail
 
+#if !USE_C_ARRAY
 template<typename T, index_t N>
 struct static_buffer : public detail::static_buffer_impl_t<T, N>
 {
@@ -275,7 +278,31 @@ struct static_buffer : public detail::static_buffer_impl_t<T, N>
         return base::template get<I>();
     }
 };
+#else
+template<typename T, index_t N>
+struct static_buffer {
+    T data[N];
+    DEVICE_HOST auto & get(index_t i) {return data[i]; }
+    DEVICE_HOST const auto & get(index_t i) const {return data[i]; }
 
+    DEVICE_HOST auto & operator[](index_t i) {return data[i]; }
+    DEVICE_HOST const auto & operator[](index_t i) const {return data[i]; }
+
+    template<index_t I>
+    DEVICE_HOST constexpr T& operator[](number<I>)
+    {
+        static_assert(I < N);
+        return get(I);
+    }
+
+    template<index_t I>
+    DEVICE_HOST constexpr const T& operator[](number<I>) const
+    {
+        static_assert(I < N);
+        return get(I);
+    }
+};
+#endif
 
 template<typename T, index_t n_element_>
 struct array {
@@ -326,11 +353,75 @@ template <class T>
 using remove_cvref_t = typename remove_cvref<T>::type;
 
 
+#if !VECTOR_TYPE_USE_REFERENCE
 ///////////////////
 // a self contained type to hold vector, convenient for partial reference
 #include "vector_type_predef.hpp"
 ///////////////////
+#else
+template<typename T, index_t N>
+struct vector_type {
+    using data_type = T;
+    using type = T __attribute__((ext_vector_type(N)));
+    type data;
 
+    template<typename Tx>
+    DEVICE_HOST auto & as(){
+        static_assert(sizeof(T) * N % sizeof(Tx) == 0);
+        constexpr int vx = sizeof(T) * N / sizeof(Tx);
+        return reinterpret_cast<static_buffer<Tx, vx>&>(data);
+    }
+    template<typename Tx>
+    DEVICE_HOST const auto & as() const {
+        static_assert(sizeof(T) * N % sizeof(Tx) == 0);
+        constexpr int vx = sizeof(T) * N / sizeof(Tx);
+        return reinterpret_cast<const static_buffer<Tx, vx>&>(data);
+    }
+#if 0
+    DEVICE_HOST auto & to(){
+        return reinterpret_cast<static_buffer<T, N>&>(data);
+    }
+
+    DEVICE_HOST const auto & to() const {
+        return reinterpret_cast<const static_buffer<T, N>&>(data);
+    }
+
+    template<typename Tx>
+    DEVICE_HOST auto & at(index_t i){
+        return as<Tx>().get(i);
+    }
+
+    template<typename Tx>
+    DEVICE_HOST const auto & at(index_t i) const {
+        return as<Tx>().get(i);
+    }
+
+    DEVICE_HOST auto &at(index_t i) {
+        return to().get(i);
+    }
+    DEVICE_HOST const auto &at(index_t i) const {
+        return to().get(i);
+    }
+
+    DEVICE_HOST auto & get() {
+        return data;
+    }
+    DEVICE_HOST const auto & get() const {
+        return data;
+    }
+#endif
+
+    template<typename Tx>
+    DEVICE_HOST auto & to_varray() {
+        return as<Tx>();
+    }
+
+    template<typename Tx>
+    DEVICE_HOST const auto & to_varray() const {
+        return as<Tx>();
+    }
+};
+#endif
 
 namespace detail {
 

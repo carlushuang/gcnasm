@@ -3,9 +3,14 @@ template <typename T/*sizeof(T)==4*/, index_t N, bool disable_inline_asm = false
 struct set_static_array_dword {
     template<index_t value = 0>
     DEVICE void operator()(static_buffer<T, N> & vec, number<value> = number<0>{}) {
+#if !USE_C_ARRAY
         constexpr_for<0, N, 1>{}([&](auto i){
             vec[i] = static_cast<T>(value);
         });
+#else
+        for(auto i = 0; i < N; i++)
+             vec[i] = static_cast<T>(value);
+#endif
     }
 };
 
@@ -13,10 +18,15 @@ template <typename T, index_t N> struct set_static_array_dword<T, N, false/*disa
     template<index_t value = 0>
     DEVICE void operator()(static_buffer<T, N> & vec, number<value> = number<0>{}) {
         static_assert(sizeof(T) == 8);
+#if !USE_C_ARRAY
         constexpr_for<0, N, 1>{}([&](auto i_n){
             auto & vec_wa = vec;
             asm volatile( "v_pk_mov_b32 %0, %1, %1 op_sel:[0, 1]" : "=v"(vec_wa[i_n]) : "n"(value) );
         });
+#else
+        for(auto i = 0; i < N; i++)
+             asm volatile( "v_pk_mov_b32 %0, %1, %1 op_sel:[0, 1]" : "=v"(vec[i]) : "n"(value) );
+#endif
     }
 };
 
@@ -24,10 +34,15 @@ template <typename T, index_t N> struct set_static_array_dword<T, N, false/*disa
     template<index_t value = 0>
     DEVICE void operator()(static_buffer<T, N> & vec, number<value> = number<0>{}) {
         static_assert(sizeof(T) == 4);
+#if !USE_C_ARRAY
         constexpr_for<0, N, 1>{}([&](auto i_n){
             auto & vec_wa = vec;
             asm volatile( "v_mov_b32 %0, %1" : "=v"(vec_wa[i_n]): "n"(value) );
         });
+#else
+        for(auto i =0; i < N; i++)
+            asm volatile( "v_mov_b32 %0, %1" : "=v"(vec[i]): "n"(value) );
+#endif
     }
 };
 

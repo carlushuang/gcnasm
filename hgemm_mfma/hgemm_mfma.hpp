@@ -76,6 +76,7 @@ struct sld_iterator_r0_s_r1 {
     using sld_inst_type = sld<R_PACK_ * (4 / sizeof(dtype_))>;
     using sld_vector_type = typename vector_type<dtype_, R_PACK_>::type;
     DEVICE constexpr sld_iterator_r0_s_r1(void * smem_, index_t v_offset_, index_t base_addr_ = 0) : smem(smem_), v_offset(v_offset_), base_addr(base_addr_) {}
+#if !USE_C_ARRAY
     template<index_t i_s_repeat, index_t i_r_repeat>
     DEVICE constexpr auto i_offset() {
         return (i_s_repeat * BLOCK_S_WAVES_ * S_PER_WAVE_ * R_PACK_ + i_r_repeat * R0_PER_ROW_ * (R_PACK_/*padding*/ + S_PER_BLOCK_ * R_PACK_)) * sizeof(dtype_);
@@ -92,6 +93,20 @@ struct sld_iterator_r0_s_r1 {
         static_assert(i_buf < n_bufs);
         sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[number<i_buf>{}], v_offset + base_addr, i_offset<i_s_repeat, i_r_repeat>());
     }
+#else
+    DEVICE constexpr auto i_offset(index_t i_s_repeat, index_t i_r_repeat) {
+        return (i_s_repeat * BLOCK_S_WAVES_ * S_PER_WAVE_ * R_PACK_ + i_r_repeat * R0_PER_ROW_ * (R_PACK_/*padding*/ + S_PER_BLOCK_ * R_PACK_)) * sizeof(dtype_);
+    }
+    DEVICE constexpr auto load_all(index_t i_r_repeat = 0){
+        for(index_t i_issue = 0; i_issue < n_issue; i_issue++)
+            sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[i_issue], v_offset + base_addr, i_offset(i_issue, i_r_repeat));
+    }
+    DEVICE constexpr auto load(index_t i_s_repeat, index_t i_r_repeat, index_t i_buf)
+    {
+        sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[i_buf], v_offset + base_addr, i_offset(i_s_repeat, i_r_repeat));
+    }
+#endif
+    
     template<index_t i_buf>
     DEVICE constexpr auto & get()
     {
@@ -121,6 +136,7 @@ struct sld_iterator_r0_s_r1_nr {
     using sld_inst_type = sld<R_PACK_ * (4 / sizeof(dtype_))>;
     using sld_vector_type = typename vector_type<dtype_, R_PACK_>::type;
     DEVICE constexpr sld_iterator_r0_s_r1_nr(void * smem_, index_t v_offset_, index_t base_addr_ = 0) : smem(smem_), v_offset(v_offset_), base_addr(base_addr_) {}
+#if !USE_C_ARRAY
     template<index_t i_s_repeat, index_t i_r_repeat>
     DEVICE constexpr auto i_offset() {
         return (i_s_repeat * BLOCK_S_WAVES_ * S_PER_WAVE_ * R_PACK_ + i_r_repeat * R0_PER_ROW_ * (R_PACK_/*padding*/ + S_PER_BLOCK_ * R_PACK_)) * sizeof(dtype_);
@@ -141,6 +157,31 @@ struct sld_iterator_r0_s_r1_nr {
         sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[number<(i_r_repeat * n_issue_s + i_s_repeat) + i_buf * n_issue>{}],
                                 v_offset + base_addr, i_offset<i_s_repeat, i_r_repeat>());
     }
+#else
+    DEVICE constexpr auto i_offset(index_t i_s_repeat, index_t i_r_repeat) {
+        return (i_s_repeat * BLOCK_S_WAVES_ * S_PER_WAVE_ * R_PACK_ + i_r_repeat * R0_PER_ROW_ * (R_PACK_/*padding*/ + S_PER_BLOCK_ * R_PACK_)) * sizeof(dtype_);
+    }
+    DEVICE constexpr auto load_all(index_t i_buf = 0){
+        // constexpr_for<0, n_issue_r, 1>{}([&](auto i_issue_r){
+        //     constexpr_for<0, n_issue_s, 1>{}([&](auto i_issue_s){
+        //         sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[number<(i_issue_r * n_issue_s + i_issue_s) + i_buf * n_issue>{}],
+        //                         v_offset + base_addr, i_offset(i_issue_s, i_issue_r));
+        //     });
+        // });
+        for(index_t i_issue_r = 0; i_issue_r < n_issue_r; i_issue_r++) {
+            for(index_t i_issue_s = 0; i_issue_s < n_issue_s; i_issue_s++){
+                sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[(i_issue_r * n_issue_s + i_issue_s) + i_buf * n_issue],
+                                 v_offset + base_addr, i_offset(i_issue_s, i_issue_r));
+            }
+        }
+    }
+    DEVICE constexpr auto load(index_t i_s_repeat, index_t i_r_repeat, index_t i_buf = 0)
+    {
+        static_assert(i_buf < DUP_BUFS);
+        sld_inst_type{}(smem, buf.template to_varray<sld_vector_type>()[(i_r_repeat * n_issue_s + i_s_repeat) + i_buf * n_issue],
+                                v_offset + base_addr, i_offset(i_s_repeat, i_r_repeat));
+    }
+#endif
     template<index_t i_s_repeat, index_t i_r_repeat, index_t i_buf = 0>
     DEVICE constexpr auto & get()
     {
@@ -271,6 +312,7 @@ struct gld_iterator_s_r {
     {
         clear(buf, bool_const<disable_inline_asm>{}); // TODO: seems better if let compiler to schedule, when not using setprio
     }
+#if !USE_C_ARRAY
     DEVICE constexpr auto operator()()
     {
         constexpr_for<0, n_issue, 1>{}([&](auto i_issue){
@@ -285,6 +327,19 @@ struct gld_iterator_s_r {
                         make_buffer_resource(base_ptr + base_offset), v_offset(),
                         s_offset(i_issue), 0, flags[number<i_issue>{}]);
     }
+#else
+    DEVICE constexpr auto operator()()
+    {
+        for(index_t i_issue = 0; i_issue < n_issue; i_issue++)
+            issue(i_issue);
+    }
+    DEVICE constexpr auto issue(index_t i_issue)
+    {
+        gld_inst_type{}(buf.template to_varray<gld_vector_type>()[i_issue],
+                        make_buffer_resource(base_ptr + base_offset), v_offset(),
+                        s_offset(i_issue), 0, flags[i_issue]);
+    }
+#endif
     DEVICE constexpr auto move_slice_window(index_t r_step)
     {
         base_offset += r_step;
@@ -366,6 +421,7 @@ struct gld_iterator_s_r_direct_to_reg {
         const index_t stride_per_issue = (BLOCK_S_WAVES_ * S_PER_WAVE_) * s_stride;
         return i_issue_s * stride_per_issue * sizeof(dtype_);
     }
+#if !USE_C_ARRAY
     template<index_t i_prefetch = 0>
     DEVICE constexpr auto load(number<i_prefetch> = number<0>{})
     {
@@ -385,6 +441,21 @@ struct gld_iterator_s_r_direct_to_reg {
                         make_buffer_resource(base_ptr + base_offset), v_offset(),
                         s_offset(i_issue_s), i_issue_r * i_stride_r * sizeof(dtype_), flags[number<i_issue>{}]);
     }
+#else
+    DEVICE constexpr auto load(index_t i_prefetch = 0)
+    {
+        for(index_t i_issue = 0 ; i_issue < n_issue ; i_issue++)
+            issue(i_issue, i_prefetch);
+    }
+    DEVICE constexpr auto issue(index_t i_issue, index_t i_prefetch = 0)
+    {
+        const auto i_issue_r = i_issue % issues_r;
+        const auto i_issue_s = i_issue / issues_r;
+        gld_inst_type{}(buf[i_prefetch].template to_varray<gld_vector_type>()[i_issue],
+                        make_buffer_resource(base_ptr + base_offset), v_offset(),
+                        s_offset(i_issue_s), i_issue_r * i_stride_r * sizeof(dtype_), flags[i_issue]);
+    }
+#endif
     template<index_t i_prefetch = 0, bool disable_inline_asm = true>
     DEVICE constexpr auto clear_single_buf(number<i_prefetch> = number<0>{}, bool_const<disable_inline_asm> = bool_const<true>{})
     {
@@ -814,10 +885,14 @@ struct gemm_pipeline_flat {
                 // it is good to self contains this barrier inside constexpr for
                 sst_fence(0); wave_barrier();
             }
-
+#if !USE_C_ARRAY
             // conditionally do sld
             if constexpr(i_3d == 0)      sld_iter_a.template load_all<0>();
             if constexpr(i_3d == 0)      sld_iter_b.template load_all<0>();
+#else
+            if constexpr(i_3d == 0)      sld_iter_a.template load_all(0);
+            if constexpr(i_3d == 0)      sld_iter_b.template load_all(0);
+#endif
 
             // TODO: ugly
             if constexpr(i_3d == 0) sld_fence(0);
@@ -850,7 +925,11 @@ struct gemm_pipeline_flat {
     DEVICE void gemm(ACC_BUF_ & acc_buf, GLD_A & gld_iter_a, GLD_B & gld_iter_b, SLD_A & sld_iter_a, SLD_B & sld_iter_b, SST_A & sst_iter_a, SST_B & sst_iter_b,
                                 HOT_LOOP_ is_hot_loop = bool_const<true>{})
     {
+#if VECTOR_TYPE_USE_REFERENCE
+        using acc_type = typename ACC_BUF_::data_type;
+#else
         using acc_type = typename ACC_BUF_::d1_t;
+#endif
         using acc_t = typename vector_type<acc_type, mfma_inst::num_v_c>::type;
         auto mfma = mfma_inst{};
 
@@ -888,18 +967,28 @@ struct gemm_pipeline_flat {
                         {   gld_iter_a();    }}
                 else { if constexpr (gld_x_mask && is_hot_loop) {
                         constexpr auto gld_x_info = TRAITS_::decode_mask(number<gld_x_mask>{});
+#if !USE_C_ARRAY
                         constexpr_for<0, gld_x_info.num_issues, 1>{}([&](auto i_issue){
                             gld_iter_a.issue(number<gld_x_info.issue_id + i_issue>{});
-                    });
+                        });
+#else                   
+                        for(index_t i_issue = 0; i_issue < gld_x_info.num_issues; i_issue++)
+                            gld_iter_a.issue(gld_x_info.issue_id + i_issue);
+#endif
                 }}};
             auto try_gld_y = [&]{
                 if constexpr (TRAITS_::use_default) { if constexpr (need_gld_b_default)
                         {   gld_iter_b();   }}
                 else { if constexpr (gld_y_mask && is_hot_loop) {
                         constexpr auto gld_y_info = TRAITS_::decode_mask(number<gld_y_mask>{});
+#if !USE_C_ARRAY
                         constexpr_for<0, gld_y_info.num_issues, 1>{}([&](auto i_issue){
                             gld_iter_b.issue(number<gld_y_info.issue_id + i_issue>{});
-                    });
+                        });
+#else
+                        for(index_t i_issue = 0; i_issue < gld_y_info.num_issues; i_issue++)
+                            gld_iter_b.issue(gld_y_info.issue_id + i_issue);
+#endif              
                 }}};
 
             if constexpr (TRAITS_::gld_x_first) { try_gld_x(); try_gld_y();}
@@ -909,11 +998,17 @@ struct gemm_pipeline_flat {
                 // it is good to self contains this barrier inside constexpr for
                 sst_fence(0); wave_barrier();
             }
-
             // conditionally do sld
+#if !USE_C_ARRAY
             if constexpr(need_sld_a_first)      sld_iter_a.template load_all<i_k>();
             if constexpr(need_sld_b_first)      sld_iter_b.template load<0, i_k, 0>();
             if constexpr(need_sld_b_prefetch)   sld_iter_b.template load<i_next_n, i_k, (i_2d + 1) % 2>();
+#else
+            if constexpr(need_sld_a_first)      sld_iter_a.load_all(i_k);
+            if constexpr(need_sld_b_first)      sld_iter_b.load(0, i_k, 0);
+            if constexpr(need_sld_b_prefetch)   sld_iter_b.load(i_next_n, i_k, (i_2d + 1) % 2);
+#endif
+            
 
             // TODO: this may have bugs if repeat if not large (?)
             auto sld_fence_cnt = [&](){
@@ -1010,7 +1105,12 @@ struct gemm_pipeline_oneside_lds {
     {
         if constexpr (TRAITS::gld_x_first) {
             gld_x.clear_buf();
-            gld_x.load(number<0>{}); gld_x.move_slice_window(K_PER_BLOCK_);
+#if !USE_C_ARRAY
+            gld_x.load(number<0>{});
+#else
+            gld_x.load(0);
+#endif
+            gld_x.move_slice_window(K_PER_BLOCK_);
             gld_y.clear_buf();
             gld_y(); gld_y.move_slice_window(K_PER_BLOCK_);
         }
@@ -1018,7 +1118,12 @@ struct gemm_pipeline_oneside_lds {
             gld_y.clear_buf();
             gld_y(); gld_y.move_slice_window(K_PER_BLOCK_);
             gld_x.clear_buf();
-            gld_x.load(number<0>{}); gld_x.move_slice_window(K_PER_BLOCK_);
+#if !USE_C_ARRAY
+            gld_x.load(number<0>{});
+#else
+            gld_x.load(0);
+#endif
+            gld_x.move_slice_window(K_PER_BLOCK_);
         }
 
         index_t v_offset_y;
@@ -1078,8 +1183,11 @@ struct gemm_pipeline_oneside_lds {
             constexpr auto i_2d = number<i_3d % ( X_REPEAT * Y_REPEAT)>{};
             constexpr auto i_x = number<i_2d / Y_REPEAT>{};
             constexpr auto i_y = number<i_2d % Y_REPEAT>{};
-
+#if !USE_C_ARRAY
             auto try_gld_x = [&]{ if constexpr (i_3d == 0 && is_hot_loop) gld_iter_x.load(number<i_next_x_buf>{}); };
+#else
+            auto try_gld_x = [&]{ if constexpr (i_3d == 0 && is_hot_loop) gld_iter_x.load(i_next_x_buf); };
+#endif
             auto try_gld_y = [&]{ if constexpr (i_3d == 0 && is_hot_loop) gld_iter_y();};
 
             if constexpr (TRAITS_::gld_x_first) { try_gld_x(); try_gld_y();}
@@ -1091,7 +1199,11 @@ struct gemm_pipeline_oneside_lds {
             }
 
             // conditionally do sld
+#if !USE_C_ARRAY
             if constexpr(i_3d == 0)      sld_iter_y.template load_all<0>();
+#else
+            if constexpr(i_3d == 0)      sld_iter_y.load_all(0);
+#endif
 
             if constexpr(i_3d == 0 && !TRAITS_::gld_x_first) {
                 if constexpr (is_hot_loop) gld_fence(gld_iter_x.n_issue + gld_iter_y.n_issue);
@@ -1154,21 +1266,35 @@ struct gemm_pipeline_oneside_lds {
                                                 return TRAITS_::gld_y_mask.get(i_3d); else return 0;}();
             auto try_gld_x = [&]{
                 if constexpr (TRAITS_::use_default) { if constexpr (need_gld_x_default)
+#if !USE_C_ARRAY
                         {   gld_iter_x.load(number<i_next_x_buf>{});    }}
+#else
+                        {   gld_iter_x.load(i_next_x_buf);    }}
+#endif
                 else { if constexpr (gld_x_mask && is_hot_loop) {
                         constexpr auto gld_x_info = TRAITS_::decode_mask(number<gld_x_mask>{});
+#if !USE_C_ARRAY
                         constexpr_for<0, gld_x_info.num_issues, 1>{}([&](auto i_issue){
                             gld_iter_x.issue(number<gld_x_info.issue_id + i_issue>{}, number<i_next_x_buf>{});
-                    });
+                        });
+#else
+                        for(index_t i_issue = 0; i_issue < gld_x_info.num_issues; i_issue++)
+                            gld_iter_x.issue(gld_x_info.issue_id + i_issue, i_next_x_buf);
+#endif
                 }}};
             auto try_gld_y = [&]{
                 if constexpr (TRAITS_::use_default) { if constexpr (need_gld_y_default)
                         {   gld_iter_y();   }}
                 else { if constexpr (gld_y_mask && is_hot_loop) {
                         constexpr auto gld_y_info = TRAITS_::decode_mask(number<gld_y_mask>{});
+#if !USE_C_ARRAY
                         constexpr_for<0, gld_y_info.num_issues, 1>{}([&](auto i_issue){
                             gld_iter_y.issue(number<gld_y_info.issue_id + i_issue>{});
-                    });
+                        });
+#else
+                        for(index_t i_issue = 0; i_issue < gld_y_info.num_issues; i_issue++)
+                            gld_iter_y.issue(gld_y_info.issue_id + i_issue);
+#endif
                 }}};
 
             if constexpr (TRAITS_::gld_x_first) { try_gld_x(); try_gld_y();}
@@ -1177,11 +1303,19 @@ struct gemm_pipeline_oneside_lds {
             if constexpr(i_3d == 0) {
                 // it is good to self contains this barrier inside constexpr for
                 sst_fence(0); wave_barrier();
+#if !USE_C_ARRAY
                 sld_iter_y.template load<0, i_k, 0>();
+#else
+                sld_iter_y.load(0, i_k, 0);
+#endif
             }
 
             if constexpr(need_sld_y_prefetch)
+#if !USE_C_ARRAY
                 sld_iter_y.template load<i_next_y, i_next_k, (i_2d + 1) % 2>();
+#else
+                sld_iter_y.load(i_next_y, i_next_k, (i_2d + 1) % 2);
+#endif
 
             if constexpr(i_3d == 0) {
                 // after first y issue, then wait for previous x, before entering main loop
