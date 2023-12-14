@@ -218,6 +218,7 @@ struct sst_iterator_r0_s_r1 {
         const index_t stride_per_issue = s_length * R_PACK_ * sizeof(dtype_);
         return i_issue * stride_per_issue;
     }
+#if !USE_C_ARRAY
     template<index_t v_pack>
     DEVICE constexpr auto i_offset_r0_v_s_r1(index_t i_s, index_t i_v, number<v_pack>)
     {
@@ -271,6 +272,58 @@ struct sst_iterator_r0_s_r1 {
             });
         }
     }
+#else
+    DEVICE constexpr auto i_offset_r0_v_s_r1(index_t i_s, index_t i_v, index_t v_pack)
+    {
+        constexpr auto s_length = BLOCK_SIZE_ / (R_PER_BLOCK_ / T_PACK_);
+        const index_t stride_per_v = (R_PACK_/*padding*/ + S_PER_BLOCK_ * R_PACK_) * sizeof(dtype_);
+        const index_t stride_per_s = s_length * R_PACK_ * sizeof(dtype_);
+        return i_s * stride_per_s + i_v * stride_per_v;
+    }
+    DEVICE constexpr auto i_offset_r0_s_v_rv(index_t i_s, index_t i_v, index_t v_pack)
+    {
+        const auto rv_pack = R_PACK_ / v_pack;
+        constexpr auto s_length = BLOCK_SIZE_ / (R_PER_BLOCK_ / T_PACK_);
+        const index_t stride_per_v = rv_pack * sizeof(dtype_);
+        const index_t stride_per_r = s_length * R_PACK_ * sizeof(dtype_);
+        return i_s * stride_per_r + i_v * stride_per_v;
+    }
+    template<typename T, index_t N>
+    DEVICE constexpr auto operator()(const vector_type<T, N> & buf)
+    {
+        static_assert(sizeof(T) * N == sizeof(dtype_) * R_PACK_ * n_bufs);
+        constexpr auto r_issue_bytes = sizeof(dtype_) * R_PACK_;
+        constexpr auto t_issue_bytes = sizeof(T) * T_PACK_;
+        if constexpr (t_issue_bytes == r_issue_bytes) {
+            for(index_t i_issue = 0; i_issue < n_issue; i_issue++)
+                sst_inst_type{}(smem, v_offset(),
+                            buf.template to_varray<sst_vector_type>()[i_issue],
+                            i_offset(i_issue));
+        }
+        else if constexpr (t_issue_bytes > r_issue_bytes && t_issue_bytes % r_issue_bytes == 0)
+        {
+            constexpr auto v_pack = t_issue_bytes / r_issue_bytes;
+            for(index_t i_issue = 0; i_issue < n_issue; i_issue++) {
+                const auto i_v = i_issue % v_pack;
+                const auto i_s = i_issue / v_pack;
+                sst_inst_type{}(smem, v_offset(),
+                            buf.template to_varray<sst_vector_type>()[i_issue],
+                            i_offset_r0_v_s_r1(i_s, i_v, v_pack));
+            }
+        }
+        else if constexpr (r_issue_bytes > t_issue_bytes && r_issue_bytes % t_issue_bytes == 0)
+        {
+            constexpr auto v_pack = r_issue_bytes / t_issue_bytes;
+            for(index_t i_issue = 0; i_issue < n_issue; i_issue++) {
+                const auto i_v = i_issue % v_pack;
+                const auto i_s = i_issue / v_pack;
+                sst_inst_type{}(smem, v_offset(),
+                            buf.template to_varray<sst_vector_type>()[i_issue],
+                            i_offset_r0_s_v_rv(i_s, i_v, v_pack));
+            }
+        }
+    }
+#endif
     void * smem;
     index_t base_addr;
 };
