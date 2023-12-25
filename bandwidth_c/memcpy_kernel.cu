@@ -173,15 +173,16 @@ int main(int argc, char ** argv) {
 
     // benchmark memcpy api
     float ms_api = bench_memcpy_api(B, A, dwords);
-    
+    float ms_memset = bench_memset_api(B, dwords);
+
     auto get_gbps = [](int dwords_, float ms_){
         return  ((double)dwords_*sizeof(float)*2)/((double)ms_/1000)/1000000000.0;
     };
     char str[64];
     b2s(dwords*sizeof(float), str);
-    printf("%s, kernel_x1:%.3f(GB/s), kernel_x2:%.3f(GB/s), kernel_x4:%.3f(GB/s), api:%.3f(GB/s)\n",
+    printf("%s, kernel_x1:%.3f(GB/s), kernel_x2:%.3f(GB/s), kernel_x4:%.3f(GB/s), api:%.3f(GB/s), memset:%.3f(GB/s)(%fms)\n",
         str, get_gbps(dwords, msx1), get_gbps(dwords, msx2), get_gbps(dwords, msx4),
-       get_gbps(dwords, ms_api) );
+       get_gbps(dwords, ms_api), get_gbps(dwords, ms_memset), ms_memset);
 
 #if 0
     {
