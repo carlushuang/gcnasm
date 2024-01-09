@@ -7,13 +7,10 @@
 #include <stdio.h>
 #include <numeric>
 
-#define USE_INLINE_ASM 0
-#define DYNAMIC_BUF 1
+#define INLINE_ASM 0
+#define UNROLL_BUF 0
 
 using index_t = int;
-
-#define MAX(x, y) ((x) > (y) ? (x) : (y))
-
 
 using fp32 = float;
 using fp32x16 = fp32 __attribute__((ext_vector_type(16)));
@@ -123,7 +120,7 @@ template<> struct gld<16>{
     template<typename T>
     __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 16);
-#if USE_INLINE_ASM
+#if INLINE_ASM
         asm volatile("buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4"
             : "+v"(value.get()) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
 #else
@@ -137,7 +134,7 @@ template<> struct gld<8>{
     template<typename T>
     __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 8);
-#if USE_INLINE_ASM
+#if INLINE_ASM
         asm volatile("buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4"
             : "+v"(value.get()) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
 #else
@@ -151,7 +148,7 @@ template<> struct gld<4>{
     template<typename T>
     __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
         static_assert(sizeof(T) == 4);
-#if USE_INLINE_ASM
+#if INLINE_ASM
         asm volatile("buffer_load_dword %0, %1, %2, %3 offen offset:%4"
             : "+v"(value.get()) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
 #else
@@ -163,7 +160,7 @@ template<> struct gld<4>{
 
 __device__ void gld_fence(index_t cnt)
 {
-#if USE_INLINE_ASM
+#if INLINE_ASM
     asm volatile("s_waitcnt vmcnt(%0)" : : "n" (cnt) : "memory");
 #else
     (void) cnt;
@@ -173,7 +170,7 @@ __device__ void gld_fence(index_t cnt)
 template<typename T, index_t N>
 __device__ void gld_fence(vector_type<T, N> & /*buf*/, index_t cnt)
 {
-#if USE_INLINE_ASM
+#if INLINE_ASM
     asm volatile("s_waitcnt vmcnt(%0)" : : "n" (cnt) : "memory");
     // constexpr index_t total = sizeof(T) * N / sizeof(float);
     // for(auto i = 0; i < total; i++) {
@@ -187,7 +184,7 @@ __device__ void gld_fence(vector_type<T, N> & /*buf*/, index_t cnt)
 template<typename T, index_t N>
 __device__ void clear_buf(vector_type<T, N> & buf)
 {
-#if USE_INLINE_ASM
+#if INLINE_ASM
     for(auto i = 0; i < N; i++)
         asm volatile("v_mov_b32 %0, 0" : "+v"(buf.at(i)) :  : "memory");
 #else
@@ -201,7 +198,7 @@ __device__ void v_acc(T & x, const W & a, const W & b)
 {
     // TODO: T/W must be vector type
     static_assert(T::size == W::size);
-#if USE_INLINE_ASM
+#if INLINE_ASM
     // TODO: force to fp32
     for(auto i = 0; i < T::size; i++)
         asm volatile("v_fmac_f32 %0, %1, %2" : "+v"(x.at(i)) : "v"(a.at(i)), "v"(b.at(i)):);
@@ -243,7 +240,7 @@ reduce_n2(const void* ptr_a,
     gld<sizeof(buf_type)>{}(g_a.get(0), make_buffer_resource(p_a), col_offset * sizeof(buf_type), ir*256*sizeof(buf_type), 0);
     gld<sizeof(buf_type)>{}(g_b.get(0), make_buffer_resource(p_b), col_offset * sizeof(buf_type), ir*256*sizeof(buf_type), 0);
     ir++;
-#if DYNAMIC_BUF
+#if !UNROLL_BUF
     while(ir < rows) {
         gld<sizeof(buf_type)>{}(g_a.get(1), make_buffer_resource(p_a), col_offset * sizeof(buf_type), ir*256*sizeof(buf_type), 0);
         gld<sizeof(buf_type)>{}(g_b.get(1), make_buffer_resource(p_b), col_offset * sizeof(buf_type), ir*256*sizeof(buf_type), 0);
@@ -354,8 +351,9 @@ reduce_n3(const void* __restrict__ ptr_a,
     GLD_A(0); GLD_B(0); ir++;
     GLD_A(1); GLD_B(1); ir++;
 
-#if DYNAMIC_BUF
+#if !UNROLL_BUF
     while(ir < rows) {
+    // while(true) {
         GLD_A(2); GLD_B(2); ir++;
         gld_fence(4);
         ACC_C(0);
@@ -371,6 +369,7 @@ reduce_n3(const void* __restrict__ ptr_a,
         GLD_A(1); GLD_B(1); ir++;
         gld_fence(4);
         ACC_C(2);
+        //if(ir >= rows) break;
     }
 
     if(mod == 0) {
