@@ -139,7 +139,7 @@ template<> struct gld<8>{
         static_assert(sizeof(T) == 8);
 #if USE_INLINE_ASM
         asm volatile("buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4"
-            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+            : "+v"(value.get()) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
 #else
         auto tmp = llvm_amdgcn_raw_buffer_load_fp32x2(res, v_offset, s_offset + i_offset, 0);
         value =  __builtin_bit_cast(T, tmp);
@@ -153,7 +153,7 @@ template<> struct gld<4>{
         static_assert(sizeof(T) == 4);
 #if USE_INLINE_ASM
         asm volatile("buffer_load_dword %0, %1, %2, %3 offen offset:%4"
-            : "+v"(value) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+            : "+v"(value.get()) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
 #else
         auto tmp = llvm_amdgcn_raw_buffer_load_fp32(res, v_offset, s_offset + i_offset, 0);
         value =  __builtin_bit_cast(T, tmp);
@@ -224,6 +224,7 @@ reduce_n2(const void* ptr_a,
     int col_offset = threadIdx.x;
 
     using buf_type = vector_type<float, 4>;
+    using buf_type_t = typename buf_type::type;
 
     //buf_type acc {.0f};
     buf_type acc;
@@ -233,9 +234,9 @@ reduce_n2(const void* ptr_a,
     static_buffer<buf_type, 2> g_b;
     int odd = __builtin_amdgcn_readfirstlane(rows & 1);
 
-    const buf_type * p_a = reinterpret_cast<const buf_type*>(ptr_a);
-    const buf_type * p_b = reinterpret_cast<const buf_type*>(ptr_b);
-    buf_type * p_dst = reinterpret_cast<buf_type*>(ptr_dst);
+    const buf_type_t * p_a = reinterpret_cast<const buf_type_t*>(ptr_a);
+    const buf_type_t * p_b = reinterpret_cast<const buf_type_t*>(ptr_b);
+    buf_type_t * p_dst = reinterpret_cast<buf_type_t*>(ptr_dst);
 
     int ir = __builtin_amdgcn_readfirstlane(0);
 
@@ -310,7 +311,7 @@ reduce_n2(const void* ptr_a,
         v_acc(acc, g_a.get(1), g_b.get(1));
     }
 #endif
-    p_dst[col_offset] = acc;
+    p_dst[col_offset] = acc.get();
 }
 #endif
 
@@ -329,6 +330,7 @@ reduce_n3(const void* __restrict__ ptr_a,
     int col_offset = threadIdx.x;
 
     using buf_type = vector_type<float, 4>;
+    using buf_type_t = typename buf_type::type;
 
     //buf_type acc {.0f};
     buf_type acc;
@@ -338,9 +340,9 @@ reduce_n3(const void* __restrict__ ptr_a,
     static_buffer<buf_type, 3> g_b;
     int mod = __builtin_amdgcn_readfirstlane(rows & 2);
 
-    const buf_type * __restrict__ p_a = reinterpret_cast<const buf_type* __restrict__>(ptr_a);
-    const buf_type * __restrict__ p_b = reinterpret_cast<const buf_type* __restrict__>(ptr_b);
-    buf_type * __restrict__ p_dst = reinterpret_cast<buf_type* __restrict__>(ptr_dst);
+    const buf_type_t * __restrict__ p_a = reinterpret_cast<const buf_type_t* __restrict__>(ptr_a);
+    const buf_type_t * __restrict__ p_b = reinterpret_cast<const buf_type_t* __restrict__>(ptr_b);
+    buf_type_t * __restrict__ p_dst = reinterpret_cast<buf_type_t* __restrict__>(ptr_dst);
 
     int ir = __builtin_amdgcn_readfirstlane(0);
 
@@ -468,7 +470,7 @@ reduce_n3(const void* __restrict__ ptr_a,
         ACC_C(1);
     }
 #endif
-    p_dst[col_offset] = acc;
+    p_dst[col_offset] = acc.get();
 }
 #endif
 
