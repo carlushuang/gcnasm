@@ -1,119 +1,204 @@
-#include <stdio.h>
 #include <hip/hip_runtime.h>
-#include <random>
+#include <stdio.h>
+#include <assert.h>
 #include <iostream>
+#include <stdlib.h>
+#include <unistd.h>
+#include <stdint.h>
 
-#define HIP_CALL(call) do{  \
-    hipError_t err = call;  \
-    if(err != hipSuccess){  \
-        printf("[hiperror](%d) fail to call %s",(int)err,#call);    \
-        exit(0);            \
-    }                      \
+using f32 = float;
+// using f16 = _Float16;
+
+using u8 = std::uint8_t;
+using u16 = std::uint16_t;
+using u32 = std::uint32_t;
+
+using index_t = u32;
+
+typedef uint32_t u32x4 __attribute__((ext_vector_type(4)));
+typedef uint32_t u32x2 __attribute__((ext_vector_type(2)));
+typedef uint32_t u32x1 __attribute__((ext_vector_type(1)));
+
+typedef f32 f32x8 __attribute__((ext_vector_type(8)));
+typedef f32 f32x4 __attribute__((ext_vector_type(4)));
+typedef f32 f32x2 __attribute__((ext_vector_type(2)));
+typedef f32 f32x1 __attribute__((ext_vector_type(1)));
+
+typedef u32x4 dwordx4_t;
+typedef u32x2 dwordx2_t;
+typedef u32   dword_t;
+
+typedef uint8_t u8x16 __attribute__((ext_vector_type(16)));
+typedef uint8_t u8x8  __attribute__((ext_vector_type(8)));
+typedef uint8_t u8x4  __attribute__((ext_vector_type(4)));
+typedef uint8_t u8x2  __attribute__((ext_vector_type(2)));
+typedef uint8_t u8x1  __attribute__((ext_vector_type(1)));
+
+
+#define BUFFER_LOAD_DWORD3 0x00020000   // This is valid for 
+struct buffer_resource {
+    const void * ptr;
+    dword_t range;
+    dword_t config;
+};
+__device__ dwordx4_t make_buffer_resource(const void * ptr, uint32_t size = 0xffffffff)
+{
+    buffer_resource res {ptr, size, BUFFER_LOAD_DWORD3};
+    return __builtin_bit_cast(dwordx4_t, res);
+}
+
+template<index_t bytes>
+struct gld;
+
+template<> struct gld<16>{
+    template<typename T>
+    __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        static_assert(sizeof(T) == 16);
+        using v_type = float __attribute__((ext_vector_type(4)));
+        asm volatile("buffer_load_dwordx4 %0, %1, %2, %3 offen offset:%4"
+            : "+v"(reinterpret_cast<v_type&>(value)) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+template<> struct gld<8>{
+    template<typename T>
+    __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        static_assert(sizeof(T) == 8);
+        using v_type = float __attribute__((ext_vector_type(2)));
+        asm volatile("buffer_load_dwordx2 %0, %1, %2, %3 offen offset:%4"
+            : "+v"(reinterpret_cast<v_type&>(value)) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+template<> struct gld<4>{
+    template<typename T>
+    __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        static_assert(sizeof(T) == 4);
+        using v_type = float;
+        asm volatile("buffer_load_dword %0, %1, %2, %3 offen offset:%4"
+            : "+v"(reinterpret_cast<v_type&>(value)) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+template<index_t bytes>
+struct gst;
+
+template<> struct gst<16>{
+    template<typename T>
+    __device__ void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        static_assert(sizeof(T) == 16);
+        using v_type = float __attribute__((ext_vector_type(4)));
+        asm volatile("buffer_store_dwordx4 %0, %1, %2, %3 offen offset:%4"
+            : : "v"(reinterpret_cast<const v_type&>(value)), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+template<> struct gst<8>{
+    template<typename T>
+    __device__ void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        static_assert(sizeof(T) == 8);
+        using v_type = float __attribute__((ext_vector_type(2)));
+        asm volatile("buffer_store_dwordx2 %0, %1, %2, %3 offen offset:%4"
+            : : "v"(reinterpret_cast<const v_type&>(value)), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+template<> struct gst<4>{
+    template<typename T>
+    __device__ void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        static_assert(sizeof(T) == 4);
+        using v_type = float;
+        asm volatile("buffer_store_dword %0, %1, %2, %3 offen offset:%4"
+            : : "v"(reinterpret_cast<const v_type&>(value)), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+
+__device__ void gld_fence(index_t cnt)
+{
+    asm volatile("s_waitcnt vmcnt(%0)" : : "n" (cnt) : "memory");
+}
+
+
+template<typename T, index_t force_buffer_size = sizeof(T)>
+__global__
+void oob_test_kernel(T* __restrict__ dst, const T* __restrict__ src){
+    if(blockIdx.x == 0 && threadIdx.x == 0) {
+        T data;
+        gld<sizeof(T)>{}(data, make_buffer_resource(src, force_buffer_size), 0, 0, 0);
+        gld_fence(0);
+        gst<sizeof(T)>{}(data, make_buffer_resource(dst), 0, 0, 0);
+    }
+}
+
+#define CALL(cmd) \
+do {\
+    hipError_t cuda_error  = cmd;\
+    if (cuda_error != hipSuccess) { \
+        std::cout<<"'"<<hipGetErrorString(cuda_error)<<"'("<<cuda_error<<")"<<" at "<<__FILE__<<":"<<__LINE__<<std::endl;\
+        exit(EXIT_FAILURE);\
+    }\
 } while(0)
 
-#define HSACO "buffer_ld_oob.hsaco"
-#define HSA_KERNEL "kernel_func"
-
-
-#define PER_PIXEL_CHECK
-#define ASSERT_ON_FAIL
-
-#ifndef ABS
-#define ABS(x) ((x)>0?(x):-1*(x))
-#endif
-
-template<typename T>
-void rand_vec(T * seq, size_t len){
-    static std::random_device rd;   // seed
-    static std::mt19937 mt(rd());
-    static std::uniform_real_distribution<T> dist(-10.0, 10.0);
-
-    for(size_t i=0;i<len;i++) seq[i] =  dist(mt);
+namespace impl {
+    template<typename T, int N>
+    struct to_vec { using type = T __attribute__((ext_vector_type(N))); };
 }
+template<typename T, int N>
+using to_vec_t = typename impl::to_vec<T, N>::type;
 
-template<typename T>
-void set_vec(T * seq, size_t len, T value){
-    for(size_t i=0;i<len;i++) seq[i] =  value;
-}
+template<int total_bytes, int force_bytes>
+struct test_oob{
+    void operator()(){
+        using vec_type = to_vec_t<uint8_t, total_bytes>;
+        vec_type *A, *B;
 
-static inline bool valid_vector( const float* ref, const float* pred, int n, double nrms = 1e-6 )
-{
-    int pp_err = 0;
-    for( int i=0; i<n; ++i ){
-        if(ref[i] != pred[i]){
-#ifdef ASSERT_ON_FAIL
-            if(pp_err<100)
-                printf("diff at %4d, ref:%lf, pred:%lf(0x%08x), d:%lf\n",i,ref[i],pred[i],((uint32_t*)pred)[i],ABS(ref[i] - pred[i]));
-#endif
-            pp_err++;
-        }
+        uint8_t * h_A = (uint8_t*)malloc(total_bytes*sizeof(uint8_t));
+        uint8_t * h_B = (uint8_t*)malloc(total_bytes*sizeof(uint8_t));
+
+        for(auto i = 0; i < total_bytes; i++) { h_A[i] = i + 1; }
+
+        CALL(hipMalloc(&A, total_bytes * sizeof(uint8_t)));
+        CALL(hipMalloc(&B, total_bytes * sizeof(uint8_t)));
+        CALL(hipMemcpy(A, h_A, total_bytes * sizeof(uint8_t), hipMemcpyHostToDevice));
+
+        oob_test_kernel<vec_type, force_bytes><<<1, 64>>>(B, A); 
+        CALL(hipMemcpy(h_B, B, total_bytes * sizeof(uint8_t), hipMemcpyDeviceToHost));
+        printf("[%2d/%2d] ", force_bytes, total_bytes);
+        for(auto i = 0; i < total_bytes; i++) printf("%02x ", h_A[i]);
+        printf(" -> ");
+        for(auto i = 0; i < total_bytes; i++) printf("%02x ", h_B[i]);
+        printf("\n"); fflush(stdout);
+
+        free(h_A); free(h_B);
+        CALL(hipFree(A)); CALL(hipFree(B));
     }
-    return pp_err == 0;
-}
+};
 
-int main(int argc, char ** argv){
-    hipModule_t module;
-    hipFunction_t kernel_func;
-    HIP_CALL(hipSetDevice(0));
 
-    HIP_CALL(hipModuleLoad(&module, HSACO));
-    HIP_CALL(hipModuleGetFunction(&kernel_func, module, HSA_KERNEL));
+int main(int argc, char ** argv) {
+    printf("buffer_load_dwordx4 ------\n");
+    test_oob<16, 16>{}();
+    test_oob<16, 14>{}();
+    test_oob<16, 11>{}();
+    test_oob<16, 8>{}();
+    test_oob<16, 6>{}();
+    test_oob<16, 4>{}();
+    test_oob<16, 3>{}();
+    test_oob<16, 2>{}();
+    test_oob<16, 1>{}();
 
-    int num_cu;
-    {
-        hipDeviceProp_t dev_prop;
-        hipDevice_t dev;
-        HIP_CALL(hipGetDevice( &dev ));
-        HIP_CALL(hipGetDeviceProperties( &dev_prop, dev ));
-        num_cu = dev_prop.multiProcessorCount;
-    }
+    printf("buffer_load_dwordx2 ------\n");
+    test_oob<8, 8>{}();
+    test_oob<8, 6>{}();
+    test_oob<8, 4>{}();
+    test_oob<8, 3>{}();
+    test_oob<8, 2>{}();
+    test_oob<8, 1>{}();
 
-    int bdx = 256;
-    int gdx = num_cu;
-    float * host_in, * host_out, *dev_in, *dev_out;
-
-    // int total_floats = 1073741760;
-    // int total_floats = 256*2;
-    int total_floats = 256*2;
-
-    host_in   = new float[total_floats];
-    host_out  = new float[total_floats];
-    HIP_CALL(hipMalloc(&dev_in,  sizeof(float) * total_floats));
-    HIP_CALL(hipMalloc(&dev_out, sizeof(float) * total_floats));
-
-    rand_vec(host_in, total_floats);
-    set_vec(host_out, total_floats, (float)0);
-
-    HIP_CALL(hipMemcpy(dev_in, host_in, sizeof(float)*total_floats, hipMemcpyHostToDevice));
-
-    printf("memcpy, input:%p, output:%p, floats:%d\n",dev_in,dev_out, total_floats);
-
-    struct __attribute__((packed)){
-        float * input;
-        float * output;
-        int     total_number;
-        int     _pack;
-    } args;
-
-    size_t arg_size = sizeof(args);
-    args.input = dev_in;
-    args.output = dev_out;
-    args.total_number = total_floats;
-
-    void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, &args, HIP_LAUNCH_PARAM_BUFFER_SIZE,
-                    &arg_size, HIP_LAUNCH_PARAM_END};
-
-    HIP_CALL(hipModuleLaunchKernel(kernel_func, gdx,1,1, bdx,1,1,  0, 0, NULL, (void**)&config ));
-
-    HIP_CALL(hipMemcpy(host_out, dev_out, sizeof(float)*total_floats, hipMemcpyDeviceToHost));
-
-    bool is_valid = valid_vector(host_in, host_out, total_floats);
-    if(!is_valid){
-        printf("not valid, please check\n");
-    }
-
-    delete [] host_in;
-    delete [] host_out;
-    hipFree(dev_in);
-    hipFree(dev_out);
+    printf("buffer_load_dword ------\n");
+    test_oob<4, 4>{}();
+    test_oob<4, 3>{}();
+    test_oob<4, 2>{}();
+    test_oob<4, 1>{}();
 }
