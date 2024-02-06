@@ -80,6 +80,28 @@ template<> struct gld<4>{
     }
 };
 
+// need prepare data in unit of dword for this subdword case
+template<> struct gld<2>{
+    template<typename T>
+    __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        using v_type = float;
+        static_assert(sizeof(T) == sizeof(v_type));
+        asm volatile("buffer_load_ushort %0, %1, %2, %3 offen offset:%4"
+            : "+v"(reinterpret_cast<v_type&>(value)) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+// need prepare data in unit of dword for this subdword case
+template<> struct gld<1>{
+    template<typename T>
+    __device__ void operator()(T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        using v_type = float;
+        static_assert(sizeof(T) == sizeof(v_type));
+        asm volatile("buffer_load_sbyte %0, %1, %2, %3 offen offset:%4"
+            : "+v"(reinterpret_cast<v_type&>(value)) : "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
 template<index_t bytes>
 struct gst;
 
@@ -113,6 +135,27 @@ template<> struct gst<4>{
     }
 };
 
+// need prepare data in unit of dword for this subdword case
+template<> struct gst<2>{
+    template<typename T>
+    __device__ void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        using v_type = float;
+        static_assert(sizeof(T) == sizeof(v_type));
+        asm volatile("buffer_store_short %0, %1, %2, %3 offen offset:%4"
+            : : "v"(reinterpret_cast<const v_type&>(value)), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
+
+// need prepare data in unit of dword for this subdword case
+template<> struct gst<1>{
+    template<typename T>
+    __device__ void operator()(const T & value, dwordx4_t res/*buffer resource*/, index_t v_offset, index_t s_offset, index_t i_offset/*max 0xFFF*/, index_t /*flag*/ = 0){
+        using v_type = float;
+        static_assert(sizeof(T) == sizeof(v_type));
+        asm volatile("buffer_store_byte %0, %1, %2, %3 offen offset:%4"
+            : : "v"(reinterpret_cast<const v_type&>(value)), "v"(v_offset), "s"(res), "s"(s_offset), "n"(i_offset) : "memory");
+    }
+};
 
 __device__ void gld_fence(index_t cnt)
 {
@@ -120,13 +163,41 @@ __device__ void gld_fence(index_t cnt)
 }
 
 
+template<index_t N>
+struct dword_array {
+    float data[N];
+    __host__ __device__
+    constexpr auto & get(index_t idx) {return data[idx];}
+};
+
+template<typename T>
+using da_t = dword_array<(sizeof(T) + 3) / 4>;
+
+template<typename T>
+__device__ void gld_fence(index_t cnt, T& o)
+{
+    asm volatile("s_waitcnt vmcnt(%0)" : : "n" (cnt) : "memory");
+    using da_type = da_t<T>;
+    auto & dummy = reinterpret_cast<da_type&>(o).get(0);
+    asm volatile(" " :  : "v"(dummy):);
+}
+
+template<typename T, int bytes = sizeof(T)>
+struct pixel_buffer_type { using type = T;};
+
+template<typename T> struct pixel_buffer_type<T, 2> { static_assert(sizeof(T) == 2); using type = float; };
+template<typename T> struct pixel_buffer_type<T, 1> { static_assert(sizeof(T) == 1); using type = float; };
+
+template<typename T>
+using pixel_buffer_t = typename pixel_buffer_type<T, sizeof(T)>::type;
+
 template<typename T, index_t force_buffer_size = sizeof(T)>
 __global__
-void oob_test_kernel(T* __restrict__ dst, const T* __restrict__ src){
+void oob_test_kernel(T* __restrict__ dst, const T* __restrict__ src) {
     if(blockIdx.x == 0 && threadIdx.x == 0) {
-        T data;
+        pixel_buffer_t<T> data;
         gld<sizeof(T)>{}(data, make_buffer_resource(src, force_buffer_size), 0, 0, 0);
-        gld_fence(0);
+        gld_fence(0, data);
         gst<sizeof(T)>{}(data, make_buffer_resource(dst), 0, 0, 0);
     }
 }
@@ -201,4 +272,11 @@ int main(int argc, char ** argv) {
     test_oob<4, 3>{}();
     test_oob<4, 2>{}();
     test_oob<4, 1>{}();
+
+    printf("buffer_load_ushort ------\n");
+    test_oob<2, 2>{}();
+    test_oob<2, 1>{}();
+
+    printf("buffer_load_ubyte ------\n");
+    test_oob<1, 1>{}();
 }
