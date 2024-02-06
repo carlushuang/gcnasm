@@ -201,36 +201,39 @@ __device__ void gld_fence(index_t cnt)
 
 namespace impl{
 
+// can't use "+v" since there could be potential extra move(read/write)
+// use "v" can help remove such duplicated moves
+// besides, fake this as "memory" operation to force later valu after this fence
 template<index_t N>
 __device__ void insert_dummy_dep_per_dword(static_buffer<float, N>& buf)
 {
-    for (auto i = 0; i < buf.size; i++) asm volatile(" " : "+v"(buf.get(i)) : : "memory");
+    for (auto i = 0; i < buf.size; i++) asm volatile(" " : : "v"(buf.get(i)) : "memory");
 }
 
-#if 0
+#if 1
 template<>
 __device__ void insert_dummy_dep_per_dword<2>(static_buffer<float, 2>& buf)
 {
-    asm volatile(" " : "+v"(buf.get(0)), "+v"(buf.get(1)) : : "memory");
+    asm volatile(" " : : "v"(buf.get(0)), "v"(buf.get(1)) : "memory");
 }
 
 template<>
 __device__ void insert_dummy_dep_per_dword<3>(static_buffer<float, 3>& buf)
 {
-    asm volatile(" " : "+v"(buf.get(0)), "+v"(buf.get(1)), "+v"(buf.get(2)) : : "memory");
+    asm volatile(" " : : "v"(buf.get(0)), "v"(buf.get(1)), "v"(buf.get(2)) : "memory");
 }
 
 template<>
 __device__ void insert_dummy_dep_per_dword<4>(static_buffer<float, 4>& buf)
 {
-    asm volatile(" " : "+v"(buf.get(0)), "+v"(buf.get(1)), "+v"(buf.get(2)), "+v"(buf.get(3)) : : "memory");
+    asm volatile(" " : : "v"(buf.get(0)), "v"(buf.get(1)), "v"(buf.get(2)), "v"(buf.get(3)) : "memory");
 }
 
 template<>
 __device__ void insert_dummy_dep_per_dword<8>(static_buffer<float, 8>& buf)
 {
-    asm volatile(" " : "+v"(buf.get(0)), "+v"(buf.get(1)), "+v"(buf.get(2)), "+v"(buf.get(3)),
-                       "+v"(buf.get(4)), "+v"(buf.get(5)), "+v"(buf.get(6)), "+v"(buf.get(7)) : : "memory");
+    asm volatile(" " : : "v"(buf.get(0)), "v"(buf.get(1)), "v"(buf.get(2)), "v"(buf.get(3)),
+                       "v"(buf.get(4)), "v"(buf.get(5)), "v"(buf.get(6)), "v"(buf.get(7)) : "memory");
 }
 #endif
 
