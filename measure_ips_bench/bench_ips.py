@@ -31,7 +31,7 @@ class cpp_src_t:
     def compile(self, src, target, working_dir):
         def do_compile():
             if USE_HIP_CLANG:
-                cmd = "/opt/rocm/hip/bin/hipcc "
+                cmd = "/opt/rocm/bin/hipcc "
             else:
                 cmd = "g++" + " "
             cmd += self.get_cxxflags() + " "
@@ -333,6 +333,9 @@ bench_inst_dict = [
     ("v_mad_u64_u32",    "v[.itr+0:.itr+1], vcc, v[.itr+2], v[.itr+3], v[.itr+0:.itr+1]"),
     ("v_mul_i32_i24",    "v[.itr], v[.itr+1], v[.itr+2]"),
     ("v_add_lshl_u32",    "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
+    ("v_sad_u8",        "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
+    ("v_sad_u16",        "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
+    ("v_sad_u32",        "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
 
     ("v_dot2_f32_f16",  "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
     ("v_dot4_i32_i8",   "v[.itr], v[.itr+1], v[.itr+2], v[.itr+3]"),
