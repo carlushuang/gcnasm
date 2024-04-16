@@ -11,14 +11,14 @@ k_CPP_SRC = "bench.cpp"
 k_CPP_TARGET = "bench.exe"
 k_ASM_SRC = "kernel.s"
 k_ASM_TARGET = k_HSACO
-k_ARCH = "gfx90a"
+k_ARCH = "gfx942"
 k_INST_LOOP = [256, 512, 768, 1024]
 USE_HIP_CLANG = True
 
 class cpp_src_t:
     def get_cxxflags(self):
         if USE_HIP_CLANG:
-            return ' -mcpu={} '.format(k_ARCH)
+            return ' --offload-arch={} '.format(k_ARCH)
         else:
             return '`/opt/rocm/bin/hipconfig --cpp_config` -Wall -O2  -std=c++11 '
     def get_ldflags(self):
