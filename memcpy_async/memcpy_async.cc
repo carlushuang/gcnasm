@@ -157,6 +157,11 @@ __device__ __forceinline__ T nt_load(const T& ref)
     return __builtin_nontemporal_load(&ref);
 }
 
+template<typename T>
+__device__ __forceinline__ void nt_store(const T& value, T& ref) {
+    __builtin_nontemporal_store(value, &ref);
+}
+
 template<int BLOCK_SIZE = 256>
 __global__ void memcpy_stream_async(void * src,
     void * dst,
@@ -200,10 +205,12 @@ __global__ void memcpy_stream(void * src,
     int total = bytes / 16; // dwordx4
     fp32x4_t * p_src = reinterpret_cast<fp32x4_t*>(src);
     fp32x4_t * p_dst = reinterpret_cast<fp32x4_t*>(dst);
-    if(idx < total)
+    if(idx < total) {
+        //auto d = nt_load(p_src[idx]);
+        //nt_store(d, p_dst[idx]);
         p_dst[idx] = p_src[idx];
+    }
 }
-
 
 #ifdef RAND_INT
 #define PER_PIXEL_CHECK
@@ -313,6 +320,7 @@ int main(int argc, char ** argv)
                 memcpy_persistent<<<grids, block_size>>>(dev_a, dev_b, pixels * 4);
             };
         }();
+        HIP_CALL(hipMemset(dev_b, 0, pixels*sizeof(int)));
         auto ms = bench_kernel(k, WARMUP, LOOP);
         HIP_CALL(hipMemcpy(host_b, dev_b, pixels*sizeof(int), hipMemcpyDeviceToHost));
         int res = valid_vector_integer(host_b, host_a, pixels);
@@ -328,6 +336,7 @@ int main(int argc, char ** argv)
                 memcpy_stream<<<grids, block_size>>>(dev_a, dev_b, pixels * 4);
             };
         }();
+        HIP_CALL(hipMemset(dev_b, 0, pixels*sizeof(int)));
         auto ms = bench_kernel(k, WARMUP, LOOP);
         HIP_CALL(hipMemcpy(host_b, dev_b, pixels*sizeof(int), hipMemcpyDeviceToHost));
         int res = valid_vector_integer(host_b, host_a, pixels);
@@ -343,6 +352,7 @@ int main(int argc, char ** argv)
                 memcpy_stream_async<<<grids, block_size>>>(dev_a, dev_b, pixels * 4);
             };
         }();
+        HIP_CALL(hipMemset(dev_b, 0, pixels*sizeof(int)));
         auto ms = bench_kernel(k, WARMUP, LOOP);
         HIP_CALL(hipMemcpy(host_b, dev_b, pixels*sizeof(int), hipMemcpyDeviceToHost));
         int res = valid_vector_integer(host_b, host_a, pixels);
