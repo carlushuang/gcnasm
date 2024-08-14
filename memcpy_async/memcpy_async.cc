@@ -196,7 +196,7 @@ __global__ void memcpy_stream_async(void * src,
         p_dst[idx] = d;
 }
 
-template<int BLOCK_SIZE = 256>
+template<int BLOCK_SIZE = 256, int CHUNKS = 8>
 __global__ void memcpy_stream(void * src,
     void * dst,
     int bytes)
@@ -205,10 +205,12 @@ __global__ void memcpy_stream(void * src,
     int total = bytes / 16; // dwordx4
     fp32x4_t * p_src = reinterpret_cast<fp32x4_t*>(src);
     fp32x4_t * p_dst = reinterpret_cast<fp32x4_t*>(dst);
-    if(idx < total) {
-        //auto d = nt_load(p_src[idx]);
-        //nt_store(d, p_dst[idx]);
-        p_dst[idx] = p_src[idx];
+    for(auto c = 0; c < CHUNKS; c++) {
+        if((idx + c * gridDim.x * BLOCK_SIZE) < total) {
+            //auto d = nt_load(p_src[idx]);
+            //nt_store(d, p_dst[idx]);
+            p_dst[idx + c * gridDim.x * BLOCK_SIZE] = p_src[idx + c * gridDim.x * BLOCK_SIZE];
+        }
     }
 }
 
@@ -331,9 +333,10 @@ int main(int argc, char ** argv)
     {
         auto k = [=](){
             constexpr int block_size = 256;
-            int grids = ((pixels / 4) + block_size - 1)/ block_size;
+            constexpr int chunks = 1;
+            int grids = ((pixels / 4) + (block_size*chunks) - 1)/ (block_size*chunks);
             return [=](){
-                memcpy_stream<<<grids, block_size>>>(dev_a, dev_b, pixels * 4);
+                memcpy_stream<block_size><<<grids, block_size>>>(dev_a, dev_b, pixels * 4);
             };
         }();
         HIP_CALL(hipMemset(dev_b, 0, pixels*sizeof(int)));
