@@ -1,4 +1,4 @@
 alias bk="/opt/rocm/llvm/bin/clang++ -x assembler -target amdgcn--amdhsa --offload-arch=gfx942"
-alias bt="/opt/rocm/bin/hipcc --offload-arch=$ARCH  bwd.cpp -o bwd.exe"
+alias bt="/opt/rocm/bin/hipcc --offload-arch=gfx942  bwd.cpp -o bwd.exe"
 alias gtt="sudo rocprofv2 -i input.txt --plugin att auto ./bwd.exe"
 

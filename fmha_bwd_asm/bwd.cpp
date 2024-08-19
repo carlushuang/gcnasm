@@ -214,6 +214,7 @@ int main(int argc, char **argv)
     int s = 16384; // get_int("K", HGEMM_K);
     int d = 128;
     int atm_f32 = 1;
+    int skip_dq_rd = 1;
     
     int ts_qo = 32;
     int ts_kv = 128;
@@ -237,6 +238,7 @@ int main(int argc, char **argv)
     std::cout << "d:" << d << std::endl;
     std::cout << "dump_result:" << dump_result << std::endl;
     std::cout << "atm_f32:" << atm_f32 << std::endl;
+    std::cout << "skip_dq_rd:" << skip_dq_rd << std::endl;
 
     int stride_tg = ts_kv * d * 2;
     int stride_head = s * d * 2;
@@ -254,10 +256,17 @@ int main(int argc, char **argv)
     float *host_q, *host_k, *host_v, *host_do;
     float *host_lse, *host_odo;
 
-    int sz_mx = b * h * s * d;
+    long sz_mx = b * h * s * d;
     int sz_lsd = b * h * s;
     int sz_mx_pad = ts_qo * 4 * d;
     int sz_lsd_pad = ts_qo * 4;
+    long sz_mx_dq = 0;
+
+    if (atm_f32 == 2)
+       sz_mx_dq = sz_mx * (s/ts_kv);
+    else
+       sz_mx_dq = sz_mx;
+
     // float16 *fp16_a, *fp16_b, *fp16_c, *dev_a, *dev_b, *dev_c;
     float16 *host_fp16_q, *host_fp16_k, *host_fp16_v, *host_fp16_do;
     float16 *host_fp16_dq, *host_fp16_dk, *host_fp16_dv;
@@ -331,7 +340,7 @@ int main(int argc, char **argv)
     // for(int i=0; i<sz_mx; i++) host_fp16_v[i] =__float2half_rn(host_v[i]);
     // for(int i=0; i<sz_mx; i++) host_fp16_do[i]=__float2half_rn(host_do[i]);
 
-    host_fp32_dq = (float *)malloc(sz_mx * sizeof(float));
+    host_fp32_dq = (float *)malloc(sz_mx_dq * sizeof(float));
     host_fp16_dq = (float16 *)malloc(sz_mx * sizeof(float) / 2);
     host_fp16_dk = (float16 *)malloc(sz_mx * sizeof(float) / 2);
     host_fp16_dv = (float16 *)malloc(sz_mx * sizeof(float) / 2);
@@ -347,12 +356,14 @@ int main(int argc, char **argv)
         fmha_dump_batch_inHex(host_odo, "D.hex", b, h, s, 1, FP32);
     }
 
+    printf("dqsize: %zuM\n", sz_mx_dq*4/1024/1024);
+
     HIP_CALL(hipSetDevice(0));
     // fp16 on device
     // HIP_CALL(hipMalloc(&dev_a, lda*(k>>1)));
     // HIP_CALL(hipMalloc(&dev_b, ldb*(k>>1)));
     // HIP_CALL(hipMalloc(&dev_c, ldc*(n>>1)));
-    HIP_CALL(hipMalloc(&dev_dq, sz_mx * sizeof(float)));
+    HIP_CALL(hipMalloc(&dev_dq, sz_mx_dq * sizeof(float)));
     HIP_CALL(hipMalloc(&dev_dk, sz_mx * sizeof(float) / 2));
     HIP_CALL(hipMalloc(&dev_dv, sz_mx * sizeof(float) / 2));
 
@@ -476,8 +487,8 @@ int main(int argc, char **argv)
     void *config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, &args, HIP_LAUNCH_PARAM_BUFFER_SIZE,
                       &arg_size, HIP_LAUNCH_PARAM_END};
 
-    int total_loop = 10;
-    int warm_ups = 3;
+    int total_loop = 1;
+    int warm_ups = 1;
     int i;
 
     int bdx = 256;
@@ -529,20 +540,27 @@ int main(int argc, char **argv)
     //     printf(",%s",res?"valid":"fail");
     // }
     // printf("\n");
-    if (atm_f32)
-       HIP_CALL(hipMemcpy(host_fp32_dq, dev_dq, sz_mx * sizeof(float), hipMemcpyDeviceToHost));
+    
+    if ((atm_f32 == 1) || ((!skip_dq_rd)&&(atm_f32 == 2)))
+       HIP_CALL(hipMemcpy(host_fp32_dq, dev_dq, sz_mx_dq * sizeof(float), hipMemcpyDeviceToHost));
     else
        HIP_CALL(hipMemcpy((void*)host_fp16_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));;
     HIP_CALL(hipMemcpy(host_fp16_dk, dev_dk, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
     HIP_CALL(hipMemcpy(host_fp16_dv, dev_dv, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
 
-    if (atm_f32)
+    if (atm_f32 == 1)
        fmha_batch_cvt(host_fp16_dq, host_fp32_dq, b, h, s, d, FP16);
+    else if ((atm_f32 == 2)&&(!skip_dq_rd))
+    {
+        fmha_bwd_dQ_redc(host_fp32_dq, b, h, s, d, s/ts_kv);
+        fmha_batch_cvt(host_fp16_dq, host_fp32_dq, b, h, s, d, FP16);
+    }
+
 
     if (dump_result)
     { 
         fmha_dump_batch_inHex(host_fp16_dq, "gpu_dQ.hex", b, h, s, d, FP16);
-        fmha_dump_batch_inHex(host_fp32_dq, "gpu_dQ32.hex", b, h, s, d, FP32);
+        //fmha_dump_batch_inHex(host_fp32_dq, "gpu_dQ32.hex", b, h, s, d, FP32);
         fmha_dump_batch_inHex(host_fp16_dk, "gpu_dK.hex", b, h, s, d, FP16);
         fmha_dump_batch_inHex(host_fp16_dv, "gpu_dV.hex", b, h, s, d, FP16);
     }
