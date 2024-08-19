@@ -4,4 +4,4 @@ ARCH=gfx942
 
 
 # run
-./bwd.exe
+./bwd.exe b=1 h=16 s=16384 d=128 dump_result=0 init_pattern=0
