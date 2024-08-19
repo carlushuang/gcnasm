@@ -171,3 +171,22 @@ static void fmha_batch_init(T *buffer, int batch, int head_num, int seq_len, int
         }//head_num
     }//batch
 }
+
+template<typename T>
+void fmha_batch_cvt(T *output, float *a, int batch, int head_num, int seq_len, int head_dim, DATA_TYPE type, int fp_format_des = FP8_FMT, bool f8_bias_des = false)
+{
+    for(int b = 0; b < batch; b++)
+    {
+        for(int h = 0; h < head_num; h++)
+        {
+            for(int s = 0; s < seq_len; s++)
+            {
+                for(int d = 0; d < head_dim; d++)
+                {
+                    int offset = b * head_num * seq_len * head_dim  + h * seq_len * head_dim + s * head_dim + d;
+                    output[offset] = __float2half_rn(a[offset]);
+                }
+            }
+        }
+    }
+}

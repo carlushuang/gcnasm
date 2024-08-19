@@ -213,7 +213,8 @@ int main(int argc, char **argv)
     int h = 16;    // get_int("N", HGEMM_N);
     int s = 16384; // get_int("K", HGEMM_K);
     int d = 128;
-
+    int atm_f32 = 1;
+    
     int ts_qo = 32;
     int ts_kv = 128;
     int dump_result = 0;
@@ -228,13 +229,14 @@ int main(int argc, char **argv)
     get_param(parsedOptions, "s", s);
     get_param(parsedOptions, "d", d);
     get_param(parsedOptions, "dump_result", dump_result);
+    get_param(parsedOptions, "atm_f32", atm_f32);
 
     std::cout << "b:" << b << std::endl;
     std::cout << "h:" << h << std::endl;
     std::cout << "s:" << s << std::endl;
     std::cout << "d:" << d << std::endl;
     std::cout << "dump_result:" << dump_result << std::endl;
-
+    std::cout << "atm_f32:" << atm_f32 << std::endl;
 
     int stride_tg = ts_kv * d * 2;
     int stride_head = s * d * 2;
@@ -259,8 +261,8 @@ int main(int argc, char **argv)
     // float16 *fp16_a, *fp16_b, *fp16_c, *dev_a, *dev_b, *dev_c;
     float16 *host_fp16_q, *host_fp16_k, *host_fp16_v, *host_fp16_do;
     float16 *host_fp16_dq, *host_fp16_dk, *host_fp16_dv;
-    float16 *dev_q, *dev_k, *dev_v, *dev_do, *dev_dq, *dev_dk, *dev_dv;
-    float *dev_lse, *dev_odo;
+    float16 *dev_q, *dev_k, *dev_v, *dev_do, *dev_dk, *dev_dv;
+    float *dev_lse, *dev_odo, *host_fp32_dq, *dev_dq;
 
     // int bdx = 256;
     // int gdx = ((m+127)>>7)*((n+127)>>7);
@@ -329,10 +331,11 @@ int main(int argc, char **argv)
     // for(int i=0; i<sz_mx; i++) host_fp16_v[i] =__float2half_rn(host_v[i]);
     // for(int i=0; i<sz_mx; i++) host_fp16_do[i]=__float2half_rn(host_do[i]);
 
+    host_fp32_dq = (float *)malloc(sz_mx * sizeof(float));
     host_fp16_dq = (float16 *)malloc(sz_mx * sizeof(float) / 2);
     host_fp16_dk = (float16 *)malloc(sz_mx * sizeof(float) / 2);
     host_fp16_dv = (float16 *)malloc(sz_mx * sizeof(float) / 2);
-    memset(host_fp16_dq, 0, sz_mx * sizeof(float) / 2);
+    memset(host_fp32_dq, 0, sz_mx * sizeof(float));
 
     if (dump_result)
     {
@@ -349,7 +352,7 @@ int main(int argc, char **argv)
     // HIP_CALL(hipMalloc(&dev_a, lda*(k>>1)));
     // HIP_CALL(hipMalloc(&dev_b, ldb*(k>>1)));
     // HIP_CALL(hipMalloc(&dev_c, ldc*(n>>1)));
-    HIP_CALL(hipMalloc(&dev_dq, sz_mx * sizeof(float) / 2));
+    HIP_CALL(hipMalloc(&dev_dq, sz_mx * sizeof(float)));
     HIP_CALL(hipMalloc(&dev_dk, sz_mx * sizeof(float) / 2));
     HIP_CALL(hipMalloc(&dev_dv, sz_mx * sizeof(float) / 2));
 
@@ -379,7 +382,7 @@ int main(int argc, char **argv)
     HIP_CALL(hipMemcpy(dev_k, host_fp16_k, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
     HIP_CALL(hipMemcpy(dev_v, host_fp16_v, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
     HIP_CALL(hipMemcpy(dev_do, host_fp16_do, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
-    HIP_CALL(hipMemcpy(dev_dq, host_fp16_dq, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+    HIP_CALL(hipMemcpy(dev_dq, host_fp32_dq, sz_mx * sizeof(float), hipMemcpyHostToDevice));
 
     HIP_CALL(hipMemcpy(dev_lse, host_lse, sz_lsd * sizeof(float), hipMemcpyHostToDevice));
     HIP_CALL(hipMemcpy(dev_odo, host_odo, sz_lsd * sizeof(float), hipMemcpyHostToDevice));
@@ -526,12 +529,20 @@ int main(int argc, char **argv)
     //     printf(",%s",res?"valid":"fail");
     // }
     // printf("\n");
-    HIP_CALL(hipMemcpy(host_fp16_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+    if (atm_f32)
+       HIP_CALL(hipMemcpy(host_fp32_dq, dev_dq, sz_mx * sizeof(float), hipMemcpyDeviceToHost));
+    else
+       HIP_CALL(hipMemcpy((void*)host_fp16_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));;
     HIP_CALL(hipMemcpy(host_fp16_dk, dev_dk, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
     HIP_CALL(hipMemcpy(host_fp16_dv, dev_dv, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+
+    if (atm_f32)
+       fmha_batch_cvt(host_fp16_dq, host_fp32_dq, b, h, s, d, FP16);
+
     if (dump_result)
-    {
+    { 
         fmha_dump_batch_inHex(host_fp16_dq, "gpu_dQ.hex", b, h, s, d, FP16);
+        fmha_dump_batch_inHex(host_fp32_dq, "gpu_dQ32.hex", b, h, s, d, FP32);
         fmha_dump_batch_inHex(host_fp16_dk, "gpu_dK.hex", b, h, s, d, FP16);
         fmha_dump_batch_inHex(host_fp16_dv, "gpu_dV.hex", b, h, s, d, FP16);
     }
@@ -557,6 +568,7 @@ int main(int argc, char **argv)
     free(host_fp16_v);
     free(host_fp16_do);
     free(host_fp16_dq);
+    free(host_fp32_dq);
     free(host_fp16_dk);
     free(host_fp16_dv);
 
