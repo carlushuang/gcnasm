@@ -87,8 +87,10 @@ __global__ void reduce_fp32_n2(const void* ptr_a,
     if(blockIdx.x > 0)
         return;
 
-    __shared__ float smem_a0[block_size];
-    __shared__ float smem_a1[block_size];
+    // __attribute__((address_space(3))) is needed otherwise compiler will not properly figure out the dependency
+    // ... and result in 2 smem merged into a unified smem
+    __shared__ __attribute__((address_space(3))) float smem_a0[block_size];
+    __shared__ __attribute__((address_space(3))) float smem_a1[block_size];
 
     float a[2];
     float b[2];
@@ -99,43 +101,48 @@ __global__ void reduce_fp32_n2(const void* ptr_a,
     auto b_res = make_buffer_resource(ptr_b);
     int wave_id = __builtin_amdgcn_readfirstlane(threadIdx.x / 64);
     int col_id = threadIdx.x;
+    int col_id_swi = (3 - wave_id) * 64 + (threadIdx.x % 64);   // swizzle col id inorder to test s_barrier
+    // int col_id_swi = col_id;
 
+    b[0] = llvm_amdgcn_raw_buffer_load_fp32(b_res, col_id_swi * sizeof(float), 0, 0);
     llvm_amdgcn_raw_buffer_load_lds(a_res, SPTR(smem_a0 + wave_id * 64), sizeof(uint32_t), col_id * sizeof(float), 0, 0, 0);
-    b[0] = llvm_amdgcn_raw_buffer_load_fp32(b_res, col_id * sizeof(float), 0, 0);
 
     uint32_t i_r = 1;
     while(i_r < (rows - 1)) {
+        b[1] = llvm_amdgcn_raw_buffer_load_fp32(b_res, (i_r * row_stride + col_id_swi) * sizeof(float), 0, 0);
         llvm_amdgcn_raw_buffer_load_lds(a_res, SPTR(smem_a1 + wave_id * 64), sizeof(uint32_t), (i_r * row_stride + col_id) * sizeof(float), 0, 0, 0);
-        b[1] = llvm_amdgcn_raw_buffer_load_fp32(b_res, (i_r * row_stride + col_id) * sizeof(float), 0, 0);
+        
         i_r++;
-
+        __builtin_amdgcn_s_waitcnt(0x0f72); // vmcnt(2), must add, otherwise compiler will generate vmcnt(*) after s_barrier
         __builtin_amdgcn_s_barrier();
-        a[0] = smem_a0[threadIdx.x];
+        a[0] = smem_a0[col_id_swi];
         acc += a[0] * b[0];
 
+        b[0] = llvm_amdgcn_raw_buffer_load_fp32(b_res, (i_r * row_stride + col_id_swi) * sizeof(float), 0, 0);
         llvm_amdgcn_raw_buffer_load_lds(a_res, SPTR(smem_a0 + wave_id * 64), sizeof(uint32_t), (i_r * row_stride + col_id) * sizeof(float), 0, 0, 0);
-        b[0] = llvm_amdgcn_raw_buffer_load_fp32(b_res, (i_r * row_stride + col_id) * sizeof(float), 0, 0);
-        i_r++;
 
+        i_r++;
+        __builtin_amdgcn_s_waitcnt(0x0f72); // vmcnt(2)
         __builtin_amdgcn_s_barrier();
-        a[1] = smem_a1[threadIdx.x];
+        a[1] = smem_a1[col_id_swi];
         acc += a[1] * b[1];
     }
 
+    b[1] = llvm_amdgcn_raw_buffer_load_fp32(b_res, (i_r * row_stride + col_id_swi) * sizeof(float), 0, 0);
     llvm_amdgcn_raw_buffer_load_lds(a_res, SPTR(smem_a1 + wave_id * 64), sizeof(uint32_t), (i_r * row_stride + col_id) * sizeof(float), 0, 0, 0);
-    b[1] = llvm_amdgcn_raw_buffer_load_fp32(b_res, (i_r * row_stride + col_id) * sizeof(float), 0, 0);
 
+    __builtin_amdgcn_s_waitcnt(0x0f72);  // vmcnt(2)
     __builtin_amdgcn_s_barrier();
-    a[0] = smem_a0[threadIdx.x];
+    a[0] = smem_a0[col_id_swi];
     acc += a[0] * b[0];
 
+    __builtin_amdgcn_s_waitcnt(0x0f70);  // vmcnt(0)
     __builtin_amdgcn_s_barrier();
-    a[1] = smem_a1[threadIdx.x];
+    a[1] = smem_a1[col_id_swi];
     acc += a[1] * b[1];
 
-    reinterpret_cast<float*>(ptr_dst)[col_id] = acc;
+    reinterpret_cast<float*>(ptr_dst)[col_id_swi] = acc;
 }
-
 
 template<typename T, int num_col>
 void host_reduce(const T* a, const T* b, T* dst, uint32_t rows)
