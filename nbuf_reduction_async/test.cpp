@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <numeric>
 
+#ifndef USE_BUF_RSRC_BUILTIN
+#define USE_BUF_RSRC_BUILTIN 1
+#endif
+
 #define CALL(cmd) \
 do {\
     hipError_t cuda_error  = cmd;\
@@ -37,23 +41,45 @@ struct buffer_resource {
     uint32_t range;
     uint32_t config;
 };
-__device__ dwordx4_t make_buffer_resource(const void * ptr)
+
+
+#if USE_BUF_RSRC_BUILTIN
+__device__ __attribute__((address_space(8))) void* llvm_amdgcn_make_buffer_rsrc(void * ptr, int16_t stride_16bit, int32_t num_records, int32_t flags)
+                            __asm("llvm.amdgcn.make.buffer.rsrc");
+#endif
+
+__device__ auto make_buffer_resource(const void * ptr)
 {
+#if USE_BUF_RSRC_BUILTIN
+    // TODO: here we skip the const qualifier
+    return llvm_amdgcn_make_buffer_rsrc(const_cast<void*>(ptr), 0, 0xffffffff, BUFFER_LOAD_DWORD3);
+#else
     buffer_resource res {ptr, 0xffffffff, BUFFER_LOAD_DWORD3};
     return __builtin_bit_cast(dwordx4_t, res);
+#endif
 }
 
 __device__ void
-llvm_amdgcn_raw_buffer_load_lds(dwordx4_t rsrc,
-                                __attribute__((address_space(3))) uint32_t* lds_ptr,
-                                index_t size,
-                                index_t voffset,
-                                index_t soffset,
-                                index_t offset,
-                                index_t aux) __asm("llvm.amdgcn.raw.buffer.load.lds");
+llvm_amdgcn_raw_buffer_load_lds(
+#if USE_BUF_RSRC_BUILTIN
+    __attribute__((address_space(8))) void*,
+#else
+    dwordx4_t rsrc,
+#endif
+    __attribute__((address_space(3))) uint32_t* lds_ptr,
+    index_t size,
+    index_t voffset,
+    index_t soffset,
+    index_t offset,
+    index_t aux) __asm("llvm.amdgcn.raw.buffer.load.lds");
 
-__device__ float llvm_amdgcn_raw_buffer_load_fp32(dwordx4_t srsrc, index_t voffset, index_t soffset, index_t glc_slc)
-                            __asm("llvm.amdgcn.raw.buffer.load.f32");
+__device__ float llvm_amdgcn_raw_buffer_load_fp32(
+#if USE_BUF_RSRC_BUILTIN
+__attribute__((address_space(8))) void*,
+#else
+dwordx4_t srsrc,
+#endif
+index_t voffset, index_t soffset, index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.load.f32");
 
 #ifndef ABS
 #define ABS(x) ((x)>0?(x):-1*(x))
@@ -72,9 +98,17 @@ int valid_vector(const T* lhs, const T * rhs, size_t len, T delta = (T)1e-3){
     }
     return err_cnt;
 }
+template <typename T>
+using remove_cv_t = typename std::remove_cv<T>::type;
+
+template <typename T>
+using remove_cvref_t = remove_cv_t<std::remove_reference_t<T>>;
 
 
-#define SPTR(_ptr_) reinterpret_cast<__attribute__((address_space(3))) uint32_t*>(reinterpret_cast<uintptr_t>(_ptr_))
+// #define SPTR(_ptr_) reinterpret_cast<__attribute__((address_space(3))) uint32_t*>(reinterpret_cast<uintptr_t>(_ptr_))
+#define SPTR(_ptr_) reinterpret_cast<__attribute__((address_space(3))) uint32_t*>(_ptr_)
+#define FPTR(_ptr_) reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(_ptr_))
+
 
 // TODO: for simplicity assume rows is 2x
 template<int block_size=256>
@@ -106,6 +140,7 @@ __global__ void reduce_fp32_n2(const void* ptr_a,
     // ... and result in 2 smem merged into a unified smem
     __shared__ __attribute__((address_space(3))) float smem_a0[4 * WAVE_LEN];
     __shared__ __attribute__((address_space(3))) float smem_a1[4 * WAVE_LEN];
+
 
     b[0] = llvm_amdgcn_raw_buffer_load_fp32(b_res, col_id_swi * sizeof(float), 0, 0);
     llvm_amdgcn_raw_buffer_load_lds(a_res, SPTR(smem_a0 + wave_id * WAVE_LEN), sizeof(uint32_t), col_id * sizeof(float), 0, 0, 0);
