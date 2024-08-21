@@ -163,6 +163,15 @@ __device__ void gld_fence(index_t cnt)
 }
 
 
+__device__ void
+llvm_amdgcn_raw_buffer_load_lds(dwordx4_t rsrc,
+                                __attribute__((address_space(3))) uint32_t* lds_ptr,
+                                index_t size,
+                                index_t voffset,
+                                index_t soffset,
+                                index_t offset,
+                                index_t aux) __asm("llvm.amdgcn.raw.buffer.load.lds");
+
 template<index_t N>
 struct dword_array {
     float data[N];
@@ -202,6 +211,28 @@ void oob_test_kernel(T* __restrict__ dst, const T* __restrict__ src) {
     }
 }
 
+#define SPTR(_ptr_) reinterpret_cast<__attribute__((address_space(3))) uint32_t*>(reinterpret_cast<uintptr_t>(_ptr_))
+
+template<typename T, index_t force_buffer_size = sizeof(T)>
+__global__
+void oob_test_kernel_async(T* __restrict__ dst, const T* __restrict__ src) {
+    static_assert(sizeof(T) == 4);
+    __shared__ float smem[256];
+    smem[threadIdx.x] = 9999.f;  // arbitrary large number
+    __builtin_amdgcn_s_barrier();
+
+    if(blockIdx.x == 0 && threadIdx.x == 0) {
+        llvm_amdgcn_raw_buffer_load_lds(make_buffer_resource(src, force_buffer_size), SPTR(smem), sizeof(uint32_t), threadIdx.x * sizeof(float), 0, 0, 0);
+
+        __builtin_amdgcn_s_waitcnt(0x0f70); // vmcnt(0)
+        __builtin_amdgcn_s_barrier();
+
+        float d = smem[threadIdx.x];
+
+        reinterpret_cast<float*>(dst)[threadIdx.x] = d;
+    }
+}
+
 #define CALL(cmd) \
 do {\
     hipError_t cuda_error  = cmd;\
@@ -218,7 +249,7 @@ namespace impl {
 template<typename T, int N>
 using to_vec_t = typename impl::to_vec<T, N>::type;
 
-template<int total_bytes, int force_bytes>
+template<int total_bytes, int force_bytes, bool use_async = false>
 struct test_oob{
     void operator()(){
         using vec_type = to_vec_t<uint8_t, total_bytes>;
@@ -233,7 +264,12 @@ struct test_oob{
         CALL(hipMalloc(&B, total_bytes * sizeof(uint8_t)));
         CALL(hipMemcpy(A, h_A, total_bytes * sizeof(uint8_t), hipMemcpyHostToDevice));
 
-        oob_test_kernel<vec_type, force_bytes><<<1, 64>>>(B, A); 
+        if constexpr(use_async) {
+            oob_test_kernel_async<vec_type, force_bytes><<<1, 64>>>(B, A);
+        }
+        else {
+            oob_test_kernel<vec_type, force_bytes><<<1, 64>>>(B, A);
+        }
         CALL(hipMemcpy(h_B, B, total_bytes * sizeof(uint8_t), hipMemcpyDeviceToHost));
         printf("[%2d/%2d] ", force_bytes, total_bytes);
         for(auto i = 0; i < total_bytes; i++) printf("%02x ", h_A[i]);
@@ -272,6 +308,12 @@ int main(int argc, char ** argv) {
     test_oob<4, 3>{}();
     test_oob<4, 2>{}();
     test_oob<4, 1>{}();
+
+    printf("buffer_load_dword_async ------\n");
+    test_oob<4, 4, true>{}();
+    test_oob<4, 3, true>{}();
+    test_oob<4, 2, true>{}();
+    test_oob<4, 1, true>{}();
 
     printf("buffer_load_ushort ------\n");
     test_oob<2, 2>{}();
