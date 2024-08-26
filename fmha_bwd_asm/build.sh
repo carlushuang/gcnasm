@@ -5,3 +5,9 @@ ARCH=gfx942
 
 # run
 ./bwd.exe b=1 h=16 s=16384 d=128 dump_result=0 init_pattern=0
+
+
+###run mask#####
+###Kernel: bwd_a32_m1k0.s , command_line: mask=1
+###Kernel: bwd_a32_m1k1.s , command_line: mask=1 mask_kb=1
+

@@ -215,7 +215,9 @@ int main(int argc, char **argv)
     int d = 128;
     int atm_f32 = 1;
     int skip_dq_rd = 1;
-    
+    int mask = 0;
+    int mask_kb = 0;
+
     int ts_qo = 32;
     int ts_kv = 128;
     int dump_result = 0;
@@ -231,6 +233,8 @@ int main(int argc, char **argv)
     get_param(parsedOptions, "d", d);
     get_param(parsedOptions, "dump_result", dump_result);
     get_param(parsedOptions, "atm_f32", atm_f32);
+    get_param(parsedOptions, "mask", mask);
+    get_param(parsedOptions, "mask_kb", mask_kb);
 
     std::cout << "b:" << b << std::endl;
     std::cout << "h:" << h << std::endl;
@@ -239,6 +243,8 @@ int main(int argc, char **argv)
     std::cout << "dump_result:" << dump_result << std::endl;
     std::cout << "atm_f32:" << atm_f32 << std::endl;
     std::cout << "skip_dq_rd:" << skip_dq_rd << std::endl;
+    std::cout << "mask:" << mask << std::endl;
+    std::cout << "mask_kb:" << mask_kb << std::endl;
 
     int stride_tg = ts_kv * d * 2;
     int stride_head = s * d * 2;
@@ -496,6 +502,12 @@ int main(int argc, char **argv)
     int gdy = h;
     int gdz = b;
 
+    if (mask && mask_kb)
+    {
+        int num_tg = s / ts_kv;
+        gdx = (num_tg%2) ? (num_tg/2+1) : (num_tg/2);
+    }
+
     for (i = 0; i < warm_ups; i++)
     {
         HIP_CALL(hipModuleLaunchKernel(kernel_func, gdx, gdy, gdz, bdx, 1, 1, 0, 0, NULL, (void **)&config));
@@ -532,6 +544,8 @@ int main(int argc, char **argv)
 
     float time_per_loop = elapsed_ms / total_loop;
     float gflops = (float)2 * 5 * b * h * d * s * s / time_per_loop / (1e6);
+    if(mask)
+       gflops = gflops/2;
     printf("b:%d,h:%d,s:%d,d:%d, time: %.3f, gflops:%.3f\n", b, h, s, d, time_per_loop, gflops);
     // if(validate){
     //     hgemm_cr_kpack2(host_c, host_a, host_b, alpha, m,n,k,lda/sizeof(float),ldb/sizeof(float),ldc/sizeof(float));
