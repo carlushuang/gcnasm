@@ -264,8 +264,8 @@ int main(int argc, char **argv)
 
     long sz_mx = b * h * s * d;
     int sz_lsd = b * h * s;
-    int sz_mx_pad = ts_qo * 4 * d;
-    int sz_lsd_pad = ts_qo * 4;
+    int sz_mx_pad = 0;//ts_qo * 4 * d;
+    int sz_lsd_pad = 0;//ts_qo * 4;
     long sz_mx_dq = 0;
 
     if (atm_f32 == 2)
@@ -494,7 +494,7 @@ int main(int argc, char **argv)
                       &arg_size, HIP_LAUNCH_PARAM_END};
 
     int total_loop = 1;
-    int warm_ups = 1;
+    int warm_ups = 0;
     int i;
 
     int bdx = 256;
