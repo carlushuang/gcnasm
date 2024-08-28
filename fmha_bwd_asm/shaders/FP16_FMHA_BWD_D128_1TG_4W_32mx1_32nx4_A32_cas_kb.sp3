@@ -200,7 +200,10 @@ var s_mask1 = s71
 var s_mask_kb_loop_idx = s72
 var s_mask_kb_loop_cnt = s73
 
-var _s_Lse_lds_wr_base_m0 = 74
+var s_QdO_inc_DW = s74
+var s_LseD_inc_DW = s75
+
+var _s_Lse_lds_wr_base_m0 = 76
 var _s_dQ_buf_save = _s_Lse_lds_wr_base_m0 + 2
 
 ////////////////////////////////////////
@@ -790,7 +793,7 @@ end
 function LseD_mem_load_m0_va_upd(fch_idx)
     if fch_idx < PF_Bs
         s_mov_b32   m0, s_regs(_s_Lse_lds_wr_base_m0, fch_idx)
-        v_add_u32   v_regs(_v_LseD_addr,0), SUB_QO, v_regs(_v_LseD_addr,0)
+        v_add_u32   v_regs(_v_LseD_addr,0), s_LseD_inc_DW, v_regs(_v_LseD_addr,0)
     end
 end
 ////////////////////////////////LseD lds load///////////////////////////////////////////////////////////
@@ -1513,7 +1516,7 @@ function Q_mem_load(f_idx, s, n)
 end
 
 function Q_mem_load_va_upd
-   v_add_u32 v_regs(_v_Q_addr,0), lu_size_in_DW, v_regs(_v_Q_addr,0)
+   v_add_u32 v_regs(_v_Q_addr,0), s_QdO_inc_DW, v_regs(_v_Q_addr,0)
 end
 
 function Q_lds_wr(f_idx, s, n)
@@ -1544,7 +1547,7 @@ function dO_mem_load(f_idx, s, n)
 end
 
 function dO_mem_load_va_upd
-   v_add_u32 v_regs(_v_dO_addr,0), lu_size_in_DW, v_regs(_v_dO_addr,0)
+   v_add_u32 v_regs(_v_dO_addr,0), s_QdO_inc_DW, v_regs(_v_dO_addr,0)
 end
 
 function dO_lds_wr(f_idx, s, n)
@@ -2106,6 +2109,13 @@ function cl_gemm4(cl_p, pi)
        end
        
        if XDL_idx == 13
+          s_add_u32       s_tmp0,         SUB_QO*4,      s_loop_idx
+          s_nop 0 //for align
+          s_cmp_lt_u32    s_tmp0,         s_loop_cnt
+
+          s_cselect_b32   s_QdO_inc_DW,   s_QdO_inc_DW,   0
+          s_cselect_b32   s_LseD_inc_DW,  s_LseD_inc_DW,  0
+
           Q_mem_load_va_upd() 
           dO_mem_load_va_upd()
        end
@@ -2365,6 +2375,8 @@ label_mask_kb_loop:
   v_mov_b32        v_regs(_v_neg_inf,0),     0xff800000
   s_mov_b32        s_mask_loop_idx,          0
 
+  s_mov_b32        s_QdO_inc_DW,   lu_size_in_DW
+  s_mov_b32        s_LseD_inc_DW,  SUB_QO
   /////////////////////////QKVdO block base address//////////////////////////////////////////////
   s_mul_i32        s_tmp0,      s_tg_idx,     s_Ts
   s_mul_i32        s_tmp1,      s_tg_idy,     s_Hs
@@ -2531,7 +2543,7 @@ label_mask_kb_loop:
   s_cbranch_scc0 label_wave23_core_loop
 
   for var k = 0; k < 1; k++
-    //s_nop 0
+     s_nop 0
   end
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   /////////////////////////////////////////wave0_3 main_loop/////////////////////////////////////////////////////////////

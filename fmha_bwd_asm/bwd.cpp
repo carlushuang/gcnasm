@@ -216,7 +216,7 @@ int main(int argc, char **argv)
     int atm_f32 = 1;
     int skip_dq_rd = 1;
     int mask = 0;
-    int mask_kb = 0;
+    int mask_kb = 1;
 
     int ts_qo = 32;
     int ts_kv = 128;
