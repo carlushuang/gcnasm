@@ -104,7 +104,7 @@ int main(int argc, char *argv[])
     fs::path dir_path_co(folder_co);
     fs::path dir_path_hex(folder_hex);
 
-    // 创建文件夹
+
     if (fs::create_directory(folder_co))
     {
         std::cout << "Folder co created successfully." << std::endl;
@@ -113,7 +113,7 @@ int main(int argc, char *argv[])
     {
         std::cout << "Failed to create folder co." << std::endl;
     }
-    // 创建文件夹
+
     if (fs::create_directory(folder_hex))
     {
         std::cout << "Folder hex created successfully." << std::endl;
