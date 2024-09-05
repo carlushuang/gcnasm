@@ -190,6 +190,21 @@ Usage example:
 bash find_config_bw.sh memcpy_persistent 1760 gfx942
 </code>
 </pre>
+After all the combinations have been executed, the top 10 best combination data sets will be printed.
+<pre>
+     BS   GS  UNROLL   PIXELS_MB  INNER  GFlops
+50  128  880       1  440.000000      1  43.200
+45  128  800       1  440.234375      1  42.505
+40  128  720       1  440.156250      1  42.206
+55  128  960       1  440.156250      1  40.963
+51  128  880       2  440.000000      1  39.782
+28  128  480       6  440.156250      1  39.542
+23  128  400       6  440.625000      1  39.132
+35  128  640       1  440.000000      1  38.472
+56  128  960       2  440.625000      1  37.894
+37  128  640       4  440.000000      1  37.879
+</pre>
+
 To further refine the search space for tuning, adjust the parameters for BS (block size), GS (grid size), UNROLL (unroll number), and INNER (inner number)  within the **gen_all.py** script.
 
 
