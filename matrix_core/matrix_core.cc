@@ -34,6 +34,18 @@ using fp16x8_t = fp16_t __attribute__((ext_vector_type(8)));
 using fp16x16_t = fp16_t __attribute__((ext_vector_type(16)));
 using fp32x16_t = fp32_t __attribute__((ext_vector_type(16)));
 
+using int32x4_t = int32_t __attribute__((ext_vector_type(4)));
+#define BUFFER_LOAD_DWORD3 0x00020000   // This is valid for 
+struct buffer_resource {
+    const void * ptr;
+    uint32_t range;
+    uint32_t config;
+};
+__device__ int32x4_t make_buffer_resource(const void * ptr, uint32_t size = 0xffffffff)
+{
+    buffer_resource res {ptr, size, BUFFER_LOAD_DWORD3};
+    return __builtin_bit_cast(int32x4_t, res);
+}
 // A: M*K, B: N*K, C:M*N, use 32x32x8 fp16
 /*
 * V0/V1/   is 32bit register holding A/B matrix data, each register contains 2 fp16 pixel along gemm-k
@@ -106,6 +118,51 @@ matrix_core_kernel_standard(const void* __restrict__ ptr_a,
     fp32x16_t v_c = {.0f};  // clear
 
     v_c = __builtin_amdgcn_mfma_f32_32x32x8f16(v_a, v_b, v_c, 0, 0, 0);
+
+    fp16x16_t v_c_f16;
+    for(auto i = 0; i < 16; i++) {
+        v_c_f16[i] = static_cast<fp16_t>(v_c[i]);
+    }
+
+    int col_id_c = threadIdx.x % 32;
+    int row_id_c = threadIdx.x / 32 * 4;
+    int offset_c = row_id_c * stride_c + col_id_c;
+
+    for(auto i = 0; i < 16; i++) {
+        int row_offset = (i % 4) + (i / 4 * 8);
+        *(reinterpret_cast<fp16_t*>(ptr_c) + offset_c + row_offset * stride_c) = v_c_f16[i];
+    }
+}
+
+__global__ void 
+matrix_core_kernel_standard_agpr(const void* __restrict__ ptr_a,
+                   const void* __restrict__ ptr_b,
+                   void* __restrict__ ptr_c,
+                   int stride_a, // stride in unit of pixel
+                   int stride_b,
+                   int stride_c)
+{
+    // 32x32x8 gemm, assume only launced 1 wave
+    int offset_a = (threadIdx.x / 32 * 4) + (threadIdx.x % 32 * stride_a);
+    int offset_b = (threadIdx.x / 32 * 4) + (threadIdx.x % 32 * stride_b);
+
+    auto res_a = make_buffer_resource(ptr_a);
+    auto res_b = make_buffer_resource(ptr_b);
+    fp16x4_t v_a, v_b;
+
+    asm volatile("buffer_load_dwordx2 %0, %1, %2, 0 offen offset:%3"
+            :"+a"(v_a) :  "v"(static_cast<int>(offset_a * sizeof(fp16_t))), "s"(res_a), "n"(0) : "memory");
+
+    asm volatile("buffer_load_dwordx2 %0, %1, %2, 0 offen offset:%3"
+            :"+a"(v_b) :  "v"(static_cast<int>(offset_b * sizeof(fp16_t))), "s"(res_b), "n"(0) : "memory");
+
+    fp32x16_t v_c = {.0f};  // clear
+
+    asm volatile("s_waitcnt vmcnt(0)"  : : : "memory");
+    asm volatile("v_mfma_f32_32x32x8_f16 %0, %1, %2, %3\n"
+                 "s_nop 16"         // TODO: better resolve data dependency
+                 : "+v"(v_c)
+                 :  "a"(v_a), "a"(v_b),  "v"(v_c) : );
 
     fp16x16_t v_c_f16;
     for(auto i = 0; i < 16; i++) {
@@ -440,6 +497,14 @@ int main(int argc, char ** argv)
         HIP_CALL(hipMemcpy(fp16_c, dev_c, ldc*m*sizeof(float16), hipMemcpyDeviceToHost));
         bool res = valid_vector( host_c, fp16_c, m*n, 1e-3);
         printf("[32x32x8, standard], %s",res?"valid":"fail");fflush(stdout);
+        printf("\n"); fflush(stdout);
+    }
+    {
+        matrix_core_kernel_standard_agpr<<<1, 64>>>(dev_a, dev_b, dev_c, lda, ldb, ldc);
+
+        HIP_CALL(hipMemcpy(fp16_c, dev_c, ldc*m*sizeof(float16), hipMemcpyDeviceToHost));
+        bool res = valid_vector( host_c, fp16_c, m*n, 1e-3);
+        printf("[32x32x8, std_agpr], %s",res?"valid":"fail");fflush(stdout);
         printf("\n"); fflush(stdout);
     }
     {
