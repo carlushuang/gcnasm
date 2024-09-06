@@ -1,0 +1,46 @@
+{
+    "memcpy_persistent": {
+        "ENABLE_MEMCPY_PERSISTENT": "1",
+        "MEMCPY_PERSISTENT_BS_VAL": "256",
+        "MEMCPY_PERSISTENT_GS_VAL": "160",
+        "MEMCPY_PERSISTENT_UNROLL_VAL": "16",
+        "MEMCPY_PERSISTENT_PIXELS_MB_VAL": "440",
+        "MEMCPY_PERSISTENT_VERIFY": "1"
+    },
+    "memread_stream": {
+        "ENABLE_MEMREAD_STREAM": "1",
+        "READ_BS_VAL": "1024",
+        "READ_GS_VAL": "80",
+        "READ_UNROLL_VAL": "4",
+        "READ_PIXELS_MB_VAL": "437.5",
+        "READ_STREAM_NONTEMP": "1",
+        "READ_VERIFY": "0"
+    },
+    "memcpy_stream": {
+        "ENABLE_MEMCPY_STREAM": "1",
+        "MEMCPY_BS_VAL": "768",
+        "MEMCPY_GS_VAL": "2880",
+        "MEMCPY_UNROLL_VAL": "28",
+        "MEMCPY_PIXELS_MB_VAL": "472.5",
+        "MEMCPY_STREAM_NONTEMP": "1",
+        "MEMCPY_STREAM_VERIFY": "1"
+    },
+    "memcpy_stream_async": {
+        "ENABLE_MEMCPY_STREAM_ASYNC": "1",
+        "MEMCPY_ASYNC_BS_VAL": "256",
+        "MEMCPY_ASYNC_GS_VAL": "1200",
+        "MEMCPY_ASYNC_UNROLL_VAL": "22",
+        "MEMCPY_ASYNC_PIXELS_MB_VAL": "438.28125",
+        "MEMCPY_STREAM_ASYNC_VERIFY": "1"
+    },
+    "memcpy_stream_swizzled": {
+        "ENABLE_MEMCPY_STREAM_SWIZZLED": "1",
+        "MEMCPY_SWIZZLED_BS_VAL": "256",
+        "MEMCPY_SWIZZLED_GS_VAL": "160",
+        "MEMCPY_SWIZZLED_CHUNKS_VAL": "4",
+        "MEMCPY_SWIZZLED_INNER_VAL": "1",
+        "MEMCPY_SWIZZLED_PIXELS_MB_VAL": "437.5",
+        "MEMCPY_STREAM_SWIZZLED_NONTEMP": "0",
+        "MEMCPY_STREAM_SWIZZLED_VERIFY": "1"
+    }
+}
