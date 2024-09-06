@@ -159,7 +159,7 @@ matrix_core_kernel_standard_agpr(const void* __restrict__ ptr_a,
     fp32x16_t v_c = {.0f};  // clear
 
     asm volatile("s_waitcnt vmcnt(0)"  : : : "memory");
-    asm volatile("v_mfma_f32_32x32x8_f16 %0, %1, %2, %3\n"
+    asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %3\n"
                  "s_nop 16"         // TODO: better resolve data dependency
                  : "+v"(v_c)
                  :  "a"(v_a), "a"(v_b),  "v"(v_c) : );
