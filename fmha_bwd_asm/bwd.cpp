@@ -217,6 +217,7 @@ int main(int argc, char **argv)
     int skip_dq_rd = 1;
     int mask = 0;
     int mask_kb = 1;
+    int ioperm = 1; //0: bshd, 1:bhsd -----lse,D,dQ always keep in bhsd layout
 
     int ts_qo = 32;
     int ts_kv = 128;
@@ -235,6 +236,7 @@ int main(int argc, char **argv)
     get_param(parsedOptions, "atm_f32", atm_f32);
     get_param(parsedOptions, "mask", mask);
     get_param(parsedOptions, "mask_kb", mask_kb);
+    get_param(parsedOptions, "ioperm", ioperm);
 
     std::cout << "b:" << b << std::endl;
     std::cout << "h:" << h << std::endl;
@@ -245,10 +247,20 @@ int main(int argc, char **argv)
     std::cout << "skip_dq_rd:" << skip_dq_rd << std::endl;
     std::cout << "mask:" << mask << std::endl;
     std::cout << "mask_kb:" << mask_kb << std::endl;
+    std::cout << "ioperm:" << ioperm << std::endl;
 
     int stride_tg = ts_kv * d * 2;
     int stride_head = s * d * 2;
     int stride_batch = h * s * d * 2;
+    int stride_seqlen = d * 2;
+
+    if (ioperm == 0)//bshd
+    {
+        stride_seqlen = h * d * 2;
+        stride_tg = ts_kv * stride_seqlen;
+        stride_head = d * 2;
+        stride_batch = h * s * d * 2;
+    }
 
     // int lda = m*sizeof(float);
     // int ldb = n*sizeof(float);
@@ -394,11 +406,35 @@ int main(int argc, char **argv)
     // fp16 cpy to device
     // HIP_CALL(hipMemcpy(dev_a, fp16_a, lda*(k>>1), hipMemcpyHostToDevice));
     // HIP_CALL(hipMemcpy(dev_b, fp16_b, ldb*(k>>1), hipMemcpyHostToDevice));
+    if (ioperm == 1)
+    {
+        HIP_CALL(hipMemcpy(dev_q, host_fp16_q, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+        HIP_CALL(hipMemcpy(dev_k, host_fp16_k, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+        HIP_CALL(hipMemcpy(dev_v, host_fp16_v, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+        HIP_CALL(hipMemcpy(dev_do, host_fp16_do, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+    }
+    else 
+    {
+        float16 *host_fp16_perm_q = (float16 *)malloc(sz_mx * sizeof(float) / 2);
+        float16 *host_fp16_perm_k = (float16 *)malloc(sz_mx * sizeof(float) / 2);
+        float16 *host_fp16_perm_v = (float16 *)malloc(sz_mx * sizeof(float) / 2);
+        float16 *host_fp16_perm_do = (float16 *)malloc(sz_mx * sizeof(float) / 2);
 
-    HIP_CALL(hipMemcpy(dev_q, host_fp16_q, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
-    HIP_CALL(hipMemcpy(dev_k, host_fp16_k, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
-    HIP_CALL(hipMemcpy(dev_v, host_fp16_v, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
-    HIP_CALL(hipMemcpy(dev_do, host_fp16_do, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+        fmha_batch_reshape(host_fp16_perm_q,  host_fp16_q,  b, h, s, d, FP16, 1, ioperm);
+        fmha_batch_reshape(host_fp16_perm_k,  host_fp16_k,  b, h, s, d, FP16, 1, ioperm);
+        fmha_batch_reshape(host_fp16_perm_v,  host_fp16_v,  b, h, s, d, FP16, 1, ioperm);
+        fmha_batch_reshape(host_fp16_perm_do,  host_fp16_do,  b, h, s, d, FP16, 1, ioperm);
+
+        HIP_CALL(hipMemcpy(dev_q, host_fp16_perm_q, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+        HIP_CALL(hipMemcpy(dev_k, host_fp16_perm_k, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+        HIP_CALL(hipMemcpy(dev_v, host_fp16_perm_v, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+        HIP_CALL(hipMemcpy(dev_do, host_fp16_perm_do, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
+
+        free(host_fp16_perm_q);
+        free(host_fp16_perm_k);
+        free(host_fp16_perm_v);
+        free(host_fp16_perm_do);
+    }
     HIP_CALL(hipMemcpy(dev_dq, host_fp32_dq, sz_mx * sizeof(float), hipMemcpyHostToDevice));
 
     HIP_CALL(hipMemcpy(dev_lse, host_lse, sz_lsd * sizeof(float), hipMemcpyHostToDevice));
@@ -454,6 +490,8 @@ int main(int argc, char **argv)
         p3 _p13;
         unsigned int BAs;
         p3 _p14;
+        unsigned int Seqs;
+        p3 _p15;
 #ifdef ASM_PRINT
         void *print;
 #endif
@@ -484,6 +522,7 @@ int main(int argc, char **argv)
     args.Ts = stride_tg;
     args.Hs = stride_head;
     args.BAs = stride_batch;
+    args.Seqs = stride_seqlen;
 #ifdef ASM_PRINT
     args.print = (void *)print;
 #endif
@@ -558,10 +597,27 @@ int main(int argc, char **argv)
     if ((atm_f32 == 1) || ((!skip_dq_rd)&&(atm_f32 == 2)))
        HIP_CALL(hipMemcpy(host_fp32_dq, dev_dq, sz_mx_dq * sizeof(float), hipMemcpyDeviceToHost));
     else
-       HIP_CALL(hipMemcpy((void*)host_fp16_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));;
-    HIP_CALL(hipMemcpy(host_fp16_dk, dev_dk, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
-    HIP_CALL(hipMemcpy(host_fp16_dv, dev_dv, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+       HIP_CALL(hipMemcpy((void*)host_fp16_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
 
+    if (ioperm == 1)
+    {
+       HIP_CALL(hipMemcpy(host_fp16_dk, dev_dk, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+       HIP_CALL(hipMemcpy(host_fp16_dv, dev_dv, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+    }
+    else 
+    {
+        float16 *host_fp16_perm_dk = (float16 *)malloc(sz_mx * sizeof(float) / 2);
+        float16 *host_fp16_perm_dv = (float16 *)malloc(sz_mx * sizeof(float) / 2);
+
+        HIP_CALL(hipMemcpy(host_fp16_perm_dk, dev_dk, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+        HIP_CALL(hipMemcpy(host_fp16_perm_dv, dev_dv, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+
+        fmha_batch_reshape(host_fp16_dk, host_fp16_perm_dk, b, h, s, d, FP16, ioperm, 1);
+        fmha_batch_reshape(host_fp16_dv, host_fp16_perm_dv, b, h, s, d, FP16, ioperm, 1);
+
+        free(host_fp16_perm_dk);
+        free(host_fp16_perm_dv);
+    }
     if (atm_f32 == 1)
        fmha_batch_cvt(host_fp16_dq, host_fp32_dq, b, h, s, d, FP16);
     else if ((atm_f32 == 2)&&(!skip_dq_rd))
@@ -569,7 +625,6 @@ int main(int argc, char **argv)
         fmha_bwd_dQ_redc(host_fp32_dq, b, h, s, d, s/ts_kv);
         fmha_batch_cvt(host_fp16_dq, host_fp32_dq, b, h, s, d, FP16);
     }
-
 
     if (dump_result)
     { 

@@ -172,6 +172,31 @@ static void fmha_batch_init(T *buffer, int batch, int head_num, int seq_len, int
     }//batch
 }
 
+//perm: 0, bshd; 1, bhsd
+template<typename T>
+static void fmha_batch_reshape(T *o_buf, T *i_buf, int batch, int head_num, int seq_len, int head_dim, DATA_TYPE in_type, int iperm, int operm)
+{
+    for(int b = 0; b < batch; b++)
+    {
+        for(int h = 0; h < head_num; h++)
+        {
+            for(int s = 0; s < seq_len; s++)
+            {
+                for(int d = 0; d < head_dim; d++)
+                {
+                    int perm0_offset = b * head_num * seq_len * head_dim  + s * head_num * head_dim + h * head_dim + d;
+                    int perm1_offset = b * head_num * seq_len * head_dim  + h * seq_len  * head_dim + s * head_dim + d;
+
+                    int i_offset = (iperm == 0) ? perm0_offset : perm1_offset ;
+                    int o_offset = (operm == 0) ? perm0_offset : perm1_offset ;
+
+                    o_buf[o_offset] = i_buf[i_offset];
+                }//head_dim
+            }//seq_len
+        }//head_num
+    }//batch
+}
+
 template<typename T>
 void fmha_batch_cvt(T *output, float *a, int batch, int head_num, int seq_len, int head_dim, DATA_TYPE type, int fp_format_des = FP8_FMT, bool f8_bias_des = false)
 {
