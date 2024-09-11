@@ -565,21 +565,21 @@ int main(int argc, char **argv)
     }
 #endif
 
-    hipEventCreate(&evt_00);
-    hipEventCreate(&evt_11);
-    hipDeviceSynchronize();
-    hipEventRecord(evt_00, NULL);
+    HIP_CALL(hipEventCreate(&evt_00));
+    HIP_CALL(hipEventCreate(&evt_11));
+    HIP_CALL(hipDeviceSynchronize());
+    HIP_CALL(hipEventRecord(evt_00, NULL));
     for (i = 0; i < total_loop; i++)
         HIP_CALL(hipModuleLaunchKernel(kernel_func, gdx, gdy, gdz, bdx, 1, 1, 0, 0, NULL, (void **)&config));
 
     std::cout << "we are done" << std::endl;
     float elapsed_ms;
-    hipEventRecord(evt_11, NULL);
-    hipEventSynchronize(evt_11);
-    hipDeviceSynchronize();
-    hipEventElapsedTime(&elapsed_ms, evt_00, evt_11);
-    hipEventDestroy(evt_00);
-    hipEventDestroy(evt_11);
+    HIP_CALL(hipEventRecord(evt_11, NULL));
+    HIP_CALL(hipEventSynchronize(evt_11));
+    HIP_CALL(hipDeviceSynchronize());
+    HIP_CALL(hipEventElapsedTime(&elapsed_ms, evt_00, evt_11));
+    HIP_CALL(hipEventDestroy(evt_00));
+    HIP_CALL(hipEventDestroy(evt_11));
 
     float time_per_loop = elapsed_ms / total_loop;
     float gflops = (float)2 * 5 * b * h * d * s * s / time_per_loop / (1e6);
@@ -668,15 +668,15 @@ int main(int argc, char **argv)
     free(host_fp16_dk);
     free(host_fp16_dv);
 
-    hipFree(dev_q);
-    hipFree(dev_k);
-    hipFree(dev_v);
-    hipFree(dev_do);
-    hipFree(dev_dq);
-    hipFree(dev_dk);
-    hipFree(dev_dv);
-    hipFree(dev_lse);
-    hipFree(dev_odo);
+    HIP_CALL(hipFree(dev_q));
+    HIP_CALL(hipFree(dev_k));
+    HIP_CALL(hipFree(dev_v));
+    HIP_CALL(hipFree(dev_do));
+    HIP_CALL(hipFree(dev_dq));
+    HIP_CALL(hipFree(dev_dk));
+    HIP_CALL(hipFree(dev_dv));
+    HIP_CALL(hipFree(dev_lse));
+    HIP_CALL(hipFree(dev_odo));
 
 #ifdef ASM_PRINT
     free(host_print);
