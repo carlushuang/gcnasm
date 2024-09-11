@@ -597,8 +597,17 @@ int main(int argc, char **argv)
     if ((atm_f32 == 1) || ((!skip_dq_rd)&&(atm_f32 == 2)))
        HIP_CALL(hipMemcpy(host_fp32_dq, dev_dq, sz_mx_dq * sizeof(float), hipMemcpyDeviceToHost));
     else
-       HIP_CALL(hipMemcpy((void*)host_fp16_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
-
+    {
+       if (ioperm == 1)
+            HIP_CALL(hipMemcpy((void*)host_fp16_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+       else
+       {
+            float16 *host_fp16_perm_dq = (float16 *)malloc(sz_mx * sizeof(float) / 2);
+            HIP_CALL(hipMemcpy(host_fp16_perm_dq, dev_dq, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
+            fmha_batch_reshape(host_fp16_dq, host_fp16_perm_dq, b, h, s, d, FP16, ioperm, 1);
+            free(host_fp16_perm_dq);    
+       } 
+    }
     if (ioperm == 1)
     {
        HIP_CALL(hipMemcpy(host_fp16_dk, dev_dk, sz_mx * sizeof(float) / 2, hipMemcpyDeviceToHost));
