@@ -1,5 +1,5 @@
 ///////////////kernel limitation///////////////////////////////////////////////////
-/////0. QKVO layout must be batch*head_num*seq_len*head_dim                    ////
+/////0. dQ/LseD layout will/must be batch*head_num*seq_len*head_dim(bhsd)      ////
 /////1. head_dim must be equal with macro H_DIM.                               ////
 /////2. seq_len should be integer multiple of SUB_QO and SUB_KV.               ////
 //////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -24,6 +24,7 @@
 //   strideTG            4       0xC0      KV data size of a tg takes(in bytes)         s_Ts
 //   strideHead          4       0xD0      one head size (in bytes)                     s_Hs      
 //   strideBatch         4       0xE0      one batch size (in bytes)                    s_BAs
+//   strideSeqlen        4       0xF0      one seqlen size (in bytes)                   s_Seqs
 ///////////////////////////////////////////////////////////////////////////////////////////
 ////////////////spi input/////////////////////////////////////////////////////////////////
 // spi_set_reg      description            reg used by kernel
@@ -200,12 +201,19 @@ var s_mask1 = s71
 var s_mask_kb_loop_idx = s72
 var s_mask_kb_loop_cnt = s73
 
-var s_QdO_inc_DW = s74
+var s_QdO_inc_Bytes = s74
 var s_LseD_inc_DW = s75
+var s_Seqs    = s76
+var s_dQ_base = s77
 
-var _s_Lse_lds_wr_base_m0 = 76
+var _s_Lse_lds_wr_base_m0 = 78
 var _s_dQ_buf_save = _s_Lse_lds_wr_base_m0 + 2
 var _s_bf16_cvt = _s_dQ_buf_save + 2
+
+var _s_Q_buf_save = _s_bf16_cvt + 2
+var _s_K_buf_save = _s_Q_buf_save + 2
+var _s_V_buf_save = _s_K_buf_save + 2
+var _s_dO_buf_save =  _s_V_buf_save + 2
 
 ////////////////////////////////////////
 var Vsrc63_48   = 0x00040000
@@ -214,11 +222,11 @@ var Vsrc127_96  = 0x00020000
 ///////////////////////////////////////
 
 /////vreg def////////////////
-var _v_Q_addr  = 1
-var _v_dO_addr = _v_Q_addr  + 1
-var _v_K_addr  = _v_dO_addr + 1
-var _v_V_addr  = _v_K_addr  + 1
-var _v_dK_addr  = _v_V_addr + 1
+var _v_blk_mem_rd = 1
+//var _v_dO_addr = _v_Q_addr  + 1
+//var _v_K_addr  = _v_dO_addr + 1
+//var _v_V_addr  = _v_K_addr  + 1
+var _v_dK_addr  = _v_blk_mem_rd + 2
 var _v_dV_addr  = _v_dK_addr  + 1
 var _v_dQ_addr  = _v_dV_addr + 1
 var _v_LseD_addr   = _v_dQ_addr + 4
@@ -381,16 +389,16 @@ function blk_32x128k_mem_load_addr_gen(v_addr)
   v_lshlrev_b32    v_regs(_v_tmp, 2),         2,                        v_regs(_v_tmp, 2) //q_id[1]*8
 
   v_add_u32        v_regs(_v_tmp, 1),         v_regs(_v_tmp, 2),        v_regs(_v_tmp, 1) //q_id[0]*2 + q_id[1]*8 + q_id[2]*4
-  v_mul_i32_i24    v_regs(_v_tmp, 1),         H_DIM_Bs,                 v_regs(_v_tmp, 1) //(q_id[0]*2 + q_id[1]*8 + q_id[2]*4)*H_DIM_Bs
+  v_mul_i32_i24    v_regs(_v_tmp, 1),         s_Seqs,                   v_regs(_v_tmp, 1) //(q_id[0]*2 + q_id[1]*8 + q_id[2]*4)*H_DIM_Bs
 
   v_and_b32        v_regs(_v_tmp, 0),         0x7,                      v0 //f_id = t_id&7
   v_lshlrev_b32    v_regs(_v_tmp, 0),         4,                        v_regs(_v_tmp, 0) //f_id*16, 16Bytes per thread   
   v_add_u32        v_regs(v_addr, 0),         v_regs(_v_tmp, 0),        v_regs(_v_tmp, 1) // add them all
 
   ///////wave addr offset//////
-  //wave has offset s[0]*16*head-dim+s[1]*64*2
+  //wave has offset s[0]*16*H_DIM_Bs+s[1]*64*2
   s_and_b32        s_tmp0,        1,          s_wave_id //s[0]
-  s_mul_i32        s_tmp0,        s_tmp0,     H_DIM_Bs      
+  s_mul_i32        s_tmp0,        s_tmp0,     s_Seqs      
   s_mul_i32        s_tmp0,        s_tmp0,     16
  
   s_lshr_b32       s_tmp1,        s_wave_id,  1  //s[1]
@@ -399,6 +407,9 @@ function blk_32x128k_mem_load_addr_gen(v_addr)
   s_add_u32        s_tmp0,        s_tmp0,    s_tmp1
 
   v_add_u32        v_regs(v_addr, 0),        s_tmp0,        v_regs(v_addr, 0) // add wave offset
+
+  //two inst has 1 seq_len offset
+  v_add_u32        v_regs(v_addr, 1),        s_Seqs,        v_regs(v_addr, 0)
 end
 
 function blk_32x128k_mem_load(v_dst, s_rsrc, v_addr, s, n)
@@ -407,7 +418,7 @@ function blk_32x128k_mem_load(v_dst, s_rsrc, v_addr, s, n)
 
        for var i=0; i < inst_cnt; i++
            var i_idx = s+i
-           buffer_load_dwordx4  v_regs(v_dst, i_idx*4),   v_regs(v_addr, 0),  s_regs(s_rsrc, 0), 0 offset:(i_idx&1)*H_DIM_Bs idxen:1 
+           buffer_load_dwordx4  v_regs(v_dst, i_idx*4),   v_regs(v_addr, i_idx&1),  s_regs(s_rsrc, 0), 0 idxen:1 
        end
     end
 end
@@ -774,7 +785,7 @@ end
 //////////////////////////////////////////////////////////////////////////////////////////
 function Q_offset_gen
   s_mul_i32        s_tmp0,      SUB_KV,       s_tg_idx
-  s_mul_i32        s_tmp0,      H_DIM_Bs,     s_tmp0
+  s_mul_i32        s_tmp0,      s_Seqs,       s_tmp0
   s_add_u32        s_Q_base,    s_tmp0,       s_Q_base
 
   s_mul_i32        s_loop_idx,  SUB_KV,       s_tg_idx
@@ -1411,7 +1422,9 @@ function dKV_32x128_mem_store(v_src, s_rsrc, v_addr, s, n)
        for var i=0; i < inst_cnt; i++
            var i_idx = s+i
            buffer_store_dword  v_regs(v_src, i_idx), v_regs(v_addr, 0), s_regs(s_rsrc, 0), 0  idxen:1
-           v_add_u32           v_regs(v_addr, 0),    128/2,             v_regs(v_addr, 0)
+
+           s_lshr_b32      s_tmp0,               s_Seqs,        2 //cvt to DW
+           v_add_u32       v_regs(v_addr, 0),    s_tmp0,        v_regs(v_addr, 0)
        end
     end
 end
@@ -1448,11 +1461,12 @@ function dKV_32x128_scale_cvt(v_dst, v_src, s, n, is_scale)
 end
 function dKV_128x128_mem_store_addr_gen(v_addr)
   ///////wave addr offset//////
-  //wave has offset 32*128/2 *wave_idx  in DW
-  s_mul_i32        s_tmp0,        s_wave_id,  32*128/2      
+  //wave has offset 32*s_Seqs *wave_idx in Bytes
+  s_mul_i32        s_tmp0, 32,         s_Seqs
+  s_mul_i32        s_tmp0, s_wave_id,  s_tmp0
 
-  v_add_u32        v_regs(v_addr, 0),        s_tmp0,        v0
-  v_lshlrev_b32    v_regs(v_addr, 0),        2,             v_regs(v_addr, 0) // cvt to bytes
+  v_lshlrev_b32    v_regs(v_addr, 0),        2,             v0 // cvt to bytes
+  v_add_u32        v_regs(v_addr, 0),        s_tmp0,        v_regs(v_addr, 0)
 end
 ////////////////////////////////////////////////////////////////////
 //////////////////////////////K processs////////////////////////////
@@ -1461,8 +1475,10 @@ function K_mem_load(lu_idx_s, lu_idx_e)
    var K_lu_reg_size = blk_lu_k*blk_lu_n*Bpp/4/4/64 //8
 
    for var i=lu_idx_s; i < lu_idx_e; i++
-       blk_32x128k_mem_load(_v_SPdSt + K_lu_reg_size*i, _s_K_buf, _v_K_addr, 0, blk_32x128_mem_ld_insts)
-       v_add_u32 v_regs(_v_K_addr,0), lu_size_in_DW, v_regs(_v_K_addr,0)
+       blk_32x128k_mem_load(_v_SPdSt + K_lu_reg_size*i, _s_K_buf, _v_blk_mem_rd, 0, blk_32x128_mem_ld_insts)
+       s_mul_i32      s_tmp0,  SUB_QO,  s_Seqs
+       s_add_u32      s_regs(_s_K_buf, 0),   s_tmp0,   s_regs(_s_K_buf, 0)
+       s_addc_u32     s_regs(_s_K_buf, 1),   0,        s_regs(_s_K_buf, 1)
    end
 end
   
@@ -1517,8 +1533,10 @@ function V_mem_load(lu_idx_s, lu_idx_e)
    var V_lu_reg_size = blk_lu_k*blk_lu_n*Bpp/4/4/64 //8
 
    for var i=lu_idx_s; i < lu_idx_e; i++
-       blk_32x128k_mem_load(_v_SPdSt + V_lu_reg_size*i, _s_V_buf, _v_V_addr, 0, blk_32x128_mem_ld_insts)
-       v_add_u32 v_regs(_v_V_addr,0), lu_size_in_DW, v_regs(_v_V_addr,0)
+       blk_32x128k_mem_load(_v_SPdSt + V_lu_reg_size*i, _s_V_buf, _v_blk_mem_rd, 0, blk_32x128_mem_ld_insts)
+       s_mul_i32      s_tmp0,  SUB_QO,  s_Seqs
+       s_add_u32      s_regs(_s_V_buf, 0),   s_tmp0,   s_regs(_s_V_buf, 0)
+       s_addc_u32     s_regs(_s_V_buf, 1),   0,        s_regs(_s_V_buf, 1)
    end
 end
 
@@ -1544,11 +1562,12 @@ end
 //////////////////////////////Q processs////////////////////////////
 ////////////////////////////////////////////////////////////////////
 function Q_mem_load(f_idx, s, n)
-    blk_32x128k_mem_load(_v_Q_fch + QdO_lu_ld_reg_size*f_idx, _s_Q_buf, _v_Q_addr, s, n)
+    blk_32x128k_mem_load(_v_Q_fch + QdO_lu_ld_reg_size*f_idx, _s_Q_buf, _v_blk_mem_rd, s, n)
 end
 
 function Q_mem_load_va_upd
-   v_add_u32 v_regs(_v_Q_addr,0), s_QdO_inc_DW, v_regs(_v_Q_addr,0)
+   s_add_u32      s_regs(_s_Q_buf, 0),   s_QdO_inc_Bytes,  s_regs(_s_Q_buf, 0)
+   s_addc_u32     s_regs(_s_Q_buf, 1),   0,                s_regs(_s_Q_buf, 1)
 end
 
 function Q_lds_wr(f_idx, s, n)
@@ -1575,11 +1594,12 @@ end
 //////////////////////////////dO processs///////////////////////////
 ////////////////////////////////////////////////////////////////////
 function dO_mem_load(f_idx, s, n)
-    blk_32x128k_mem_load(_v_dO_fch + QdO_lu_ld_reg_size*f_idx, _s_dO_buf, _v_dO_addr, s, n)
+    blk_32x128k_mem_load(_v_dO_fch + QdO_lu_ld_reg_size*f_idx, _s_dO_buf, _v_blk_mem_rd, s, n)
 end
 
 function dO_mem_load_va_upd
-   v_add_u32 v_regs(_v_dO_addr,0), s_QdO_inc_DW, v_regs(_v_dO_addr,0)
+   s_add_u32      s_regs(_s_dO_buf, 0),   s_QdO_inc_Bytes,  s_regs(_s_dO_buf, 0)
+   s_addc_u32     s_regs(_s_dO_buf, 1),   0,                s_regs(_s_dO_buf, 1)
 end
 
 function dO_lds_wr(f_idx, s, n)
@@ -2145,7 +2165,7 @@ function cl_gemm4(cl_p, pi)
           s_nop 0 //for align
           s_cmp_lt_u32    s_tmp0,         s_loop_cnt
 
-          s_cselect_b32   s_QdO_inc_DW,   s_QdO_inc_DW,   0
+          s_cselect_b32   s_QdO_inc_Bytes,   s_QdO_inc_Bytes,   0
           s_cselect_b32   s_LseD_inc_DW,  s_LseD_inc_DW,  0
 
           Q_mem_load_va_upd() 
@@ -2227,6 +2247,7 @@ shader main
   s_load_dword      s_Ts,                   s[0:1], 0xc0                // get   tg data stride in bytes
   s_load_dword      s_Hs,                   s[0:1], 0xd0                // get   head data stride in bytes
   s_load_dword      s_BAs,                  s[0:1], 0xe0                // get   batch data stride in bytes
+  s_load_dword      s_Seqs,                 s[0:1], 0xf0                // get   seqlen data stride in bytes
 
 //---------------user parameters load end--------------------------//
  
@@ -2310,9 +2331,13 @@ shader main
   v_accvgpr_write   acc_regs(_v_acc_end, 0), 0
   v_mov_b32         v_regs(_v_arc_end, 0), 0
  
-  s_mov_b32         s_regs(_s_dQ_buf_save, 0), s_regs(_s_dQ_buf, 0)
-  s_mov_b32         s_regs(_s_dQ_buf_save, 1), s_regs(_s_dQ_buf, 1)
-
+  for var k = 0; k < 2; k++
+    s_mov_b32      s_regs(_s_Q_buf_save, k),  s_regs(_s_Q_buf, k) 
+    s_mov_b32      s_regs(_s_K_buf_save, k),  s_regs(_s_K_buf, k) 
+    s_mov_b32      s_regs(_s_V_buf_save, k),  s_regs(_s_V_buf, k) 
+    s_mov_b32      s_regs(_s_dO_buf_save, k), s_regs(_s_dO_buf, k) 
+    s_mov_b32      s_regs(_s_dQ_buf_save, k), s_regs(_s_dQ_buf, k)
+  end
 ////////////////////////////////////////////////////////////////
 /////////parameter process end///////////////////////////////////
 ////////////////////////////////////////////////////////////////
@@ -2410,8 +2435,9 @@ label_mask_kb_loop:
   v_mov_b32        v_regs(_v_neg_inf,0),     0xff800000
   s_mov_b32        s_mask_loop_idx,          0
 
-  s_mov_b32        s_QdO_inc_DW,   lu_size_in_DW
-  s_mov_b32        s_LseD_inc_DW,  SUB_QO
+  s_mul_i32        s_QdO_inc_Bytes,  SUB_QO,  s_Seqs
+  s_mov_b32        s_LseD_inc_DW, SUB_QO
+
   /////////////////////////QKVdO block base address//////////////////////////////////////////////
   s_mul_i32        s_tmp0,      s_tg_idx,     s_Ts
   s_mul_i32        s_tmp1,      s_tg_idy,     s_Hs
@@ -2423,26 +2449,34 @@ label_mask_kb_loop:
   Q_offset_gen()
 
   s_mov_b32        s_dO_base,    s_Q_base
+  //LseD always in bhs layout and 32bit per point. 
+  // addr = batch_idx * s_BAs/h_dim * 2 (s_BAs measured in f16) + head_idx * seq_len * 4 + seq_len_idx * 4
+ 
+  s_mul_i32        s_tmp2,      s_tg_idz,     s_BAs
+  s_lshr_b32       s_tmp2,      s_tmp2,       H_DIM_LOG2-1
 
-  //LseD size is 1/H_dim *2*Q_size,  2 means D is 32bits, and Q is 16bits
-  s_lshr_b32       s_LseD_base,    s_Q_base,  H_DIM_LOG2-1
+  s_mul_i32        s_tmp1,      s_tg_idy,     s_seq_len
+  s_mul_i32        s_tmp1,      4,            s_tmp1
+  s_add_u32        s_LseD_base, s_tmp1,       s_tmp2
+
+  s_mul_i32        s_tmp0,      SUB_KV*4,     s_tg_idx
+  s_add_u32        s_LseD_base, s_tmp0,       s_LseD_base
 
   //////mem addr generate///////
-  blk_32x128k_mem_load_addr_gen(_v_K_addr)
-  v_mov_b32 v_regs(_v_V_addr, 0),  v_regs(_v_K_addr, 0)
-  v_mov_b32 v_regs(_v_Q_addr, 0),  v_regs(_v_K_addr, 0)
-  v_mov_b32 v_regs(_v_dO_addr, 0), v_regs(_v_K_addr, 0)
-
-  v_add_u32 v_regs(_v_K_addr, 0),  s_KV_base, v_regs(_v_K_addr,  0)
-  v_add_u32 v_regs(_v_V_addr, 0),  s_KV_base, v_regs(_v_V_addr,  0)
-  v_add_u32 v_regs(_v_Q_addr, 0),  s_Q_base,  v_regs(_v_Q_addr,  0)
-  v_add_u32 v_regs(_v_dO_addr, 0), s_dO_base, v_regs(_v_dO_addr, 0)
-
+  blk_32x128k_mem_load_addr_gen(_v_blk_mem_rd)
   //cvt to DW
-  v_lshrrev_b32    v_regs(_v_K_addr, 0),        2,             v_regs(_v_K_addr,  0)
-  v_lshrrev_b32    v_regs(_v_V_addr, 0),        2,             v_regs(_v_V_addr,  0)
-  v_lshrrev_b32    v_regs(_v_Q_addr, 0),        2,             v_regs(_v_Q_addr,  0)
-  v_lshrrev_b32    v_regs(_v_dO_addr,0),        2,             v_regs(_v_dO_addr, 0)
+  v_lshrrev_b32    v_regs(_v_blk_mem_rd, 0),        2,             v_regs(_v_blk_mem_rd,  0)
+  v_lshrrev_b32    v_regs(_v_blk_mem_rd, 1),        2,             v_regs(_v_blk_mem_rd,  1)
+
+  s_add_u32            s_regs(_s_K_buf, 0),   s_KV_base,    s_regs(_s_K_buf_save, 0)
+  s_addc_u32           s_regs(_s_K_buf, 1),   0,            s_regs(_s_K_buf_save, 1)
+  s_add_u32            s_regs(_s_V_buf, 0),   s_KV_base,    s_regs(_s_V_buf_save, 0)
+  s_addc_u32           s_regs(_s_V_buf, 1),   0,            s_regs(_s_V_buf_save, 1)
+  s_add_u32            s_regs(_s_Q_buf, 0),   s_Q_base,     s_regs(_s_Q_buf_save, 0)
+  s_addc_u32           s_regs(_s_Q_buf, 1),   0,            s_regs(_s_Q_buf_save, 1)
+  s_add_u32            s_regs(_s_dO_buf, 0),  s_dO_base,    s_regs(_s_dO_buf_save, 0)
+  s_addc_u32           s_regs(_s_dO_buf, 1),  0,            s_regs(_s_dO_buf_save, 1)
+
 
   LseD_mem_load_addr_gen(_v_LseD_addr)
   v_add_u32        v_regs(_v_LseD_addr,0),     s_LseD_base,   v_regs(_v_LseD_addr, 0)
@@ -2454,9 +2488,21 @@ label_mask_kb_loop:
   v_mov_b32        v_regs(_v_dV_addr, 0),  v_regs(_v_dK_addr, 0)
 
   dQ_32x128_mem_store_addr_gen(_v_dQ_addr)
-  s_mul_i32        s_tmp0,      4/Bpp,     s_Q_base
+  //dQ always in bhsd layout and 32bit per point. 
+  // addr = batch_idx * s_BAs * 2 (s_BAs measured in f16) + head_idx * seq_len * head-dim * 4 + seq_len_idx * head-dim * 4
+ 
+  s_mul_i32        s_tmp2,      s_tg_idz,     s_BAs
+  s_mul_i32        s_tmp2,      2,            s_tmp2
+
+  s_mul_i32        s_tmp1,      s_tg_idy,     s_seq_len
+  s_mul_i32        s_tmp0,      SUB_KV,       s_tg_idx
+  s_add_u32        s_tmp1,      s_tmp0,       s_tmp1
+  s_lshl_b32       s_tmp1,      s_tmp1,       2 + H_DIM_LOG2
+
+  s_add_u32        s_dQ_base,   s_tmp1,       s_tmp2
+
   for var k = 0; k < 4; k++
-    v_add_u32        v_regs(_v_dQ_addr, k),  s_tmp0,      v_regs(_v_dQ_addr, k)
+    v_add_u32        v_regs(_v_dQ_addr, k),  s_dQ_base,   v_regs(_v_dQ_addr, k)
     v_lshrrev_b32    v_regs(_v_dQ_addr, k),  2,           v_regs(_v_dQ_addr, k)
   end
 
@@ -2641,8 +2687,8 @@ label_main_loops_exit:
 
   s_waitcnt        0
 
-  s_mov_b32         s_regs(_s_dQ_buf, 0), s_regs(_s_dQ_buf_save, 0) 
-  s_mov_b32         s_regs(_s_dQ_buf, 1), s_regs(_s_dQ_buf_save, 1)
+  s_mov_b32        s_regs(_s_dQ_buf, 0), s_regs(_s_dQ_buf_save, 0)
+  s_mov_b32        s_regs(_s_dQ_buf, 1), s_regs(_s_dQ_buf_save, 1)
 
   s_lshr_b32       s_tmp0,    s_seq_len,  SUB_KV_LOG2
   s_sub_i32        s_tmp0,    s_tmp0,     1
