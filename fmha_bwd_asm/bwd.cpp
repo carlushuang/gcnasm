@@ -532,7 +532,7 @@ int main(int argc, char **argv)
     void *config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, &args, HIP_LAUNCH_PARAM_BUFFER_SIZE,
                       &arg_size, HIP_LAUNCH_PARAM_END};
 
-    int total_loop = 1;
+    int total_loop = 8;
     int warm_ups = 0;
     int i;
 
