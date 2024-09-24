@@ -237,6 +237,7 @@ int main(int argc, char **argv)
     get_param(parsedOptions, "mask", mask);
     get_param(parsedOptions, "mask_kb", mask_kb);
     get_param(parsedOptions, "ioperm", ioperm);
+    get_param(parsedOptions, "subk", ts_kv);
 
     std::cout << "b:" << b << std::endl;
     std::cout << "h:" << h << std::endl;
@@ -248,6 +249,7 @@ int main(int argc, char **argv)
     std::cout << "mask:" << mask << std::endl;
     std::cout << "mask_kb:" << mask_kb << std::endl;
     std::cout << "ioperm:" << ioperm << std::endl;
+    std::cout << "subk:" << ts_kv << std::endl;
 
     int stride_tg = ts_kv * d * 2;
     int stride_head = s * d * 2;
@@ -537,13 +539,13 @@ int main(int argc, char **argv)
     int i;
 
     int bdx = 256;
-    int gdx = s / ts_kv;
+    int gdx = (s+ts_kv-1) / ts_kv;
     int gdy = h;
     int gdz = b;
 
     if (mask && mask_kb)
     {
-        int num_tg = s / ts_kv;
+        int num_tg = (s+ts_kv-1) / ts_kv;
         gdx = (num_tg%2) ? (num_tg/2+1) : (num_tg/2);
     }
 
