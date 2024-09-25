@@ -1,4 +1,4 @@
-///////////////kernel limitation///////////////////////////////////////////////////
+//////////////kernel limitation///////////////////////////////////////////////////
 /////0. dQ/LseD layout will/must be batch*head_num*seq_len*head_dim(bhsd)      ////
 /////1. head_dim must be equal with macro H_DIM.                               ////
 /////2. seq_len should be integer multiple of 64.                              ////
@@ -2123,6 +2123,12 @@ function cl_gemm2(cl_p, pi)
              if (cl_p ^ (XDL_idx&1))
                 Q_lds_Twr(Q_lw_idx, 2) //ds_wr_b32*4
                 Q_lw_idx += 2
+             else
+                if (XDL_idx >= 22)
+                    s_nop 0 //align
+                    s_nop 0 //align
+                    s_nop 0 //align
+               end
              end
           end
 
@@ -2163,16 +2169,16 @@ function cl_gemm3(cl_p, pi)
              end
           end
 
-          if (XDL_idx == 3)  
+          if (XDL_idx == 2)  
              s_waitcnt lgkmcnt(6) //wait dSt write ready
              s_barrier
           end
 
-          if (XDL_idx >= 4)
+          if (XDL_idx >= 3)
              if (cl_p ^ (XDL_idx&1))
                 dS_lds_Trd(dS_lr_idx, 1) //ds_rd_b128 *6
                 dS_lr_idx += 1
-                if (XDL_idx >= 16)
+                if (XDL_idx >= 15)
                    dO_lds_Twr(dO_lw_idx, 1) //ds_wr_b32*4
                    dO_lw_idx += 1
                 end
@@ -2255,7 +2261,7 @@ function cl_gemm4(cl_p, pi)
                 end
 
                 if (XDL_idx == 2) || (XDL_idx == 3)
-                    //dQ_mem_va_upd()
+            
                 end
 
                 if (XDL_idx >= 4) && (XDL_idx < 8) 
@@ -2308,6 +2314,7 @@ function cl_gemm4(cl_p, pi)
 
           if (XDL_idx == 22)
              s_addk_i32        s_loop_idx,    SUB_QO
+             s_nop 0 //align
              s_cmp_lt_i32      s_loop_idx,    s_loop_cnt
           end
 
