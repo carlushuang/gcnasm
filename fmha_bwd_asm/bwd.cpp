@@ -218,6 +218,7 @@ int main(int argc, char **argv)
     int mask = 0;
     int mask_kb = 1;
     int ioperm = 1; //0: bshd, 1:bhsd -----lse,D,dQ always keep in bhsd layout
+    int qa_rt = 1; //mqa/gqa ratio
 
     int ts_qo = 32;
     int ts_kv = 128;
@@ -238,6 +239,7 @@ int main(int argc, char **argv)
     get_param(parsedOptions, "mask_kb", mask_kb);
     get_param(parsedOptions, "ioperm", ioperm);
     get_param(parsedOptions, "subk", ts_kv);
+    get_param(parsedOptions, "qa_rt", qa_rt);
 
     std::cout << "b:" << b << std::endl;
     std::cout << "h:" << h << std::endl;
@@ -250,18 +252,29 @@ int main(int argc, char **argv)
     std::cout << "mask_kb:" << mask_kb << std::endl;
     std::cout << "ioperm:" << ioperm << std::endl;
     std::cout << "subk:" << ts_kv << std::endl;
+    std::cout << "qa_rt:" << qa_rt << std::endl;
 
     int stride_tg = ts_kv * d * 2;
     int stride_head = s * d * 2;
     int stride_batch = h * s * d * 2;
     int stride_seqlen = d * 2;
 
+    int stride_head_kv = s * d * 2;
+    int stride_batch_kv = (h/qa_rt) * s * d * 2;
+    int stride_seqlen_kv = d * 2;
+    int stride_seqlen_dkv = d * 2;
+
     if (ioperm == 0)//bshd
     {
         stride_seqlen = h * d * 2;
-        stride_tg = ts_kv * stride_seqlen;
         stride_head = d * 2;
         stride_batch = h * s * d * 2;
+
+        stride_seqlen_kv = (h/qa_rt) * d * 2;
+        stride_seqlen_dkv = h * d * 2;
+        stride_tg = ts_kv * stride_seqlen_kv;
+        stride_head_kv = d * 2;
+        stride_batch_kv = (h/qa_rt) * s * d * 2;
     }
 
     // int lda = m*sizeof(float);
@@ -423,8 +436,8 @@ int main(int argc, char **argv)
         float16 *host_fp16_perm_do = (float16 *)malloc(sz_mx * sizeof(float) / 2);
 
         fmha_batch_reshape(host_fp16_perm_q,  host_fp16_q,  b, h, s, d, FP16, 1, ioperm);
-        fmha_batch_reshape(host_fp16_perm_k,  host_fp16_k,  b, h, s, d, FP16, 1, ioperm);
-        fmha_batch_reshape(host_fp16_perm_v,  host_fp16_v,  b, h, s, d, FP16, 1, ioperm);
+        fmha_batch_reshape(host_fp16_perm_k,  host_fp16_k,  b, h, s, d, FP16, 1, ioperm, qa_rt);
+        fmha_batch_reshape(host_fp16_perm_v,  host_fp16_v,  b, h, s, d, FP16, 1, ioperm, qa_rt);
         fmha_batch_reshape(host_fp16_perm_do,  host_fp16_do,  b, h, s, d, FP16, 1, ioperm);
 
         HIP_CALL(hipMemcpy(dev_q, host_fp16_perm_q, sz_mx * sizeof(float) / 2, hipMemcpyHostToDevice));
@@ -494,6 +507,16 @@ int main(int argc, char **argv)
         p3 _p14;
         unsigned int Seqs;
         p3 _p15;
+        unsigned int ratio;
+        p3 _p16;
+        unsigned int Hs_kv;
+        p3 _p17;
+        unsigned int BAs_kv;
+        p3 _p18;
+        unsigned int Seqs_kv;
+        p3 _p19;
+        unsigned int Seqs_dkv;
+        p3 _p20;
 #ifdef ASM_PRINT
         void *print;
 #endif
@@ -525,6 +548,11 @@ int main(int argc, char **argv)
     args.Hs = stride_head;
     args.BAs = stride_batch;
     args.Seqs = stride_seqlen;
+    args.ratio = qa_rt;
+    args.Hs_kv = stride_head_kv;
+    args.BAs_kv = stride_batch_kv;
+    args.Seqs_kv = stride_seqlen_kv;
+    args.Seqs_dkv = stride_seqlen_dkv;
 #ifdef ASM_PRINT
     args.print = (void *)print;
 #endif

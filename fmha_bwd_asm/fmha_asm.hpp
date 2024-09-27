@@ -174,8 +174,9 @@ static void fmha_batch_init(T *buffer, int batch, int head_num, int seq_len, int
 
 //perm: 0, bshd; 1, bhsd
 template<typename T>
-static void fmha_batch_reshape(T *o_buf, T *i_buf, int batch, int head_num, int seq_len, int head_dim, DATA_TYPE in_type, int iperm, int operm)
+static void fmha_batch_reshape(T *o_buf, T *i_buf, int batch, int head_num, int seq_len, int head_dim, DATA_TYPE in_type, int iperm, int operm, int mgqa_ratio=1)
 {
+    head_num = head_num/mgqa_ratio;
     for(int b = 0; b < batch; b++)
     {
         for(int h = 0; h < head_num; h++)

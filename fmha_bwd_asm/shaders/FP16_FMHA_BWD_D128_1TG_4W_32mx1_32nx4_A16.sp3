@@ -155,6 +155,14 @@ var dQ_cut = 5
 var dQ_ms_idx = dQ_cut
 
 //////sreg def//////////////
+var s_tg_idx = s2
+var s_tg_idy = s3
+var s_tg_idz = s4
+
+var s_Hs_kv   = s5       
+var s_BAs_kv  = s6      
+var s_Seqs_kv = s7
+
 var _s_Q_buf  = 8
 var _s_K_buf  = 12
 var _s_V_buf  = 16
@@ -165,9 +173,10 @@ var _s_dQ_buf = 32
 var _s_dK_buf = 36
 var _s_dV_buf = 40
 
-var s_tg_idx = s44
-var s_tg_idy = s45
-var s_tg_idz = s46
+var _s_QA_ratio = 44
+var _s_kv_head_idx = 45
+
+var s_Seqs_dkv = s46
 var s_wave_id = s47
 var s_scalar = s48  
 var s_log2e  = s49
@@ -195,8 +204,9 @@ var s_32x128_Bytes  = s67
 
 var s_QdO_inc_Bytes = s68
 var s_LseD_inc_DW = s69
-var s_Seqs    = s70
-//var s_dQ_base = s71
+var s_Seqs     = s70
+var s_Seqs_tmp = s71
+    var _s_div_n_tmp = 71 //--reused
 
 var _s_Lse_lds_wr_base_m0 = 72
 
@@ -332,6 +342,37 @@ function s_regs(base, offset)
 end
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////s_q = s_n / s_d. s_q, s_n, s_d all sgpr///////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+function int_div_ss(s_q, s_n, s_d)
+     v_cvt_f32_u32    v_regs(_v_tmp, 0), s_regs(s_d, 0)                         //v[v_tmp4+0], s[s_d]
+     s_sub_i32        s_tmp0,            0,                  s_regs(s_d, 0)     //s[s_tmp4+0], 0,           s[s_d]
+     v_rcp_iflag_f32  v_regs(_v_tmp, 0), v_regs(_v_tmp, 0)                      //v[v_tmp4+0], v[v_tmp4+0]
+     s_nop 0
+     v_mul_f32       v_regs(_v_tmp, 0),  0x4f7ffffe,         v_regs(_v_tmp, 0)   //v[v_tmp4+0], 0x4f7ffffe,  v[v_tmp4+0]
+     v_cvt_u32_f32   v_regs(_v_tmp, 0),  v_regs(_v_tmp, 0)                       //v[v_tmp4+0], v[v_tmp4+0]
+     v_mul_lo_u32    v_regs(_v_tmp, 1),  s_tmp0,             v_regs(_v_tmp, 0)   //v[v_tmp4+1], s[s_tmp4+0], v[v_tmp4+0]
+     v_mul_hi_u32    v_regs(_v_tmp, 1),  v_regs(_v_tmp, 0),  v_regs(_v_tmp, 1)   //v[v_tmp4+1], v[v_tmp4+0], v[v_tmp4+1]
+     v_add_u32       v_regs(_v_tmp, 0),  v_regs(_v_tmp, 0),  v_regs(_v_tmp, 1)   //v[v_tmp4+0], v[v_tmp4+0], v[v_tmp4+1]
+     v_mul_hi_u32    v_regs(_v_tmp, 0),  s_regs(s_n, 0),     v_regs(_v_tmp, 0)   //v[v_tmp4+0], s[s_n],      v[v_tmp4+0]
+                                                             
+     v_mul_lo_u32    v_regs(_v_tmp, 1),  v_regs(_v_tmp, 0),  s_regs(s_d, 0)      //v[v_tmp4+1], v[v_tmp4+0], s[s_d]
+     v_sub_u32       v_regs(_v_tmp, 3),  s_regs(s_n, 0),     v_regs(_v_tmp, 1)   //v[v_q],      s[s_n],      v[v_tmp4+1]
+     v_add_u32       v_regs(_v_tmp, 2),  1,                  v_regs(_v_tmp, 0)   //v[v_tmp4+2], 1,           v[v_tmp4+0]
+     v_cmp_le_u32    vcc,                s_regs(s_d, 0),     v_regs(_v_tmp, 3)   //vcc,         s[s_d],      v[v_q]
+     v_subrev_u32    v_regs(_v_tmp, 1),  s_regs(s_d, 0),     v_regs(_v_tmp, 3)   //v[v_tmp4+1], s[s_d],      v[v_q]
+     s_nop 0                                                 
+     v_cndmask_b32   v_regs(_v_tmp, 0),  v_regs(_v_tmp, 0),  v_regs(_v_tmp, 2), vcc  //v[v_tmp4+0], v[v_tmp4+0], v[v_tmp4+2], vcc
+     v_cndmask_b32   v_regs(_v_tmp, 3),  v_regs(_v_tmp, 3),  v_regs(_v_tmp, 1), vcc  //v[v_q],      v[v_q],      v[v_tmp4+1], vcc
+     v_add_u32       v_regs(_v_tmp, 1),  1,                  v_regs(_v_tmp, 0)   //v[v_tmp4+1], 1,           v[v_tmp4+0]
+     v_cmp_le_u32    vcc,                s_regs(s_d, 0),     v_regs(_v_tmp, 3)   //vcc,         s[s_d],      v[v_q]
+     s_nop 1
+     v_cndmask_b32   v_regs(_v_tmp, 3),  v_regs(_v_tmp, 0),  v_regs(_v_tmp, 1), vcc //v[v_q], v[v_tmp4+0], v[v_tmp4+1], vcc
+     s_nop 3
+     v_readfirstlane_b32   s_regs(s_q, 0),   v_regs(_v_tmp, 3)
+     s_nop 3
+end
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////4 waves mem_load a blk 32(m)x128(k)///////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 //data fast change dim is at the k(128).
@@ -369,7 +410,7 @@ function blk_32x128k_mem_load_addr_gen(v_addr)
   v_lshlrev_b32    v_regs(_v_tmp, 2),         2,                        v_regs(_v_tmp, 2) //q_id[1]*8
 
   v_add_u32        v_regs(_v_tmp, 1),         v_regs(_v_tmp, 2),        v_regs(_v_tmp, 1) //q_id[0]*2 + q_id[1]*8 + q_id[2]*4
-  v_mul_i32_i24    v_regs(_v_tmp, 1),         s_Seqs,                   v_regs(_v_tmp, 1) //(q_id[0]*2 + q_id[1]*8 + q_id[2]*4)*H_DIM_Bs
+  v_mul_i32_i24    v_regs(_v_tmp, 1),         s_Seqs_tmp,               v_regs(_v_tmp, 1) //(q_id[0]*2 + q_id[1]*8 + q_id[2]*4)*H_DIM_Bs
 
   v_and_b32        v_regs(_v_tmp, 0),         0x7,                      v0 //f_id = t_id&7
   v_lshlrev_b32    v_regs(_v_tmp, 0),         4,                        v_regs(_v_tmp, 0) //f_id*16, 16Bytes per thread   
@@ -378,7 +419,7 @@ function blk_32x128k_mem_load_addr_gen(v_addr)
   ///////wave addr offset//////
   //wave has offset s[0]*16*H_DIM_Bs+s[1]*64*2
   s_and_b32        s_tmp0,        1,          s_wave_id //s[0]
-  s_mul_i32        s_tmp0,        s_tmp0,     s_Seqs      
+  s_mul_i32        s_tmp0,        s_tmp0,     s_Seqs_tmp      
   s_mul_i32        s_tmp0,        s_tmp0,     16
  
   s_lshr_b32       s_tmp1,        s_wave_id,  1  //s[1]
@@ -389,7 +430,7 @@ function blk_32x128k_mem_load_addr_gen(v_addr)
   v_add_u32        v_regs(v_addr, 0),        s_tmp0,        v_regs(v_addr, 0) // add wave offset
 
   //two inst has 1 seq_len offset
-  v_add_u32        v_regs(v_addr, 1),        s_Seqs,        v_regs(v_addr, 0)
+  v_add_u32        v_regs(v_addr, 1),        s_Seqs_tmp,        v_regs(v_addr, 0)
 end
 
 function blk_32x128k_mem_load(v_dst, s_rsrc, v_addr, s, n)
@@ -1354,7 +1395,7 @@ function dKV_32x128_mem_store(v_src, s_rsrc, v_addr, s, n)
            var i_idx = s+i
            buffer_store_dword  v_regs(v_src, i_idx), v_regs(v_addr, 0), s_regs(s_rsrc, 0), 0  idxen:1
 
-           s_lshr_b32      s_tmp0,               s_Seqs,        2 //cvt to DW
+           s_lshr_b32      s_tmp0,               s_Seqs_dkv,        2 //cvt to DW
            v_add_u32       v_regs(v_addr, 0),    s_tmp0,        v_regs(v_addr, 0)
        end
     end
@@ -1379,7 +1420,7 @@ end
 function dKV_128x128_mem_store_addr_gen(v_addr)
   ///////wave addr offset//////
   //wave has offset 32*s_Seqs *wave_idx in Bytes
-  s_mul_i32        s_tmp0, 32,         s_Seqs
+  s_mul_i32        s_tmp0, 32,         s_Seqs_dkv
   s_mul_i32        s_tmp0, s_wave_id,  s_tmp0
 
   v_lshlrev_b32    v_regs(v_addr, 0),        2,             v0 // cvt to bytes
@@ -1393,7 +1434,7 @@ function K_mem_load(lu_idx_s, lu_idx_e)
 
    for var i=lu_idx_s; i < lu_idx_e; i++
        blk_32x128k_mem_load(_v_SPdSt + K_lu_reg_size*i, _s_K_buf, _v_blk_mem_rd, 0, blk_32x128_mem_ld_insts)
-       s_mul_i32      s_tmp0,  SUB_QO,  s_Seqs
+       s_mul_i32      s_tmp0,  SUB_QO,  s_Seqs_kv
        s_add_u32      s_regs(_s_K_buf, 0),   s_tmp0,   s_regs(_s_K_buf, 0)
        s_addc_u32     s_regs(_s_K_buf, 1),   0,        s_regs(_s_K_buf, 1)
    end
@@ -1451,7 +1492,7 @@ function V_mem_load(lu_idx_s, lu_idx_e)
 
    for var i=lu_idx_s; i < lu_idx_e; i++
        blk_32x128k_mem_load(_v_SPdSt + V_lu_reg_size*i, _s_V_buf, _v_blk_mem_rd, 0, blk_32x128_mem_ld_insts)
-       s_mul_i32      s_tmp0,  SUB_QO,  s_Seqs
+       s_mul_i32      s_tmp0,  SUB_QO,  s_Seqs_kv
        s_add_u32      s_regs(_s_V_buf, 0),   s_tmp0,   s_regs(_s_V_buf, 0)
        s_addc_u32     s_regs(_s_V_buf, 1),   0,        s_regs(_s_V_buf, 1)
    end
@@ -2116,6 +2157,11 @@ shader main
   s_load_dword      s_Hs,                   s[0:1], 0xd0                // get   head data stride in bytes
   s_load_dword      s_BAs,                  s[0:1], 0xe0                // get   batch data stride in bytes
   s_load_dword      s_Seqs,                 s[0:1], 0xf0                // get   seqlen data stride in bytes
+  s_load_dword      s_regs(_s_QA_ratio,0),  s[0:1], 0x100               // get   MQA/GQA ratio
+  s_load_dword      s_Hs_kv,                s[0:1], 0x110               // get   kv head data stride in bytes
+  s_load_dword      s_BAs_kv,               s[0:1], 0x120               // get   kv batch data stride in bytes
+  s_load_dword      s_Seqs_kv,              s[0:1], 0x130               // get   kv seqlen data stride in bytes
+  s_load_dword      s_Seqs_dkv,             s[0:1], 0x140               // get   dkv seqlen data stride in bytes
 
 //---------------user parameters load end--------------------------//
  
@@ -2205,6 +2251,10 @@ shader main
     s_mov_b32      s_regs(_s_V_buf_save, k),  s_regs(_s_V_buf, k) 
     s_mov_b32      s_regs(_s_dO_buf_save, k), s_regs(_s_dO_buf, k) 
   end
+
+  s_mov_b32 s_regs(_s_div_n_tmp, 0),  s_tg_idy
+  int_div_ss(_s_kv_head_idx, _s_div_n_tmp, _s_QA_ratio)
+
 ////////////////////////////////////////////////////////////////
 /////////parameter process end///////////////////////////////////
 ////////////////////////////////////////////////////////////////
@@ -2290,13 +2340,15 @@ shader main
 
   /////////////////////////QKVdO block base address//////////////////////////////////////////////
   s_mul_i32        s_tmp0,      s_tg_idx,     s_Ts
-  s_mul_i32        s_tmp1,      s_tg_idy,     s_Hs
-  s_mul_i32        s_tmp2,      s_tg_idz,     s_BAs
+  s_mul_i32        s_tmp1,      s_regs(_s_kv_head_idx, 0),     s_Hs_kv
+  s_mul_i32        s_tmp2,      s_tg_idz,     s_BAs_kv
   s_add_u32        s_KV_base,   s_tmp0,       s_tmp1
   s_add_u32        s_KV_base,   s_KV_base,    s_tmp2
  
-  s_add_u32        s_Q_base,     s_tmp1,       s_tmp2
-  s_mov_b32        s_dO_base,    s_Q_base
+  s_mul_i32        s_tmp1,      s_tg_idy,     s_Hs
+  s_mul_i32        s_tmp2,      s_tg_idz,     s_BAs
+  s_add_u32        s_Q_base,    s_tmp1,       s_tmp2
+  s_mov_b32        s_dO_base,   s_Q_base
 
   //LseD always in bhs layout and 32bit per point. 
   // addr = batch_idx * s_BAs/h_dim * 2 (s_BAs measured in f16) + head_idx * seq_len * 4
@@ -2308,7 +2360,8 @@ shader main
   s_mul_i32        s_tmp1,      4,            s_tmp1
   s_add_u32        s_LseD_base, s_tmp1,       s_tmp2
 
-  //////mem addr generate///////
+  //////kv mem load addr generate///////
+  s_mov_b32        s_Seqs_tmp,  s_Seqs_kv
   blk_32x128k_mem_load_addr_gen(_v_blk_mem_rd)
   //cvt to DW
   v_lshrrev_b32    v_regs(_v_blk_mem_rd, 0),        2,             v_regs(_v_blk_mem_rd,  0)
@@ -2329,7 +2382,18 @@ shader main
   v_lshrrev_b32    v_regs(_v_LseD_addr,0),     2,             v_regs(_v_LseD_addr, 0)
 
   dKV_128x128_mem_store_addr_gen(_v_dK_addr)
-  v_add_u32        v_regs(_v_dK_addr, 0),  s_KV_base,   v_regs(_v_dK_addr, 0)
+  s_mul_i32        s_tmp0,      SUB_KV,       s_Seqs_dkv
+  s_mul_i32        s_tmp0,      s_tg_idx,     s_tmp0
+
+  s_mul_i32        s_tmp1,      s_tg_idy,     s_Hs_kv
+
+  s_mul_i32        s_tmp2,      s_tg_idz,     s_BAs_kv
+  s_mul_i32        s_tmp2,      s_tmp2,       s_regs(_s_QA_ratio,0)
+
+  s_add_u32        s_tmp0,      s_tmp0,       s_tmp1
+  s_add_u32        s_tmp0,      s_tmp0,       s_tmp2
+
+  v_add_u32        v_regs(_v_dK_addr, 0),  s_tmp0,      v_regs(_v_dK_addr, 0)
   v_lshrrev_b32    v_regs(_v_dK_addr, 0),  2,           v_regs(_v_dK_addr, 0)
   v_mov_b32        v_regs(_v_dV_addr, 0),  v_regs(_v_dK_addr, 0)
 
@@ -2384,6 +2448,14 @@ shader main
   s_waitcnt vmcnt(blk_32x128_mem_ld_insts*2)&lgkmcnt(0) //wait V mem of 2 lu done
   s_barrier
   V_lds_wr(0, 2)
+
+  //////QdO mem load addr generate///////
+  s_mov_b32        s_Seqs_tmp,  s_Seqs
+  blk_32x128k_mem_load_addr_gen(_v_blk_mem_rd)
+  //cvt to DW
+  v_lshrrev_b32    v_regs(_v_blk_mem_rd, 0),        2,             v_regs(_v_blk_mem_rd,  0)
+  v_lshrrev_b32    v_regs(_v_blk_mem_rd, 1),        2,             v_regs(_v_blk_mem_rd,  1)
+
   Q_mem_load(0, 0, blk_32x128_mem_ld_insts) //load Q.blk0
   dO_mem_load(0, 0, blk_32x128_mem_ld_insts) //load O.blk0
 
