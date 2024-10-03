@@ -6,6 +6,13 @@ ARCH=gfx942
 # run
 ./bwd.exe b=1 h=16 s=16384 d=128 dump_result=0 init_pattern=0
 
+###commandline option####
+#atm=0: a16,default; --corresponding kernel name with a16
+#atm=1: a32; --kernel name with a32
+#subk=128: 32x128tile,default;
+#subk=192: 16x192tile; --kernel name with 16x192
+#mask=0: non-causal,default;
+#mask=1: causal; --kernel name with m1k1
 
 ###run mask test#####
 ###Kernel: bwd_a32_m1k0.s , command_line: mask=1
