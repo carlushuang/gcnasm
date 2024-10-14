@@ -11,6 +11,7 @@
 #include "half.hpp"
 #endif
 
+#define LOCAL_SCRATCH 1
 #define RAND_INT 0
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -158,11 +159,38 @@ matrix_core_kernel_standard_agpr(const void* __restrict__ ptr_a,
 
     fp32x16_t v_c = {.0f};  // clear
 
+#if LOCAL_SCRATCH
+    // create 2 local scratch, note this is x8, not x4(purposely)
+    fp16x8_t v_aa;
+    fp16x8_t v_bb;
+    for(auto i = 0; i < 4; i++)
+        v_aa[i] = v_a[i];
+    for(auto i = 0; i < 4; i++)
+        v_bb[i] = v_b[i];
+
+    // Note the local scratch re-assignment is before this waitcnt
+    // but this is fine, since finally compiler will remove all such
+    // (redundant) movement for us
+    asm volatile("s_waitcnt vmcnt(0)"  : : : "memory");
+    
+    // this is local scratch used for mfma
+    fp16x4_t v_ar, v_br;
+    for(auto i = 0; i < 4; i++)
+        v_ar[i] = v_aa[i];
+    
+    for(auto i = 0; i < 4; i++)
+        v_br[i] = v_bb[i];
+    asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %3\n"
+                 "s_nop 16"         // TODO: better resolve data dependency
+                 : "+v"(v_c)
+                 :  "a"(v_ar), "a"(v_br),  "v"(v_c) : );
+#else
     asm volatile("s_waitcnt vmcnt(0)"  : : : "memory");
     asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %3\n"
                  "s_nop 16"         // TODO: better resolve data dependency
                  : "+v"(v_c)
                  :  "a"(v_a), "a"(v_b),  "v"(v_c) : );
+#endif
 
     fp16x16_t v_c_f16;
     for(auto i = 0; i < 16; i++) {
