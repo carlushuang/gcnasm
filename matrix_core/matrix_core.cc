@@ -11,7 +11,7 @@
 #include "half.hpp"
 #endif
 
-#define LOCAL_SCRATCH 1
+#define LOCAL_SCRATCH 0
 #define RAND_INT 0
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -33,6 +33,7 @@ using fp16x2_t = fp16_t __attribute__((ext_vector_type(2)));
 using fp16x4_t = fp16_t __attribute__((ext_vector_type(4)));
 using fp16x8_t = fp16_t __attribute__((ext_vector_type(8)));
 using fp16x16_t = fp16_t __attribute__((ext_vector_type(16)));
+using fp32x4_t = fp32_t __attribute__((ext_vector_type(4)));
 using fp32x16_t = fp32_t __attribute__((ext_vector_type(16)));
 
 using int32x4_t = int32_t __attribute__((ext_vector_type(4)));
@@ -159,14 +160,11 @@ matrix_core_kernel_standard_agpr(const void* __restrict__ ptr_a,
 
     fp32x16_t v_c = {.0f};  // clear
 
-#if LOCAL_SCRATCH
+#if LOCAL_SCRATCH == 1
     // create 2 local scratch, note this is x8, not x4(purposely)
-    fp16x8_t v_aa;
-    fp16x8_t v_bb;
-    for(auto i = 0; i < 4; i++)
-        v_aa[i] = v_a[i];
-    for(auto i = 0; i < 4; i++)
-        v_bb[i] = v_b[i];
+    fp16x8_t v_aa, v_bb;
+    for(auto i = 0; i < 4; i++) v_aa[i] = v_a[i];
+    for(auto i = 0; i < 4; i++) v_bb[i] = v_b[i];
 
     // Note the local scratch re-assignment is before this waitcnt
     // but this is fine, since finally compiler will remove all such
@@ -175,15 +173,21 @@ matrix_core_kernel_standard_agpr(const void* __restrict__ ptr_a,
     
     // this is local scratch used for mfma
     fp16x4_t v_ar, v_br;
-    for(auto i = 0; i < 4; i++)
-        v_ar[i] = v_aa[i];
-    
-    for(auto i = 0; i < 4; i++)
-        v_br[i] = v_bb[i];
-    asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %3\n"
-                 "s_nop 16"         // TODO: better resolve data dependency
-                 : "+v"(v_c)
-                 :  "a"(v_ar), "a"(v_br),  "v"(v_c) : );
+    for(auto i = 0; i < 4; i++) v_ar[i] = v_aa[i];
+    for(auto i = 0; i < 4; i++) v_br[i] = v_bb[i];
+    asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %3\n" "s_nop 16" : "+v"(v_c) :  "a"(v_ar), "a"(v_br),  "v"(v_c) : );
+#elif LOCAL_SCRATCH == 2
+    // use different type for local scratch
+    fp32x4_t v_aa, v_bb;
+    for(auto i = 0; i < 2; i++) { fp16x2_t tmp; tmp[0] = v_a[2 * i + 0]; tmp[1] = v_a[2 * i + 1]; v_aa[i] = __builtin_bit_cast(float, tmp); }
+    for(auto i = 0; i < 2; i++) { fp16x2_t tmp; tmp[0] = v_b[2 * i + 0]; tmp[1] = v_b[2 * i + 1]; v_bb[i] = __builtin_bit_cast(float, tmp); }
+
+    asm volatile("s_waitcnt vmcnt(0)"  : : : "memory");
+
+    fp16x4_t v_ar, v_br;
+    for(auto i = 0; i < 2; i++) { fp16x2_t tmp; tmp = __builtin_bit_cast(fp16x2_t, v_aa[i]); v_ar[2 * i + 0] = tmp[0]; v_ar[2 * i + 1] = tmp[1]; }
+    for(auto i = 0; i < 2; i++) { fp16x2_t tmp; tmp = __builtin_bit_cast(fp16x2_t, v_bb[i]); v_br[2 * i + 0] = tmp[0]; v_br[2 * i + 1] = tmp[1]; }
+    asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %3\n" "s_nop 16" : "+v"(v_c) :  "a"(v_ar), "a"(v_br),  "v"(v_c) : );
 #else
     asm volatile("s_waitcnt vmcnt(0)"  : : : "memory");
     asm volatile("v_mfma_f32_32x32x8f16 %0, %1, %2, %3\n"
