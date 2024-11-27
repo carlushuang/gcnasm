@@ -10,7 +10,6 @@
 #include <numeric>
 #include <utility>
 
-
 #define WARMUP 200
 #define LOOP 200
 
@@ -46,7 +45,6 @@ template<> struct bytes_to_vector<4> { using type = fp32_t; };
 
 template<int bytes>
 using bytes_to_vector_t = typename bytes_to_vector<bytes>::type;
-
 
 
 template<std::size_t N>
@@ -160,17 +158,17 @@ struct mem_stream_base {
 
     using harg = karg;
     karg consts;
-    
-    __host__ mem_stream_base(harg harg_, int bytes_per_issue, int unroll, int inner = 1) {
+
+    __host__ mem_stream_base(harg harg_, int bytes_per_issue, int unroll, int row_per_thread = 1, int inner = 1) {
         consts = harg_;
         auto elems = consts.bytes / bytes_per_issue;
         auto issue_per_block = elems / GRID_SIZE;
         consts.issue_per_block = issue_per_block;
-        consts.iters = issue_per_block / BLOCK_SIZE / unroll / inner;
+        consts.iters = issue_per_block / BLOCK_SIZE / unroll / inner / row_per_thread;
     }
 
-    __host__ virtual ~mem_stream_base() {} 
-    
+    __host__ virtual ~mem_stream_base() {}
+
     __host__ void operator()() const {
         kentry<typename Derived::kernel><<<GRID_SIZE, BLOCK_SIZE>>>(consts);
     }

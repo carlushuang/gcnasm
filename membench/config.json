@@ -1,40 +1,63 @@
 {
     "memcpy_persistent": {
-        "ENABLE_MEMCPY_PERSISTENT": "1",
-        "MEMCPY_PERSISTENT_BS_VAL": "256",
-        "MEMCPY_PERSISTENT_GS_VAL": "160",
-        "MEMCPY_PERSISTENT_UNROLL_VAL": "16",
-        "MEMCPY_PERSISTENT_PIXELS_MB_VAL": "440",
-        "MEMCPY_PERSISTENT_VERIFY": "1"
+        "ENABLE_MEMCPY_PERSISTENT": "0",
+        "MEMCPY_PERSISTENT_BS_VAL": "512",
+        "MEMCPY_PERSISTENT_GS_VAL": "1600",
+        "MEMCPY_PERSISTENT_UNROLL_VAL": "8",
+        "MEMCPY_PERSISTENT_PIXELS_MB_VAL": "450.0",
+        "MEMCPY_PERSISTENT_VERIFY": "0"
     },
     "memread_stream": {
-        "ENABLE_MEMREAD_STREAM": "1",
+        "ENABLE_MEMREAD_STREAM": "0",
         "READ_BS_VAL": "1024",
         "READ_GS_VAL": "80",
         "READ_UNROLL_VAL": "4",
         "READ_PIXELS_MB_VAL": "437.5",
         "READ_STREAM_NONTEMP": "1",
-        "READ_VERIFY": "0"
+        "READ_VERIFY": "1"
+    },
+    "memwrite_stream": {
+        "ENABLE_MEMWRITE_STREAM": "0",
+        "WRITE_BS_VAL": "1024",
+        "WRITE_GS_VAL": "80",
+        "WRITE_UNROLL_VAL": "4",
+        "WRITE_PIXELS_MB_VAL": "437.5",
+        "WRITE_STREAM_NONTEMP": "1",
+        "WRITE_VERIFY": "0"
     },
     "memcpy_stream": {
         "ENABLE_MEMCPY_STREAM": "1",
-        "MEMCPY_BS_VAL": "768",
-        "MEMCPY_GS_VAL": "2880",
-        "MEMCPY_UNROLL_VAL": "28",
-        "MEMCPY_PIXELS_MB_VAL": "472.5",
+        "MEMCPY_BS_VAL": "256",
+        "MEMCPY_GS_VAL": "80",
+        "MEMCPY_UNROLL_VAL": "1",
+        "MEMCPY_ROW_PER_THREAD_VAL": "1",
+        "MEMCPY_PADDING_VAL": "28",
+        "MEMCPY_PIXELS_MB_VAL": "437.5",
         "MEMCPY_STREAM_NONTEMP": "1",
-        "MEMCPY_STREAM_VERIFY": "1"
+        "MEMCPY_STREAM_VERIFY": "0"
     },
     "memcpy_stream_async": {
-        "ENABLE_MEMCPY_STREAM_ASYNC": "1",
+        "ENABLE_MEMCPY_STREAM_ASYNC": "0",
         "MEMCPY_ASYNC_BS_VAL": "256",
         "MEMCPY_ASYNC_GS_VAL": "1200",
         "MEMCPY_ASYNC_UNROLL_VAL": "22",
+        "MEMCPY_ASYNC_ROW_PER_THREAD_VAL": "1",
+        "MEMCPY_ASYNC_PADDING_VAL": "0",
         "MEMCPY_ASYNC_PIXELS_MB_VAL": "438.28125",
         "MEMCPY_STREAM_ASYNC_VERIFY": "1"
     },
+    "memcpy_stream_async_inplace": {
+        "ENABLE_MEMCPY_STREAM_ASYNC_INPLACE": "0",
+        "MEMCPY_ASYNC_INPLACE_BS_VAL": "256",
+        "MEMCPY_ASYNC_INPLACE_GS_VAL": "1200",
+        "MEMCPY_ASYNC_INPLACE_UNROLL_VAL": "22",
+        "MEMCPY_ASYNC_INPLACE_ROW_PER_THREAD_VAL": "1",
+        "MEMCPY_ASYNC_INPLACE_PADDING_VAL": "0",
+        "MEMCPY_ASYNC_INPLACE_PIXELS_MB_VAL": "438.28125",
+        "MEMCPY_STREAM_ASYNC_INPLACE_VERIFY": "1"
+    },
     "memcpy_stream_swizzled": {
-        "ENABLE_MEMCPY_STREAM_SWIZZLED": "1",
+        "ENABLE_MEMCPY_STREAM_SWIZZLED": "0",
         "MEMCPY_SWIZZLED_BS_VAL": "256",
         "MEMCPY_SWIZZLED_GS_VAL": "160",
         "MEMCPY_SWIZZLED_CHUNKS_VAL": "4",
