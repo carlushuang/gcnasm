@@ -28,6 +28,16 @@ struct CodegenSettings<READ_mode> {
   static constexpr int UNROLL = READ_UNROLL_VAL;
 };
 
+struct WRITE_mode {};
+
+template <>
+struct CodegenSettings<WRITE_mode> {
+  static constexpr int GS = WRITE_GS_VAL;
+  static constexpr int BS = WRITE_BS_VAL;
+  static constexpr float PIXELS_MB = WRITE_PIXELS_MB_VAL;
+  static constexpr int UNROLL = WRITE_UNROLL_VAL;
+};
+
 struct MEMCPY_mode {};
 
 template <>
@@ -36,6 +46,9 @@ struct CodegenSettings<MEMCPY_mode> {
   static constexpr int BS = MEMCPY_BS_VAL;
   static constexpr float PIXELS_MB = MEMCPY_PIXELS_MB_VAL;
   static constexpr int UNROLL = MEMCPY_UNROLL_VAL;
+  static constexpr int ROW_PER_THREAD = MEMCPY_ROW_PER_THREAD_VAL;
+  static constexpr int PADDING = MEMCPY_PADDING_VAL;
+  static constexpr int BYTES_PER_ISSUE = 16;
 };
 
 struct MEMCPY_ASYNC_mode {};
@@ -46,8 +59,23 @@ struct CodegenSettings<MEMCPY_ASYNC_mode> {
   static constexpr int BS = MEMCPY_ASYNC_BS_VAL;
   static constexpr float PIXELS_MB = MEMCPY_ASYNC_PIXELS_MB_VAL;
   static constexpr int UNROLL = MEMCPY_ASYNC_UNROLL_VAL;
+  static constexpr int ROW_PER_THREAD = MEMCPY_ASYNC_ROW_PER_THREAD_VAL;
+  static constexpr int PADDING = MEMCPY_ASYNC_PADDING_VAL;
+  static constexpr int BYTES_PER_ISSUE = 16;
 };
 
+struct MEMCPY_ASYNC_INPLACE_mode {};
+
+template <>
+struct CodegenSettings<MEMCPY_ASYNC_INPLACE_mode> {
+  static constexpr int GS = MEMCPY_ASYNC_INPLACE_GS_VAL;
+  static constexpr int BS = MEMCPY_ASYNC_INPLACE_BS_VAL;
+  static constexpr float PIXELS_MB = MEMCPY_ASYNC_INPLACE_PIXELS_MB_VAL;
+  static constexpr int UNROLL = MEMCPY_ASYNC_INPLACE_UNROLL_VAL;
+  static constexpr int ROW_PER_THREAD = MEMCPY_ASYNC_INPLACE_ROW_PER_THREAD_VAL;
+  static constexpr int PADDING = MEMCPY_ASYNC_INPLACE_PADDING_VAL;
+  static constexpr int BYTES_PER_ISSUE = 16;
+};
 
 struct MEMCPY_SWIZZLED_mode {};
 
