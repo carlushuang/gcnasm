@@ -1,5 +1,8 @@
 import torch
 
+
+HADAMARD_NORMALIZED=False
+
 class had_util:
     @staticmethod
     def random_orthogonal_matrix(size, device):
@@ -57,8 +60,10 @@ class had_util:
             # Use bcast instead
             input = hadK.view(1, K, K).to(input) @ input
 
-        # return input.view(X.shape) / torch.tensor(n).sqrt()
-        return input.view(X.shape)
+        if HADAMARD_NORMALIZED:
+            return input.view(X.shape) / torch.tensor(n).sqrt()
+        else:
+            return input.view(X.shape)
 
     @staticmethod
     def random_hadamard_matrix(size, device):
@@ -102,6 +107,8 @@ Bs_H = torch.einsum('bkn,rk->brn', Bs, Had)
 
 # then to matmul the rotated A/B
 O_H = torch.einsum('bmk,bkn->bmn', As_H, Bs_H)
+if not HADAMARD_NORMALIZED:
+    O_H = O_H/GEMM_K
 
 # below O/O_H should be the same
 print(O)
