@@ -26,9 +26,25 @@ using fp32x4 = __attribute__((__ext_vector_type__(4))) float;
 template<typename T>
 __device__ __forceinline__ T nt_load(const T& ref)
 {
+#ifdef __HIPCC__
     return __builtin_nontemporal_load(&ref);
+#else
+    return ref;
+#endif
 }
 #endif
+
+template<typename T>
+__device__  __forceinline__ void acc(T& v, const T& other)
+{
+    constexpr int vec = sizeof(T) / sizeof(float);
+    if constexpr(vec == 4) {
+        v.x += other.x;
+        v.y += other.y;
+        v.z += other.z;
+        v.w += other.w;
+    }
+}
 
 // simple memread kernel implementation, launch based on CU number
 template<typename T, int UNROLL = 8>
@@ -42,9 +58,9 @@ void memread_kernel(T* p_src, T* p_dst, int issues_per_block, int iters)
         #pragma unroll
         for(auto j = 0; j < UNROLL; j++) {
 #if USE_NT_LOAD
-            v += nt_load(p_src[current + offs]);
+            acc(v, nt_load(p_src[current + offs]));
 #else
-            v += p_src[current + offs];
+            acc(v, p_src[current + offs]);
 #endif
             offs += BLOCK_SIZE;
         }
@@ -52,7 +68,7 @@ void memread_kernel(T* p_src, T* p_dst, int issues_per_block, int iters)
 
     constexpr int vec = sizeof(T) / sizeof(float);
     if constexpr(vec == 4) {
-        if(v[0] == 10000 && v[1] == 10000 && v[2] == 10000 && v[3] == 10000)
+        if(v.x == 10000 && v.y == 10000 && v.z == 10000 && v.w == 10000)
             *p_dst  = v;
     }
 }
@@ -169,7 +185,7 @@ int run(int64_t dwords)
     };
     char str[64];
     b2s(dwords*sizeof(float), str);
-    printf("%9s -> %.3f(GB/s)\n", str, get_gbps(dwords, ms));
+    printf("%9s -> %.4fms, %.3f(GB/s)\n", str, ms, get_gbps(dwords, ms));
 
     free(h_A);
     free(h_B);
@@ -191,6 +207,7 @@ int main(int argc, char ** argv) {
             CALL(cudaGetDeviceProperties(&dev_prop,dev ));
             return dev_prop.multiProcessorCount;
         }();
+        printf("cu:%d\n", num_cu);
 
         int64_t dwords_list[] = {
             20000,
