@@ -212,10 +212,10 @@ int main(int argc, char ** argv) {
         int64_t dwords_list[] = {
             20000,
             400000,
-            117 * num_cu * BLOCK_SIZE,
-            217 * num_cu * BLOCK_SIZE,
-            477 * num_cu * BLOCK_SIZE,
-            819 * num_cu * BLOCK_SIZE,
+            116 * num_cu * BLOCK_SIZE,
+            212 * num_cu * BLOCK_SIZE,
+            476 * num_cu * BLOCK_SIZE,
+            820 * num_cu * BLOCK_SIZE,
             1638 * num_cu * BLOCK_SIZE,
             3276 * num_cu * BLOCK_SIZE,
             12032 * num_cu * BLOCK_SIZE};
