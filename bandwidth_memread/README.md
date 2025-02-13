@@ -1,8 +1,8 @@
 ## rocm
-make rocm && bench.sh
+make rocm
 
 ## cuda
-make cuda && bench.sh
+make cuda
 
 ## run
 ./bandwidth_kernel.exe
