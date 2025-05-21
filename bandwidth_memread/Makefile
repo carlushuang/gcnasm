@@ -5,4 +5,4 @@ cuda:
 rocm:
 	rm -rf bandwidth_kernel.cu.hip.cc bandwidth_kernel.exe
 	/opt/rocm/bin/hipify-perl bandwidth_kernel.cu > bandwidth_kernel.cu.hip.cc
-	/opt/rocm/bin/hipcc bandwidth_kernel.cu.hip.cc -std=c++17 -O3 --offload-arch=gfx942 -o bandwidth_kernel.exe
+	/opt/rocm/bin/hipcc bandwidth_kernel.cu.hip.cc -v --save-temps -Wno-gnu-line-marker -std=c++17 -O3 --offload-arch=gfx950 -o bandwidth_kernel.exe
