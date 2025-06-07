@@ -195,7 +195,7 @@ int run(int64_t dwords)
 }
 
 int main(int argc, char ** argv) {
-	CALL(cudaSetDevice(0));
+    CALL(cudaSetDevice(0));
     if(argc > 1){
         int64_t dwords = atoll(argv[1]);
         run(dwords);
@@ -212,13 +212,13 @@ int main(int argc, char ** argv) {
         int64_t dwords_list[] = {
             20000,
             400000,
-            116 * num_cu * BLOCK_SIZE,
-            212 * num_cu * BLOCK_SIZE,
-            476 * num_cu * BLOCK_SIZE,
-            820 * num_cu * BLOCK_SIZE,
-            1638 * num_cu * BLOCK_SIZE,
-            3276 * num_cu * BLOCK_SIZE,
-            12032 * num_cu * BLOCK_SIZE};
+            static_cast<int64_t>(116) * num_cu * BLOCK_SIZE,
+            static_cast<int64_t>(212) * num_cu * BLOCK_SIZE,
+            static_cast<int64_t>(476) * num_cu * BLOCK_SIZE,
+            static_cast<int64_t>(820) * num_cu * BLOCK_SIZE,
+            static_cast<int64_t>(1638) * num_cu * BLOCK_SIZE,
+            static_cast<int64_t>(3276) * num_cu * BLOCK_SIZE,
+            static_cast<int64_t>(12032) * num_cu * BLOCK_SIZE};
 
         int iters = sizeof(dwords_list) / sizeof(dwords_list[0]);
 
