@@ -1,6 +1,6 @@
 #!/bin/sh
 BUILD=build
-ARCH=gfx942
+ARCH=gfx950
 CXXCLAGS="-std=c++17 -O3 --offload-arch=$ARCH "
 
 # build a test
