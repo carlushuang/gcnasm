@@ -216,21 +216,31 @@ void oob_test_kernel(T* __restrict__ dst, const T* __restrict__ src) {
 template<typename T, index_t force_buffer_size = sizeof(T)>
 __global__
 void oob_test_kernel_async(T* __restrict__ dst, const T* __restrict__ src) {
-    static_assert(sizeof(T) == 4);
-    __shared__ float smem[256];
-    smem[threadIdx.x] = 9999.f;  // arbitrary large number
-    __builtin_amdgcn_s_barrier();
+    #ifdef __gfx950__
+        constexpr bool only_dwordx1 = false;
+    #else
+        constexpr bool only_dwordx1 = true; // earlier arch only support dwordx1
+    #endif
 
-    if(blockIdx.x == 0 && threadIdx.x == 0) {
-        llvm_amdgcn_raw_buffer_load_lds(make_buffer_resource(src, force_buffer_size), SPTR(smem), sizeof(uint32_t), threadIdx.x * sizeof(float), 0, 0, 0);
-
-        __builtin_amdgcn_s_waitcnt(0x0f70); // vmcnt(0)
+    if constexpr (!only_dwordx1 || sizeof(T) == 4) {
+        static_assert(sizeof(T) == 4 || sizeof(T) == 12 || sizeof(T) == 16);
+        __shared__ float smem[256];
+        smem[threadIdx.x] = 9999.f;  // arbitrary large number
         __builtin_amdgcn_s_barrier();
 
-        float d = smem[threadIdx.x];
+        if(blockIdx.x == 0 && threadIdx.x == 0) {
+            llvm_amdgcn_raw_buffer_load_lds(make_buffer_resource(src, force_buffer_size), SPTR(smem), sizeof(T), threadIdx.x * sizeof(T), 0, 0, 0);
 
-        reinterpret_cast<float*>(dst)[threadIdx.x] = d;
+            __builtin_amdgcn_s_waitcnt(0x0f70); // vmcnt(0)
+            __builtin_amdgcn_s_barrier();
+
+            for (int i = 0; i < sizeof(T) / sizeof(float); i++) {
+                float d = smem[threadIdx.x + i];
+                reinterpret_cast<float*>(dst)[threadIdx.x + i] = d;
+            }
+        }
     }
+
 }
 
 #define CALL(cmd) \
@@ -314,6 +324,27 @@ int main(int argc, char ** argv) {
     test_oob<4, 3, true>{}();
     test_oob<4, 2, true>{}();
     test_oob<4, 1, true>{}();
+
+    printf("buffer_load_dwordx4_async ------\n");
+    test_oob<16, 16, true>{}();
+    test_oob<16, 14, true>{}();
+    test_oob<16, 11, true>{}();
+    test_oob<16, 8, true>{}();
+    test_oob<16, 6, true>{}();
+    test_oob<16, 4, true>{}();
+    test_oob<16, 3, true>{}();
+    test_oob<16, 2, true>{}();
+    test_oob<16, 1, true>{}();
+
+    printf("buffer_load_dwordx3_async ------\n");
+    test_oob<12, 12, true>{}();
+    test_oob<12, 11, true>{}();
+    test_oob<12, 8, true>{}();
+    test_oob<12, 6, true>{}();
+    test_oob<12, 4, true>{}();
+    test_oob<12, 3, true>{}();
+    test_oob<12, 2, true>{}();
+    test_oob<12, 1, true>{}();
 
     printf("buffer_load_ushort ------\n");
     test_oob<2, 2>{}();
