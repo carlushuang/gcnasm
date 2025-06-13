@@ -296,7 +296,8 @@ int main(int argc, char ** argv) {
     bool is_gfx950 = [&](){
         hipDeviceProp_t prop;
         CALL(hipGetDeviceProperties(&prop, 0));
-        return (std::string(prop.gcnArchName).find("gfx50") != std::string::npos);
+        printf("%s\n", prop.gcnArchName);
+        return (std::string(prop.gcnArchName).find("gfx950") != std::string::npos);
     }();
 
     printf("buffer_load_dwordx4 ------\n");
@@ -325,6 +326,7 @@ int main(int argc, char ** argv) {
     test_oob<4, 1>{}();
 
     if (is_gfx950) {
+
         printf("buffer_load_dwordx4_async ------\n");
         test_oob<16, 16, true>{}();
         test_oob<16, 14, true>{}();
@@ -345,7 +347,8 @@ int main(int argc, char ** argv) {
         test_oob<12, 3, true>{}();
         test_oob<12, 2, true>{}();
         test_oob<12, 1, true>{}();
-
+#if 0
+        // there is no x2 variation
         printf("buffer_load_dwordx2_async ------\n");
         test_oob<8, 8, true>{}();
         test_oob<8, 7, true>{}();
@@ -355,6 +358,7 @@ int main(int argc, char ** argv) {
         test_oob<8, 3, true>{}();
         test_oob<8, 2, true>{}();
         test_oob<8, 1, true>{}();
+#endif
     }
 
     printf("buffer_load_dword_async ------\n");
