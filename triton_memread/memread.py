@@ -228,7 +228,16 @@ def perftest(
                         else None
                     ),
                 ) as prof:
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+
                     run_iters(1, graph.replay)
+
+                    end_event.record()
+                    end_event.synchronize()
+                    ns_ = start_event.elapsed_time(end_event) * 1e3 / num_iters
+                    print(f"avg: {ns_} us/iter with hipgraph(event)")
                 avg = get_trace_perf(prof, num_iters)
                 print(f"avg: {avg} us/iter with hipgraph")
             with tpf.profile(
