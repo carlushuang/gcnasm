@@ -230,12 +230,12 @@ void run()
 
     HIP_CALL(hipMemcpy(output, dev_o, sizeof(T) * lanegroup_size, hipMemcpyDeviceToHost));
 
-    printf("[origin]");
+    printf("[origin-%d]", lanegroup_size);
     for(int i = 0; i < lanegroup_size; i++) {
         printf("%.3f ", input[i]);
     }
     printf("\n");
-    printf("[sorted]");
+    printf("[sorted-%d]", lanegroup_size);
     for(int i = 0; i < lanegroup_size; i++) {
         printf("%.3f ", output[i]);
     }
