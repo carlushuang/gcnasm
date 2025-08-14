@@ -130,6 +130,98 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
         res8[5] = dev_max_(res8_5_tmp_r, res8_6_tmp);       \
         res8[6] = dev_min_(res8_5_tmp_r, res8_6_tmp);
 
+#define DPP_MERGE_16_()                                         \
+        using vec16_t = ck_tile::ext_vector_t<T, 16>;           \
+        vec16_t res16;                                          \
+        vec8_t res8_r;                                          \
+        /* only lane 0,1,2,3 contain valid data */              \
+        res8_r[0] = mov_dpp_(res8[0],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[1] = mov_dpp_(res8[1],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[2] = mov_dpp_(res8[2],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[3] = mov_dpp_(res8[3],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[4] = mov_dpp_(res8[4],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[5] = mov_dpp_(res8[5],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[6] = mov_dpp_(res8[6],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[7] = mov_dpp_(res8[7],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+                                                                                    \
+        res16[0]      = dev_max_(res8[0], res8_r[0]);       \
+        T res16_8_tmp = dev_min_(res8[0], res8_r[0]);       \
+                                                            \
+        T res16_1_tmp = dev_max_(res8[1], res8_r[1]);       \
+        T res16_9_tmp = dev_min_(res8[1], res8_r[1]);       \
+                                                            \
+        T res16_2_tmp  = dev_max_(res8[2], res8_r[2]);      \
+        T res16_10_tmp = dev_min_(res8[2], res8_r[2]);      \
+                                                            \
+        T res16_3_tmp  = dev_max_(res8[3], res8_r[3]);      \
+        T res16_11_tmp = dev_min_(res8[3], res8_r[3]);      \
+                                                            \
+        T res16_4_tmp  = dev_max_(res8[4], res8_r[4]);      \
+        T res16_12_tmp = dev_min_(res8[4], res8_r[4]);      \
+                                                            \
+        T res16_5_tmp  = dev_max_(res8[5], res8_r[5]);      \
+        T res16_13_tmp = dev_min_(res8[5], res8_r[5]);      \
+                                                            \
+        T res16_6_tmp  = dev_max_(res8[6], res8_r[6]);      \
+        T res16_14_tmp = dev_min_(res8[6], res8_r[6]);      \
+                                                            \
+        T res16_7_tmp  = dev_max_(res8[7], res8_r[7]);      \
+        res16[15]      = dev_min_(res8[7], res8_r[7]);      \
+                                                            \
+                                                            \
+        T res16_4_tmp_x = dev_max_(res16_4_tmp, res16_8_tmp);       \
+        T res16_8_tmp_x = dev_min_(res16_4_tmp, res16_8_tmp);       \
+                                                                    \
+        T res16_5_tmp_x = dev_max_(res16_5_tmp, res16_9_tmp);       \
+        T res16_9_tmp_x = dev_min_(res16_5_tmp, res16_9_tmp);       \
+                                                                    \
+        T res16_6_tmp_x  = dev_max_(res16_6_tmp, res16_10_tmp);     \
+        T res16_10_tmp_x = dev_min_(res16_6_tmp, res16_10_tmp);     \
+                                                                    \
+        T res16_7_tmp_x  = dev_max_(res16_7_tmp, res16_11_tmp);     \
+        T res16_11_tmp_x = dev_min_(res16_7_tmp, res16_11_tmp);     \
+                                                                    \
+                                                                    \
+        T res16_2_tmp_x  = dev_max_(res16_2_tmp, res16_4_tmp_x);    \
+        T res16_4_tmp_xx = dev_min_(res16_2_tmp, res16_4_tmp_x);    \
+                                                                    \
+        T res16_3_tmp_x  = dev_max_(res16_3_tmp, res16_5_tmp_x);    \
+        T res16_5_tmp_xx = dev_min_(res16_3_tmp, res16_5_tmp_x);    \
+                                                                    \
+        T res16_6_tmp_xx = dev_max_(res16_6_tmp_x, res16_8_tmp_x);  \
+        T res16_8_tmp_xx = dev_min_(res16_6_tmp_x, res16_8_tmp_x);  \
+                                                                    \
+        T res16_7_tmp_xx = dev_max_(res16_7_tmp_x, res16_9_tmp_x);  \
+        T res16_9_tmp_xx = dev_min_(res16_7_tmp_x, res16_9_tmp_x);  \
+                                                                    \
+        T res16_10_tmp_xx = dev_max_(res16_10_tmp_x, res16_12_tmp);  \
+        T res16_12_tmp_xx = dev_min_(res16_10_tmp_x, res16_12_tmp);  \
+                                                                     \
+        T res16_11_tmp_xx = dev_max_(res16_11_tmp_x, res16_13_tmp);  \
+        T res16_13_tmp_xx = dev_min_(res16_11_tmp_x, res16_13_tmp);  \
+                                                                    \
+        res16[1]  = dev_max_(res16_1_tmp, res16_2_tmp_x);           \
+        res16[2]  = dev_min_(res16_1_tmp, res16_2_tmp_x);           \
+                                                                    \
+        res16[3]  = dev_max_(res16_3_tmp_x, res16_4_tmp_xx);        \
+        res16[4]  = dev_min_(res16_3_tmp_x, res16_4_tmp_xx);        \
+                                                                    \
+        res16[5]  = dev_max_(res16_5_tmp_xx, res16_6_tmp_xx);       \
+        res16[6]  = dev_min_(res16_5_tmp_xx, res16_6_tmp_xx);       \
+                                                                    \
+        res16[7]  = dev_max_(res16_7_tmp_xx, res16_8_tmp_xx);       \
+        res16[8]  = dev_min_(res16_7_tmp_xx, res16_8_tmp_xx);       \
+                                                                    \
+        res16[9]  = dev_max_(res16_9_tmp_xx, res16_10_tmp_xx);      \
+        res16[10] = dev_min_(res16_9_tmp_xx, res16_10_tmp_xx);      \
+                                                                    \
+        res16[11] = dev_max_(res16_11_tmp_xx, res16_12_tmp_xx);     \
+        res16[12] = dev_min_(res16_11_tmp_xx, res16_12_tmp_xx);     \
+                                                                    \
+        res16[13] = dev_max_(res16_13_tmp_xx, res16_14_tmp);        \
+        res16[14] = dev_min_(res16_13_tmp_xx, res16_14_tmp);
+
+
     if constexpr (lanegroup_size == 2) {
         DPP_MERGE_2_();
 
@@ -147,7 +239,7 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
         DPP_MERGE_2_();
         DPP_MERGE_4_();
         DPP_MERGE_8_();
-        
+
         if(lane_id == 0) {
             union {
                 struct  {
@@ -160,10 +252,40 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
             reinterpret_cast<vec4_t*>(smem)[group_id * 2] = _tmp.x;
             reinterpret_cast<vec4_t*>(smem)[group_id * 2 + 1] = _tmp.y;
         }
+    } else if constexpr (lanegroup_size == 16) {
+        DPP_MERGE_2_();
+        DPP_MERGE_4_();
+        DPP_MERGE_8_();
+        DPP_MERGE_16_();
+
+        if(lane_id == 0) {
+#if 0
+            union {
+                struct {
+                    vec4_t x;
+                    vec4_t y;
+                    vec4_t z;
+                    vec4_t w;
+                };
+                vec16_t value;
+            } _tmp;
+            _tmp.value = res16;
+            reinterpret_cast<vec4_t*>(smem)[group_id * 4 + 0] = _tmp.x;
+            __syncthreads();
+            reinterpret_cast<vec4_t*>(smem)[group_id * 4 + 1] = _tmp.y;
+            __syncthreads();
+            reinterpret_cast<vec4_t*>(smem)[group_id * 4 + 2] = _tmp.z;
+            __syncthreads();
+            reinterpret_cast<vec4_t*>(smem)[group_id * 4 + 3] = _tmp.w;
+#else
+            reinterpret_cast<vec16_t*>(smem)[group_id] = res16;
+#endif
+        }
     }
 #undef DPP_MERGE_2_
 #undef DPP_MERGE_4_
 #undef DPP_MERGE_8_
+#undef DPP_MERGE_16_
 }
 
 template<typename T, int wave_size = 64, int lanegroup_size = 64>
@@ -241,7 +363,7 @@ void run()
     }
     printf("\n");
     bool is_ordered = check_ordered(output, lanegroup_size);
-    printf("--------------------- %s\n", is_ordered?"ordered":"non-order");
+    printf("-------------------------------------- %s\n", is_ordered?"ordered":"non-order");
 
     free(input);
     free(output);
@@ -255,5 +377,6 @@ int main(int argc, char ** argv)
     run<float, 64, 2>();
     run<float, 64, 4>();
     run<float, 64, 8>();
+    run<float, 64, 16>();
     // run<float, 64, 8>();
 }
