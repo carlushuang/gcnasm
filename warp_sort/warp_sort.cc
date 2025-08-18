@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <algorithm>
 #include <random>
 #include <iostream>
 #include <stdlib.h>
@@ -61,60 +62,92 @@ __device__ __inline__ float dev_min_<float>(const float&a, const float&b)
     return __builtin_fminf(a, b);
 }
 
-// https://en.wikipedia.org/wiki/Batcher_odd%E2%80%93even_mergesort
-// TODO: this is assuming descending order sort
-// result store to smem :)
-template <typename T, int lanegroup_size = 64>
-__device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile::number<lanegroup_size> = {})
-{
-    static_assert(sizeof(T) == 4);
-    int lane_id = threadIdx.x % lanegroup_size;
-    int group_id = threadIdx.x / lanegroup_size;
-
-#define DPP_MERGE_2_()                                  \
+#define DPP_MERGE_2_CMP_(x_, y_)                        \
     using vec2_t = ck_tile::ext_vector_t<T, 2>;         \
     vec2_t res2;                                        \
-    T remote_x = mov_dpp_(x, ck_tile::number<0xb1>{}); /*quad_perm:[1,0,3,2]*/  \
-    res2[0] = dev_max_(remote_x, x);    \
-    res2[1] = dev_min_(remote_x, x);
+    res2[0] = dev_max_(x_, y_);                         \
+    res2[1] = dev_min_(x_, y_);
 
-#define DPP_MERGE_4_()                              \
+#define DPP_MERGE_2_DPP_()                                  \
+    T res1_r = mov_dpp_(res1, ck_tile::number<0xb1>{}); /*quad_perm:[1,0,3,2]*/
+
+#define DPP_ARG_MERGE_2_CMP_(x_, y_, ax_, ay_)          \
+    using vec2_t = ck_tile::ext_vector_t<T, 2>;         \
+    using aec2_t = ck_tile::ext_vector_t<V, 2>;         \
+    vec2_t res2;                                        \
+    aec2_t arg2;                                        \
+    res2[0] = x_ > y_? x_ : y_;                         \
+    res2[1] = x_ > y_? y_ : x_;                         \
+    arg2[0] = x_ > y_? ax_ : ay_;                       \
+    arg2[1] = x_ > y_? ay_ : ax_;
+
+#define DPP_ARG_MERGE_2_DPP_()                          \
+    T res1_r = mov_dpp_(res1, ck_tile::number<0xb1>{}); /*quad_perm:[1,0,3,2]*/ \
+    V arg1_r = mov_dpp_(arg1, ck_tile::number<0xb1>{}); /*quad_perm:[1,0,3,2]*/
+
+#define DPP_MERGE_4_CMP_(x_, y_)                    \
     using vec4_t = ck_tile::ext_vector_t<T, 4>;     \
     vec4_t res4;                                    \
                                                     \
-    T m_0 = mov_dpp_(res2[0],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/    \
-    res4[0] = dev_max_(res2[0],  m_0);                                              \
-    T m_1 = dev_min_(res2[0],  m_0);                                                \
-                                                                                    \
-    T m_3 = mov_dpp_(res2[1],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/    \
-    T m_2 = dev_max_(res2[1],  m_3);                                                \
-    res4[3] = dev_min_(res2[1],  m_3);                                              \
-                                                                                    \
-    res4[1] = dev_max_(m_1, m_2);                                                   \
+    res4[0] = dev_max_(x_[0],  y_[0]);              \
+    T m_1 = dev_min_(x_[0],  y_[0]);                \
+                                                    \
+    T m_2 = dev_max_(x_[1],  y_[1]);                \
+    res4[3] = dev_min_(x_[1],  y_[1]);              \
+                                                    \
+    res4[1] = dev_max_(m_1, m_2);                   \
     res4[2] = dev_min_(m_1, m_2);
 
-#define DPP_MERGE_8_()                                  \
+#define DPP_MERGE_4_DPP_()                                  \
+    vec2_t res2_r;                                          \
+    res2_r[0] = mov_dpp_(res2[0],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/    \
+    res2_r[1] = mov_dpp_(res2[1],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/
+
+#define DPP_ARG_MERGE_4_CMP_(x_, y_, ax_, ay_)      \
+    using vec4_t = ck_tile::ext_vector_t<T, 4>;     \
+    using aec4_t = ck_tile::ext_vector_t<V, 4>;     \
+    vec4_t res4;                                    \
+    aec4_t arg4;                                    \
+                                                    \
+    res4[0] = x_[0] > y_[0] ? x_[0] : y_[0];        \
+    T m_1   = x_[0] > y_[0] ? y_[0] : x_[0];        \
+    arg4[0] = x_[0] > y_[0] ? ax_[0] : ay_[0];      \
+    V am_1  = x_[0] > y_[0] ? ay_[0] : ax_[0];      \
+                                                    \
+    T m_2 = x_[1] > y_[1] ? x_[1] : y_[1];          \
+    res4[3] = x_[1] > y_[1] ? y_[1] : x_[1];        \
+    V am_2 = x_[1] > y_[1] ? ax_[1] : ay_[1];       \
+    arg4[3] = x_[1] > y_[1] ? ay_[1] : ax_[1];      \
+                                                    \
+    res4[1] = m_1 > m_2 ? m_1 : m_2;                \
+    res4[2] = m_1 > m_2 ? m_2 : m_1;                \
+    arg4[1] = m_1 > m_2 ? am_1 : am_2;              \
+    arg4[2] = m_1 > m_2 ? am_2 : am_1;
+
+#define DPP_ARG_MERGE_4_DPP_()                              \
+    vec2_t res2_r;                                          \
+    aec2_t arg2_r;                                          \
+    res2_r[0] = mov_dpp_(res2[0],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/    \
+    res2_r[1] = mov_dpp_(res2[1],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/    \
+    arg2_r[0] = mov_dpp_(arg2[0],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/    \
+    arg2_r[1] = mov_dpp_(arg2[1],  ck_tile::number<0x4e>{}); /*quad_perm:[2,3,0,1]*/
+
+#define DPP_MERGE_8_CMP_(x_, y_)                            \
         using vec8_t = ck_tile::ext_vector_t<T, 8>;     \
         vec8_t res8;                                    \
-        vec4_t res4_r;                                  \
                                                         \
-        /* only lane 0,1,2,3 contain valid data */      \
-        res4_r[0] = mov_dpp_(res4[0],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
-        res4_r[1] = mov_dpp_(res4[1],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
-        res4_r[2] = mov_dpp_(res4[2],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
-        res4_r[3] = mov_dpp_(res4[3],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
-        res8[0]      = dev_max_(res4[0], res4_r[0]);    \
-        T res8_4_tmp = dev_min_(res4[0], res4_r[0]);    \
-                                                        \
-        T res8_1_tmp = dev_max_(res4[1], res4_r[1]);    \
-        T res8_5_tmp = dev_min_(res4[1], res4_r[1]);    \
-                                                        \
-        T res8_2_tmp = dev_max_(res4[2], res4_r[2]);    \
-        T res8_6_tmp = dev_min_(res4[2], res4_r[2]);    \
-                                                        \
-        T res8_3_tmp = dev_max_(res4[3], res4_r[3]);    \
-        res8[7]      = dev_min_(res4[3], res4_r[3]);    \
-                                                        \
+        res8[0]      = dev_max_(x_[0], y_[0]);      \
+        T res8_4_tmp = dev_min_(x_[0], y_[0]);      \
+                                                    \
+        T res8_1_tmp = dev_max_(x_[1], y_[1]);      \
+        T res8_5_tmp = dev_min_(x_[1], y_[1]);      \
+                                                    \
+        T res8_2_tmp = dev_max_(x_[2], y_[2]);      \
+        T res8_6_tmp = dev_min_(x_[2], y_[2]);      \
+                                                    \
+        T res8_3_tmp = dev_max_(x_[3], y_[3]);      \
+        res8[7]      = dev_min_(x_[3], y_[3]);      \
+                                                            \
         T res8_2_tmp_r = dev_max_(res8_2_tmp, res8_4_tmp);  \
         T res8_4_tmp_r = dev_min_(res8_2_tmp, res8_4_tmp);  \
                                                             \
@@ -130,43 +163,107 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
         res8[5] = dev_max_(res8_5_tmp_r, res8_6_tmp);       \
         res8[6] = dev_min_(res8_5_tmp_r, res8_6_tmp);
 
-#define DPP_MERGE_16_()                                         \
-        using vec16_t = ck_tile::ext_vector_t<T, 16>;           \
-        vec16_t res16;                                          \
-        vec8_t res8_r;                                          \
-        /* only lane 0,1,2,3 contain valid data */              \
-        res8_r[0] = mov_dpp_(res8[0],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-        res8_r[1] = mov_dpp_(res8[1],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-        res8_r[2] = mov_dpp_(res8[2],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-        res8_r[3] = mov_dpp_(res8[3],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-        res8_r[4] = mov_dpp_(res8[4],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-        res8_r[5] = mov_dpp_(res8[5],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-        res8_r[6] = mov_dpp_(res8[6],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-        res8_r[7] = mov_dpp_(res8[7],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
-                                                                                    \
-        res16[0]      = dev_max_(res8[0], res8_r[0]);       \
-        T res16_8_tmp = dev_min_(res8[0], res8_r[0]);       \
+#define DPP_MERGE_8_DPP_()                              \
+        vec4_t res4_r;                                  \
+                                                        \
+        /* only lane 0,1,2,3 contain valid data */      \
+        res4_r[0] = mov_dpp_(res4[0],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        res4_r[1] = mov_dpp_(res4[1],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        res4_r[2] = mov_dpp_(res4[2],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        res4_r[3] = mov_dpp_(res4[3],  ck_tile::number<0x104>{}); /* row_shl:4 */
+
+#define DPP_ARG_MERGE_8_CMP_(x_, y_, ax_, ay_)              \
+        using vec8_t = ck_tile::ext_vector_t<T, 8>;         \
+        using aec8_t = ck_tile::ext_vector_t<V, 8>;         \
+        vec8_t res8;                                        \
+        aec8_t arg8;                                        \
                                                             \
-        T res16_1_tmp = dev_max_(res8[1], res8_r[1]);       \
-        T res16_9_tmp = dev_min_(res8[1], res8_r[1]);       \
+        res8[0]      = x_[0] > y_[0] ? x_[0] : y_[0];       \
+        T res8_4_tmp = x_[0] > y_[0] ? y_[0] : x_[0];       \
+        arg8[0]      = x_[0] > y_[0] ? ax_[0] : ay_[0];     \
+        V arg8_4_tmp = x_[0] > y_[0] ? ay_[0] : ax_[0];     \
                                                             \
-        T res16_2_tmp  = dev_max_(res8[2], res8_r[2]);      \
-        T res16_10_tmp = dev_min_(res8[2], res8_r[2]);      \
+        T res8_1_tmp = x_[1] > y_[1] ? x_[1] : y_[1];       \
+        T res8_5_tmp = x_[1] > y_[1] ? y_[1] : x_[1];       \
+        V arg8_1_tmp = x_[1] > y_[1] ? ax_[1] : ay_[1];     \
+        V arg8_5_tmp = x_[1] > y_[1] ? ay_[1] : ax_[1];     \
                                                             \
-        T res16_3_tmp  = dev_max_(res8[3], res8_r[3]);      \
-        T res16_11_tmp = dev_min_(res8[3], res8_r[3]);      \
+        T res8_2_tmp = x_[2] > y_[2] ? x_[2] : y_[2];       \
+        T res8_6_tmp = x_[2] > y_[2] ? y_[2] : x_[2];       \
+        V arg8_2_tmp = x_[2] > y_[2] ? ax_[2] : ay_[2];     \
+        V arg8_6_tmp = x_[2] > y_[2] ? ay_[2] : ax_[2];     \
                                                             \
-        T res16_4_tmp  = dev_max_(res8[4], res8_r[4]);      \
-        T res16_12_tmp = dev_min_(res8[4], res8_r[4]);      \
+        T res8_3_tmp = x_[3] > y_[3] ? x_[3] : y_[3];       \
+        res8[7]      = x_[3] > y_[3] ? y_[3] : x_[3];       \
+        V arg8_3_tmp = x_[3] > y_[3] ? ax_[3] : ay_[3];     \
+        arg8[7]      = x_[3] > y_[3] ? ay_[3] : ax_[3];     \
                                                             \
-        T res16_5_tmp  = dev_max_(res8[5], res8_r[5]);      \
-        T res16_13_tmp = dev_min_(res8[5], res8_r[5]);      \
+        T res8_2_tmp_r = res8_2_tmp > res8_4_tmp ? res8_2_tmp :res8_4_tmp;  \
+        T res8_4_tmp_r = res8_2_tmp > res8_4_tmp ? res8_4_tmp :res8_2_tmp;  \
+        V arg8_2_tmp_r = res8_2_tmp > res8_4_tmp ? arg8_2_tmp :arg8_4_tmp;  \
+        V arg8_4_tmp_r = res8_2_tmp > res8_4_tmp ? arg8_4_tmp :arg8_2_tmp;  \
+                                                                            \
+        T res8_3_tmp_r = res8_3_tmp > res8_5_tmp ? res8_3_tmp : res8_5_tmp; \
+        T res8_5_tmp_r = res8_3_tmp > res8_5_tmp ? res8_5_tmp : res8_3_tmp; \
+        V arg8_3_tmp_r = res8_3_tmp > res8_5_tmp ? arg8_3_tmp : arg8_5_tmp; \
+        V arg8_5_tmp_r = res8_3_tmp > res8_5_tmp ? arg8_5_tmp : arg8_3_tmp; \
+                                                                            \
+        res8[1] = res8_1_tmp > res8_2_tmp_r ? res8_1_tmp : res8_2_tmp_r;  \
+        res8[2] = res8_1_tmp > res8_2_tmp_r ? res8_2_tmp_r : res8_1_tmp;  \
+        arg8[1] = res8_1_tmp > res8_2_tmp_r ? arg8_1_tmp : arg8_2_tmp_r;  \
+        arg8[2] = res8_1_tmp > res8_2_tmp_r ? arg8_2_tmp_r : arg8_1_tmp;  \
                                                             \
-        T res16_6_tmp  = dev_max_(res8[6], res8_r[6]);      \
-        T res16_14_tmp = dev_min_(res8[6], res8_r[6]);      \
+        res8[3] = res8_3_tmp_r > res8_4_tmp_r ? res8_3_tmp_r : res8_4_tmp_r;  \
+        res8[4] = res8_3_tmp_r > res8_4_tmp_r ? res8_4_tmp_r : res8_3_tmp_r;  \
+        arg8[3] = res8_3_tmp_r > res8_4_tmp_r ? arg8_3_tmp_r : arg8_4_tmp_r;  \
+        arg8[4] = res8_3_tmp_r > res8_4_tmp_r ? arg8_4_tmp_r : arg8_3_tmp_r;  \
                                                             \
-        T res16_7_tmp  = dev_max_(res8[7], res8_r[7]);      \
-        res16[15]      = dev_min_(res8[7], res8_r[7]);      \
+        res8[5] = res8_5_tmp_r > res8_6_tmp ? res8_5_tmp_r: res8_6_tmp;    \
+        res8[6] = res8_5_tmp_r > res8_6_tmp ? res8_6_tmp: res8_5_tmp_r;    \
+        arg8[5] = res8_5_tmp_r > res8_6_tmp ? arg8_5_tmp_r: arg8_6_tmp;    \
+        arg8[6] = res8_5_tmp_r > res8_6_tmp ? arg8_6_tmp: arg8_5_tmp_r; 
+
+#define DPP_ARG_MERGE_8_DPP_()                          \
+        vec4_t res4_r;                                  \
+        aec4_t arg4_r;                                  \
+                                                        \
+        /* only lane 0,1,2,3 contain valid data */      \
+        res4_r[0] = mov_dpp_(res4[0],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        res4_r[1] = mov_dpp_(res4[1],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        res4_r[2] = mov_dpp_(res4[2],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        res4_r[3] = mov_dpp_(res4[3],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        arg4_r[0] = mov_dpp_(arg4[0],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        arg4_r[1] = mov_dpp_(arg4[1],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        arg4_r[2] = mov_dpp_(arg4[2],  ck_tile::number<0x104>{}); /* row_shl:4 */ \
+        arg4_r[3] = mov_dpp_(arg4[3],  ck_tile::number<0x104>{}); /* row_shl:4 */
+
+#define DPP_MERGE_16_CMP_(x_, y_)                               \
+        using vec16_t = ck_tile::ext_vector_t<T, 16>;       \
+        vec16_t res16;                                      \
+                                                        \
+        res16[0]      = dev_max_(x_[0], y_[0]);         \
+        T res16_8_tmp = dev_min_(x_[0], y_[0]);         \
+                                                        \
+        T res16_1_tmp = dev_max_(x_[1], y_[1]);         \
+        T res16_9_tmp = dev_min_(x_[1], y_[1]);         \
+                                                        \
+        T res16_2_tmp  = dev_max_(x_[2], y_[2]);        \
+        T res16_10_tmp = dev_min_(x_[2], y_[2]);        \
+                                                        \
+        T res16_3_tmp  = dev_max_(x_[3], y_[3]);        \
+        T res16_11_tmp = dev_min_(x_[3], y_[3]);        \
+                                                        \
+        T res16_4_tmp  = dev_max_(x_[4], y_[4]);        \
+        T res16_12_tmp = dev_min_(x_[4], y_[4]);        \
+                                                        \
+        T res16_5_tmp  = dev_max_(x_[5], y_[5]);        \
+        T res16_13_tmp = dev_min_(x_[5], y_[5]);        \
+                                                        \
+        T res16_6_tmp  = dev_max_(x_[6], y_[6]);        \
+        T res16_14_tmp = dev_min_(x_[6], y_[6]);        \
+                                                        \
+        T res16_7_tmp  = dev_max_(x_[7], y_[7]);        \
+        res16[15]      = dev_min_(x_[7], y_[7]);        \
                                                             \
                                                             \
         T res16_4_tmp_x = dev_max_(res16_4_tmp, res16_8_tmp);       \
@@ -221,24 +318,52 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
         res16[13] = dev_max_(res16_13_tmp_xx, res16_14_tmp);        \
         res16[14] = dev_min_(res16_13_tmp_xx, res16_14_tmp);
 
+#define DPP_MERGE_16_DPP_()                                         \
+        vec8_t res8_r;                                          \
+        /* only lane 0,1,2,3 contain valid data */              \
+        res8_r[0] = mov_dpp_(res8[0],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[1] = mov_dpp_(res8[1],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[2] = mov_dpp_(res8[2],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[3] = mov_dpp_(res8[3],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[4] = mov_dpp_(res8[4],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[5] = mov_dpp_(res8[5],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[6] = mov_dpp_(res8[6],  ck_tile::number<0x108>{}); /* row_shl:8 */   \
+        res8_r[7] = mov_dpp_(res8[7],  ck_tile::number<0x108>{}); /* row_shl:8 */
+
+// https://en.wikipedia.org/wiki/Batcher_odd%E2%80%93even_mergesort
+// TODO: this is assuming descending order sort
+// result store to smem :)
+template <typename T, int lanegroup_size = ck_tile::get_warp_size()>
+__device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile::number<lanegroup_size> = {})
+{
+    static_assert(sizeof(T) == 4);
+    int lane_id = threadIdx.x % lanegroup_size;
+    int group_id = threadIdx.x / lanegroup_size;
+    T res1 = x;
 
     if constexpr (lanegroup_size == 2) {
-        DPP_MERGE_2_();
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
 
         if(lane_id == 0) {
             reinterpret_cast<vec2_t*>(smem)[group_id] = res2;
         }
     } else if constexpr (lanegroup_size == 4) {
-        DPP_MERGE_2_();
-        DPP_MERGE_4_();
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_4_DPP_();
+        DPP_MERGE_4_CMP_(res2, res2_r);
 
         if(lane_id == 0) {
             reinterpret_cast<vec4_t*>(smem)[group_id] = res4;
         }
     } else if constexpr (lanegroup_size == 8) {
-        DPP_MERGE_2_();
-        DPP_MERGE_4_();
-        DPP_MERGE_8_();
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_4_DPP_();
+        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_8_DPP_();
+        DPP_MERGE_8_CMP_(res4, res4_r);
 
         if(lane_id == 0) {
             union {
@@ -253,10 +378,14 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
             reinterpret_cast<vec4_t*>(smem)[group_id * 2 + 1] = _tmp.y;
         }
     } else if constexpr (lanegroup_size == 16) {
-        DPP_MERGE_2_();
-        DPP_MERGE_4_();
-        DPP_MERGE_8_();
-        DPP_MERGE_16_();
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_4_DPP_();
+        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_8_DPP_();
+        DPP_MERGE_8_CMP_(res4, res4_r);
+        DPP_MERGE_16_DPP_();
+        DPP_MERGE_16_CMP_(res8, res8_r);
 
         if(lane_id == 0) {
 #if 0
@@ -282,14 +411,112 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
 #endif
         }
     }
-#undef DPP_MERGE_2_
-#undef DPP_MERGE_4_
-#undef DPP_MERGE_8_
-#undef DPP_MERGE_16_
 }
 
+template <typename T, int lanegroup_size = ck_tile::get_warp_size()>
+__device__ __inline__ auto warp_merge_sort_to_reg(const T& x, ck_tile::number<lanegroup_size> = {})
+{
+    static_assert(sizeof(T) == 4);
+    T res1 = x;
+
+    if constexpr (lanegroup_size == 2) {
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        return res2;
+    } else if constexpr (lanegroup_size == 4) {
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_4_DPP_();
+        DPP_MERGE_4_CMP_(res2, res2_r);
+        return res4;
+    } else if constexpr (lanegroup_size == 8) {
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_4_DPP_();
+        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_8_DPP_();
+        DPP_MERGE_8_CMP_(res4, res4_r);
+        // TODO: only lane:1,2,3,4 within 8 lanes does not have correct result !
+        return res8;
+    } else if constexpr (lanegroup_size == 16) {
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_4_DPP_();
+        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_8_DPP_();
+        DPP_MERGE_8_CMP_(res4, res4_r);
+        DPP_MERGE_16_DPP_();
+        DPP_MERGE_16_CMP_(res8, res8_r);
+        // TODO: only lane:1,2,3,4 within 16 lanes does not have correct result !
+        return res16;
+    } else {
+        return 0;
+    }
+}
+
+// sort based on x, and sort v
+template <typename T, typename V, int lanegroup_size = ck_tile::get_warp_size()>
+__device__ __inline__ auto warp_arg_merge_sort_to_reg(const T& x, const V& v, ck_tile::number<lanegroup_size> = {})
+{
+    static_assert(sizeof(T) == 4);
+    T res1 = x;
+    V arg1 = v;
+
+    if constexpr (lanegroup_size == 2) {
+        DPP_ARG_MERGE_2_DPP_();
+        DPP_ARG_MERGE_2_CMP_(res1, res1_r, arg1, arg1_r);
+        return ck_tile::make_tuple(res2, arg2);
+    } else if constexpr (lanegroup_size == 4) {
+        DPP_ARG_MERGE_2_DPP_();
+        DPP_ARG_MERGE_2_CMP_(res1, res1_r, arg1, arg1_r);
+        DPP_ARG_MERGE_4_DPP_();
+        DPP_ARG_MERGE_4_CMP_(res2, res2_r, arg2, arg2_r);
+        return ck_tile::make_tuple(res4, arg4);
+    } else if constexpr (lanegroup_size == 8) {
+        DPP_ARG_MERGE_2_DPP_();
+        DPP_ARG_MERGE_2_CMP_(res1, res1_r, arg1, arg1_r);
+        DPP_ARG_MERGE_4_DPP_();
+        DPP_ARG_MERGE_4_CMP_(res2, res2_r, arg2, arg2_r);
+        DPP_ARG_MERGE_8_DPP_();
+        DPP_ARG_MERGE_8_CMP_(res4, res4_r, arg4, arg4_r);
+        // TODO: only lane:1,2,3,4 within 8 lanes does not have correct result !
+        return ck_tile::make_tuple(res8, arg8);
+    }
+#if 0
+    else if constexpr (lanegroup_size == 16) {
+        DPP_MERGE_2_DPP_();
+        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_4_DPP_();
+        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_8_DPP_();
+        DPP_MERGE_8_CMP_(res4, res4_r);
+        DPP_MERGE_16_DPP_();
+        DPP_MERGE_16_CMP_(res8, res8_r);
+        // TODO: only lane:1,2,3,4 within 16 lanes does not have correct result !
+        return res16;
+    } else {
+        return 0;
+    }
+#endif
+}
+
+#undef DPP_MERGE_2_DPP_
+#undef DPP_MERGE_2_CMP_
+#undef DPP_MERGE_4_DPP_
+#undef DPP_MERGE_4_CMP_
+#undef DPP_MERGE_8_DPP_
+#undef DPP_MERGE_8_CMP_
+#undef DPP_MERGE_16_DPP_
+#undef DPP_MERGE_16_CMP_
+#undef DPP_ARG_MERGE_2_DPP_
+#undef DPP_ARG_MERGE_2_CMP_
+#undef DPP_ARG_MERGE_4_DPP_
+#undef DPP_ARG_MERGE_4_CMP_
+#undef DPP_ARG_MERGE_8_DPP_
+#undef DPP_ARG_MERGE_8_CMP_
+
 template<typename T, int wave_size = 64, int lanegroup_size = 64>
-__global__ void warp_sort_kernel(T* i_ptr, T* o_ptr)
+__global__ void warp_sort_kernel_smem(T* i_ptr, T* o_ptr)
 {
     __shared__ T smem[wave_size / lanegroup_size];
     T data = -INFINITY;
@@ -305,6 +532,65 @@ __global__ void warp_sort_kernel(T* i_ptr, T* o_ptr)
 
     if(threadIdx.x < lanegroup_size) {
         o_ptr[threadIdx.x] = sorted;
+    }
+}
+
+template<typename T, int wave_size = 64, int lanegroup_size = 64>
+__global__ void warp_sort_kernel_reg(T* i_ptr, T* o_ptr)
+{
+    T data = -INFINITY;
+    if(threadIdx.x < lanegroup_size) {
+        data = i_ptr[threadIdx.x];
+    }
+
+    auto res = warp_merge_sort_to_reg(data, ck_tile::number<lanegroup_size>{});
+    if(threadIdx.x == 0) {
+        using final_vec_t = ck_tile::ext_vector_t<T, lanegroup_size>;
+        * reinterpret_cast<final_vec_t*>(o_ptr) = res;
+    }
+}
+#if 0
+template<typename T, typename V, int wave_size = 64, int lanegroup_size = 64>
+__global__ void warp_arg_sort_kernel_smem(T* i_ptr, V* ai_ptr, T* o_ptr, T* ao_ptr)
+{
+    __shared__ T smem[2 * wave_size / lanegroup_size];
+    T data = -INFINITY;
+    V valu = 0;
+    if(threadIdx.x < lanegroup_size) {
+        data = i_ptr[threadIdx.x];
+        valu = ai_ptr[threadIdx.x];
+    }
+
+    warp_arg_merge_sort_to_smem(smem, data, valu, ck_tile::number<lanegroup_size>{});
+
+    __syncthreads();
+
+    T sorted = smem[threadIdx.x];   // ignore out-of-bound check
+    V asorted = smem[lanegroup_size + threadIdx.x]
+
+    if(threadIdx.x < lanegroup_size) {
+        o_ptr[threadIdx.x] = sorted;
+        ao_Ptr[threadIdx.x] = asorted;
+    }
+}
+#endif
+
+template<typename T, typename V, int wave_size = 64, int lanegroup_size = 64>
+__global__ void warp_arg_sort_kernel_reg(T* i_ptr, V* ai_ptr, T* o_ptr, V* ao_ptr)
+{
+    T data = -INFINITY;
+    V valu = 0;
+    if(threadIdx.x < lanegroup_size) {
+        data = i_ptr[threadIdx.x];
+        valu = ai_ptr[threadIdx.x];
+    }
+
+    auto [res, arg] = warp_arg_merge_sort_to_reg(data, valu, ck_tile::number<lanegroup_size>{});
+    if(threadIdx.x == 0) {
+        using final_vec_t = ck_tile::ext_vector_t<T, lanegroup_size>;
+        using final_arg_t = ck_tile::ext_vector_t<V, lanegroup_size>;
+        *reinterpret_cast<final_vec_t*>(o_ptr) = res;
+        *reinterpret_cast<final_arg_t*>(ao_ptr) = arg;
     }
 }
 
@@ -330,53 +616,117 @@ static inline bool check_ordered(float* vec, int len) {
     return rtn;
 }
 
-template<typename T, int wave_size = 64, int lanegroup_size = 64>
+template<typename T, typename V, int kid, int wave_size = 64, int lanegroup_size = 64>
 void run()
 {
     T * input = reinterpret_cast<T*>(malloc(sizeof(T) * lanegroup_size));
     T * output = reinterpret_cast<T*>(malloc(sizeof(T) * lanegroup_size));
+    V * ai     = reinterpret_cast<V*>(malloc(sizeof(V) * lanegroup_size));
+    V * ao    = reinterpret_cast<V*>(malloc(sizeof(V) * lanegroup_size));
 
     T *dev_i, *dev_o;
+    V * dev_ai, *dev_ao;
 
     HIP_CALL(hipMalloc(&dev_i, sizeof(T) * lanegroup_size));
     HIP_CALL(hipMalloc(&dev_o, sizeof(T) * lanegroup_size));
+    HIP_CALL(hipMalloc(&dev_ai, sizeof(V) * lanegroup_size));
+    HIP_CALL(hipMalloc(&dev_ao, sizeof(V) * lanegroup_size));
 
     rand_vector(input, lanegroup_size);
+    for(int i = 0; i < lanegroup_size; i++) {
+        ai[i] = static_cast<V>(i);
+    }
 
     HIP_CALL(hipMemcpy(dev_i, input, sizeof(T) * lanegroup_size, hipMemcpyHostToDevice));
+    HIP_CALL(hipMemcpy(dev_ai, ai, sizeof(V) * lanegroup_size, hipMemcpyHostToDevice));
 
     auto gx = dim3(1);
     auto bx = dim3(wave_size);
 
-    warp_sort_kernel<T, wave_size, lanegroup_size><<<gx, bx>>>(dev_i, dev_o);
+    if constexpr(kid == 0)
+        warp_sort_kernel_smem<T, wave_size, lanegroup_size><<<gx, bx>>>(dev_i, dev_o);
+    else if constexpr(kid == 1)
+        warp_sort_kernel_reg<T, wave_size, lanegroup_size><<<gx, bx>>>(dev_i, dev_o);
+
+    else if constexpr(kid == 3)
+        warp_arg_sort_kernel_reg<T, V, wave_size, lanegroup_size><<<gx, bx>>>(dev_i, dev_ai, dev_o, dev_ao);
 
     HIP_CALL(hipMemcpy(output, dev_o, sizeof(T) * lanegroup_size, hipMemcpyDeviceToHost));
 
-    printf("[origin-%d]", lanegroup_size);
+    printf("[k%d|origin-%d]", kid, lanegroup_size);
     for(int i = 0; i < lanegroup_size; i++) {
         printf("%.3f ", input[i]);
     }
     printf("\n");
-    printf("[sorted-%d]", lanegroup_size);
+    printf("[k%d|sorted-%d]", kid, lanegroup_size);
     for(int i = 0; i < lanegroup_size; i++) {
         printf("%.3f ", output[i]);
     }
     printf("\n");
+    if constexpr (kid == 2 || kid == 3) {
+        HIP_CALL(hipMemcpy(ao, dev_ao, sizeof(V) * lanegroup_size, hipMemcpyDeviceToHost));
+        printf("         ");
+        for(int i = 0; i < lanegroup_size; i++) {
+            printf("%5d ", ao[i]);
+        }
+        printf("\n");
+        {
+            struct bundle_type {
+                T x;
+                V v;
+            };
+
+            std::vector<bundle_type> arg_vec;
+            for(int i =0 ; i < lanegroup_size; i++) {
+                arg_vec.push_back({input[i], ai[i] });
+            }
+            std::sort(arg_vec.begin(), arg_vec.end(), [&](auto a, auto b){return a.x > b.x; });
+
+            bool index_valid = [&] (){
+                bool r_ = true;
+                for(int i = 0; i < lanegroup_size; i++) {
+                    if(arg_vec[i].v != ao[i])
+                        r_ &= false;
+                }
+                return r_;
+            }();
+            printf("         ");
+            for(int i = 0; i < lanegroup_size; i++) {
+                printf("%5d ", arg_vec[i].v);
+            }
+            printf("%s", index_valid ? "[y]" : "[n]");
+            printf("\n");
+        }
+    }
     bool is_ordered = check_ordered(output, lanegroup_size);
     printf("-------------------------------------- %s\n", is_ordered?"ordered":"non-order");
 
     free(input);
     free(output);
+    free(ai);
+    free(ao);
 
     HIP_CALL(hipFree(dev_i));
     HIP_CALL(hipFree(dev_o));
+    HIP_CALL(hipFree(dev_ai));
+    HIP_CALL(hipFree(dev_ao));
 }
 
 int main(int argc, char ** argv)
 {
-    run<float, 64, 2>();
-    run<float, 64, 4>();
-    run<float, 64, 8>();
-    run<float, 64, 16>();
+    run<float, int, 0, 64, 2>();
+    run<float, int, 0, 64, 4>();
+    run<float, int, 0, 64, 8>();
+    run<float, int, 0, 64, 16>();
+
+    run<float, int, 1, 64, 2>();
+    run<float, int, 1, 64, 4>();
+    run<float, int, 1, 64, 8>();
+    run<float, int, 1, 64, 16>();
+
+    run<float, int, 3, 64, 2>();
+    run<float, int, 3, 64, 4>();
+    run<float, int, 3, 64, 8>();
+    //run<float, int, 3, 64, 16>();
     // run<float, 64, 8>();
 }
