@@ -806,7 +806,6 @@ void run()
 
     HIP_CALL(hipMemcpy(output, dev_o, sizeof(T) * lanegroup_size, hipMemcpyDeviceToHost));
 
-    printf("-----------------------------------------------------\n");
     printf("[k%d|origin-%d]", kid, lanegroup_size);
     for(int i = 0; i < lanegroup_size; i++) {
         printf("%.3f ", input[i]);
@@ -868,16 +867,19 @@ void run()
 
 int main(int argc, char ** argv)
 {
+    printf("[TEST SORT TO SMEM]___________________________________________\n");
     run<float, int, 0, 64, 2>();
     run<float, int, 0, 64, 4>();
     run<float, int, 0, 64, 8>();
     run<float, int, 0, 64, 16>();
 
+    printf("[TEST SORT TO REG]____________________________________________\n");
     run<float, int, 1, 64, 2>();
     run<float, int, 1, 64, 4>();
     run<float, int, 1, 64, 8>();
     run<float, int, 1, 64, 16>();
 
+    printf("[TEST ARG SORT TO REG]________________________________________\n");
     run<float, int, 3, 64, 2>();
     run<float, int, 3, 64, 4>();
     run<float, int, 3, 64, 8>();
