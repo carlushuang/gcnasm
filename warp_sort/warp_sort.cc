@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <numeric>
+#include <list>
 #include "ck_tile/core.hpp"
 
 
@@ -497,27 +498,27 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
 
     if constexpr (lanegroup_size == 2) {
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
 
         if(lane_id == 0) {
             reinterpret_cast<vec2_t*>(smem)[group_id] = res2;
         }
     } else if constexpr (lanegroup_size == 4) {
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
-        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_4_CMP_(res2_r, res2);
 
         if(lane_id == 0) {
             reinterpret_cast<vec4_t*>(smem)[group_id] = res4;
         }
     } else if constexpr (lanegroup_size == 8) {
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
-        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_4_CMP_(res2_r, res2);
         DPP_MERGE_8_DPP_();
-        DPP_MERGE_8_CMP_(res4, res4_r);
+        DPP_MERGE_8_CMP_(res4_r, res4);
 
         if(lane_id == 0) {
             union {
@@ -533,13 +534,13 @@ __device__ __inline__ void warp_merge_sort_to_smem(T* smem, const T& x, ck_tile:
         }
     } else if constexpr (lanegroup_size == 16) {
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
-        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_4_CMP_(res2_r, res2);
         DPP_MERGE_8_DPP_();
-        DPP_MERGE_8_CMP_(res4, res4_r);
+        DPP_MERGE_8_CMP_(res4_r, res4);
         DPP_MERGE_16_DPP_();
-        DPP_MERGE_16_CMP_(res8, res8_r);
+        DPP_MERGE_16_CMP_(res8_r, res8);
 
         if(lane_id == 0) {
 #if 0
@@ -579,28 +580,28 @@ __device__ __inline__ auto warp_merge_sort_to_reg(const T& x, ck_tile::number<la
         return res2;
     } else if constexpr (lanegroup_size == 4) {
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
-        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_4_CMP_(res2_r, res2);
         return res4;
     } else if constexpr (lanegroup_size == 8) {
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
-        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_4_CMP_(res2_r, res2);
         DPP_MERGE_8_DPP_();
-        DPP_MERGE_8_CMP_(res4, res4_r);
+        DPP_MERGE_8_CMP_(res4_r, res4);
         // TODO: only lane:1,2,3,4 within 8 lanes does not have correct result !
         return res8;
     } else if constexpr (lanegroup_size == 16) {
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
-        DPP_MERGE_4_CMP_(res2, res2_r);
+        DPP_MERGE_4_CMP_(res2_r, res2);
         DPP_MERGE_8_DPP_();
-        DPP_MERGE_8_CMP_(res4, res4_r);
+        DPP_MERGE_8_CMP_(res4_r, res4);
         DPP_MERGE_16_DPP_();
-        DPP_MERGE_16_CMP_(res8, res8_r);
+        DPP_MERGE_16_CMP_(res8_r, res8);
         // TODO: only lane:1,2,3,4 within 16 lanes does not have correct result !
         return res16;
     } else {
@@ -618,32 +619,32 @@ __device__ __inline__ auto warp_arg_merge_sort_to_reg(const T& x, const V& v, ck
 
     if constexpr (lanegroup_size == 2) {
         DPP_ARG_MERGE_2_DPP_();
-        DPP_ARG_MERGE_2_CMP_(res1, res1_r, arg1, arg1_r);
+        DPP_ARG_MERGE_2_CMP_(res1_r, res1, arg1_r, arg1);
         return ck_tile::make_tuple(res2, arg2);
     } else if constexpr (lanegroup_size == 4) {
         DPP_ARG_MERGE_2_DPP_();
-        DPP_ARG_MERGE_2_CMP_(res1, res1_r, arg1, arg1_r);
+        DPP_ARG_MERGE_2_CMP_(res1_r, res1, arg1_r, arg1);
         DPP_ARG_MERGE_4_DPP_();
-        DPP_ARG_MERGE_4_CMP_(res2, res2_r, arg2, arg2_r);
+        DPP_ARG_MERGE_4_CMP_(res2_r, res2, arg2_r, arg2);
         return ck_tile::make_tuple(res4, arg4);
     } else if constexpr (lanegroup_size == 8) {
         DPP_ARG_MERGE_2_DPP_();
-        DPP_ARG_MERGE_2_CMP_(res1, res1_r, arg1, arg1_r);
+        DPP_ARG_MERGE_2_CMP_(res1_r, res1, arg1_r, arg1);
         DPP_ARG_MERGE_4_DPP_();
-        DPP_ARG_MERGE_4_CMP_(res2, res2_r, arg2, arg2_r);
+        DPP_ARG_MERGE_4_CMP_(res2_r, res2, arg2_r, arg2);
         DPP_ARG_MERGE_8_DPP_();
-        DPP_ARG_MERGE_8_CMP_(res4, res4_r, arg4, arg4_r);
+        DPP_ARG_MERGE_8_CMP_(res4_r, res4, arg4_r, arg4);
         // TODO: only lane:1,2,3,4 within 8 lanes does not have correct result !
         return ck_tile::make_tuple(res8, arg8);
     } else if constexpr (lanegroup_size == 16) {
         DPP_ARG_MERGE_2_DPP_();
-        DPP_ARG_MERGE_2_CMP_(res1, res1_r, arg1, arg1_r);
+        DPP_ARG_MERGE_2_CMP_(res1_r, res1, arg1_r, arg1);
         DPP_ARG_MERGE_4_DPP_();
-        DPP_ARG_MERGE_4_CMP_(res2, res2_r, arg2, arg2_r);
+        DPP_ARG_MERGE_4_CMP_(res2_r, res2, arg2_r, arg2);
         DPP_ARG_MERGE_8_DPP_();
-        DPP_ARG_MERGE_8_CMP_(res4, res4_r, arg4, arg4_r);
+        DPP_ARG_MERGE_8_CMP_(res4_r, res4, arg4_r, arg4);
         DPP_ARG_MERGE_16_DPP_();
-        DPP_ARG_MERGE_16_CMP_(res8, res8_r, arg8, arg8_r);
+        DPP_ARG_MERGE_16_CMP_(res8_r, res8, arg8_r, arg8);
         // TODO: only lane:1,2,3,4 within 16 lanes does not have correct result !
         return ck_tile::make_tuple(res16, arg16);
     } else {
@@ -835,19 +836,62 @@ void run()
             }
             std::sort(arg_vec.begin(), arg_vec.end(), [&](auto a, auto b){return a.x > b.x; });
 
-            bool index_valid = [&] (){
-                bool r_ = true;
+            int invalid_idx_cnt = [&] (){
+                int c_ = 0;
                 for(int i = 0; i < lanegroup_size; i++) {
                     if(arg_vec[i].v != ao[i])
-                        r_ &= false;
+                        c_++;
                 }
-                return r_;
+                return c_;
             }();
+            int duplicated_key_pair = 0;
+            if(invalid_idx_cnt != 0) {
+                // need to filter out duplication case, but key value are different
+                // due to sorting order
+                // e.g
+                // value:[0.5, 0.2, 0.5, 0.7, 0.4]
+                // key  :[  0,   1,   2,   3,   4]
+                //
+                // sorting
+                //
+                // value:[0.7, 0.5, 0.5, 0.4, 0.2]
+                // key  :[  3,   0,   2,   4,   1]  => case-1's key
+                // key  :[  3,   2,   0,   4,   1]  => case-2's key
+                //
+                // case-1/case-2 should both consider correct
+                std::list<int> different_keys;
+                for(int i = 0; i < lanegroup_size; i++) {
+                    if(arg_vec[i].v != ao[i])
+                        different_keys.push_back(arg_vec[i].v);
+                }
+                if(different_keys.size() % 2 == 0) {
+                    // in case any invalid case that is not paired keys
+                    while(true) {
+                        auto target_key = different_keys.front();
+                        different_keys.pop_front();
+                        bool found_duplication = false;
+                        for(auto itr = different_keys.begin(); itr != different_keys.end(); itr++) {
+                            // printf("xxx %d:%f(%x), %d:%f(%x)\n", target_key, input[target_key], *reinterpret_cast<uint32_t*>(&input[target_key]),
+                            //                                 *itr, input[*itr],*reinterpret_cast<uint32_t*>(&input[*itr]) );
+                            if(input[target_key] == input[*itr]) {
+                                found_duplication = true;
+                                duplicated_key_pair++;
+                                different_keys.erase(itr);
+                                break;
+                            }
+                        }
+                        if(!found_duplication)
+                            break;  // invalid return
+                        if(different_keys.size() == 0)
+                            break;
+                    }
+                }
+            }
             printf("         ");
             for(int i = 0; i < lanegroup_size; i++) {
                 printf("%5d ", arg_vec[i].v);
             }
-            printf("%s", index_valid ? "[y]" : "[n]");
+            printf("%s", invalid_idx_cnt == 0 ? "[y]" : (invalid_idx_cnt == 2*duplicated_key_pair ? "[y, duplicated value]" : "[n]"));
             printf("\n");
         }
     }
