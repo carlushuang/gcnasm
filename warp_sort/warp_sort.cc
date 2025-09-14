@@ -22,6 +22,9 @@
 
 #define ABS(x) ((x) > 0 ? (x) : -(x))
 
+#ifndef WARP_SORT_USE_INLINE_ASM
+#define WARP_SORT_USE_INLINE_ASM 1
+#endif
 
 
 template<typename T, int dpp_i>
@@ -575,16 +578,149 @@ __device__ __inline__ auto warp_merge_sort_to_reg(const T& x, ck_tile::number<la
     T res1 = x;
 
     if constexpr (lanegroup_size == 2) {
+#if WARP_SORT_USE_INLINE_ASM
+        using vec2_t = ck_tile::ext_vector_t<T, 2>;
+        vec2_t res2;
+        asm volatile(
+            "s_nop 1\n"
+            "v_max_f32 %[v_res2_0], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res2_1], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "s_nop 1\n"
+
+            :   [v_res2_0]"+v"(res2[0]),
+                [v_res2_1]"+v"(res2[1]),
+                [v_res1]"+v"(res1)
+            :
+        );
+#else
         DPP_MERGE_2_DPP_();
-        DPP_MERGE_2_CMP_(res1, res1_r);
+        DPP_MERGE_2_CMP_(res1_r, res1);
+#endif
         return res2;
     } else if constexpr (lanegroup_size == 4) {
+#if WARP_SORT_USE_INLINE_ASM
+        using vec2_t = ck_tile::ext_vector_t<T, 2>;
+        vec2_t res2;
+
+        using vec4_t = ck_tile::ext_vector_t<T, 4>;
+        vec4_t res4;
+        T m_1, m_2;
+    
+        asm volatile(
+            "s_nop 1\n"
+            "v_max_f32 %[v_res2_0], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res2_1], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "s_nop 0\n"
+
+            "v_max_f32 %[v_res4_0], %[v_res2_0], %[v_res2_0] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_m_1], %[v_res2_0], %[v_res2_0] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_m_2], %[v_res2_1], %[v_res2_1] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res4_3], %[v_res2_1], %[v_res2_1] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res4_1], %[v_m_1], %[v_m_2] \n"
+            "v_min_f32 %[v_res4_2], %[v_m_1], %[v_m_2] \n"
+
+            :   [v_res2_0]"+v"(res2[0]),
+                [v_res2_1]"+v"(res2[1]),
+                [v_res4_0]"+v"(res4[0]),
+                [v_res4_1]"+v"(res4[1]),
+                [v_res4_2]"+v"(res4[2]),
+                [v_res4_3]"+v"(res4[3]),
+                [v_m_1]"+v"(m_1),
+                [v_m_2]"+v"(m_2),
+                [v_res1]"+v"(res1)
+            :
+        );
+#else
         DPP_MERGE_2_DPP_();
         DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
         DPP_MERGE_4_CMP_(res2_r, res2);
+#endif
         return res4;
     } else if constexpr (lanegroup_size == 8) {
+#if WARP_SORT_USE_INLINE_ASM
+        using vec2_t = ck_tile::ext_vector_t<T, 2>;
+        vec2_t res2;
+
+        using vec4_t = ck_tile::ext_vector_t<T, 4>;
+        vec4_t res4;
+        T m_1, m_2;
+
+        using vec8_t = ck_tile::ext_vector_t<T, 8>;
+        vec8_t res8;
+        T res8_4_tmp;
+        T res8_1_tmp;
+        T res8_5_tmp;
+        T res8_2_tmp;
+        T res8_6_tmp;
+        T res8_3_tmp;
+        T res8_2_tmp_r;
+        T res8_4_tmp_r;
+        T res8_3_tmp_r;
+        T res8_5_tmp_r;
+    
+        asm volatile(
+            "s_nop 1\n"
+            "v_max_f32 %[v_res2_0], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res2_1], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "s_nop 0\n"
+
+            "v_max_f32 %[v_res4_0], %[v_res2_0], %[v_res2_0] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_m_1], %[v_res2_0], %[v_res2_0] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_m_2], %[v_res2_1], %[v_res2_1] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res4_3], %[v_res2_1], %[v_res2_1] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res4_1], %[v_m_1], %[v_m_2] \n"
+            "v_min_f32 %[v_res4_2], %[v_m_1], %[v_m_2] \n"
+
+            "v_max_f32 %[v_res8_0],     %[v_res4_0], %[v_res4_0] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_4_tmp], %[v_res4_0], %[v_res4_0] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_1_tmp], %[v_res4_1], %[v_res4_1] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_5_tmp], %[v_res4_1], %[v_res4_1] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_2_tmp], %[v_res4_2], %[v_res4_2] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_6_tmp], %[v_res4_2], %[v_res4_2] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_3_tmp], %[v_res4_3], %[v_res4_3] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_7],     %[v_res4_3], %[v_res4_3] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_2_tmp_r], %[v_res8_2_tmp], %[v_res8_4_tmp]\n"
+            "v_min_f32 %[v_res8_4_tmp_r], %[v_res8_2_tmp], %[v_res8_4_tmp]\n"
+            "v_max_f32 %[v_res8_3_tmp_r], %[v_res8_3_tmp], %[v_res8_5_tmp]\n"
+            "v_min_f32 %[v_res8_5_tmp_r], %[v_res8_3_tmp], %[v_res8_5_tmp]\n"
+            "v_max_f32 %[v_res8_1], %[v_res8_1_tmp], %[v_res8_2_tmp_r]\n"
+            "v_min_f32 %[v_res8_2], %[v_res8_1_tmp], %[v_res8_2_tmp_r]\n"
+            "v_max_f32 %[v_res8_3], %[v_res8_3_tmp_r], %[v_res8_4_tmp_r]\n"
+            "v_min_f32 %[v_res8_4], %[v_res8_3_tmp_r], %[v_res8_4_tmp_r]\n"
+            "v_max_f32 %[v_res8_5], %[v_res8_5_tmp_r], %[v_res8_6_tmp]\n"
+            "v_min_f32 %[v_res8_6], %[v_res8_5_tmp_r], %[v_res8_6_tmp]\n"
+
+            :   [v_res2_0]"+v"(res2[0]),
+                [v_res2_1]"+v"(res2[1]),
+                [v_res4_0]"+v"(res4[0]),
+                [v_res4_1]"+v"(res4[1]),
+                [v_res4_2]"+v"(res4[2]),
+                [v_res4_3]"+v"(res4[3]),
+                [v_m_1]"+v"(m_1),
+                [v_m_2]"+v"(m_2),
+                [v_res8_0]"+v"(res8[0]),
+                [v_res8_1]"+v"(res8[1]),
+                [v_res8_2]"+v"(res8[2]),
+                [v_res8_3]"+v"(res8[3]),
+                [v_res8_4]"+v"(res8[4]),
+                [v_res8_5]"+v"(res8[5]),
+                [v_res8_6]"+v"(res8[6]),
+                [v_res8_7]"+v"(res8[7]),
+                [v_res8_4_tmp  ]"+v"(res8_4_tmp  ),
+                [v_res8_1_tmp  ]"+v"(res8_1_tmp  ),
+                [v_res8_5_tmp  ]"+v"(res8_5_tmp  ),
+                [v_res8_2_tmp  ]"+v"(res8_2_tmp  ),
+                [v_res8_6_tmp  ]"+v"(res8_6_tmp  ),
+                [v_res8_3_tmp  ]"+v"(res8_3_tmp  ),
+                [v_res8_2_tmp_r]"+v"(res8_2_tmp_r),
+                [v_res8_4_tmp_r]"+v"(res8_4_tmp_r),
+                [v_res8_3_tmp_r]"+v"(res8_3_tmp_r),
+                [v_res8_5_tmp_r]"+v"(res8_5_tmp_r),
+                [v_res1]"+v"(res1)
+            :
+        );
+#else
         DPP_MERGE_2_DPP_();
         DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
@@ -592,8 +728,235 @@ __device__ __inline__ auto warp_merge_sort_to_reg(const T& x, ck_tile::number<la
         DPP_MERGE_8_DPP_();
         DPP_MERGE_8_CMP_(res4_r, res4);
         // TODO: only lane:1,2,3,4 within 8 lanes does not have correct result !
+#endif
         return res8;
     } else if constexpr (lanegroup_size == 16) {
+#if WARP_SORT_USE_INLINE_ASM
+using vec2_t = ck_tile::ext_vector_t<T, 2>;
+        vec2_t res2;
+
+        using vec4_t = ck_tile::ext_vector_t<T, 4>;
+        vec4_t res4;
+        T m_1, m_2;
+
+        using vec8_t = ck_tile::ext_vector_t<T, 8>;
+        vec8_t res8;
+        T res8_4_tmp;
+        T res8_1_tmp;
+        T res8_5_tmp;
+        T res8_2_tmp;
+        T res8_6_tmp;
+        T res8_3_tmp;
+        T res8_2_tmp_r;
+        T res8_4_tmp_r;
+        T res8_3_tmp_r;
+        T res8_5_tmp_r;
+
+        using vec16_t = ck_tile::ext_vector_t<T, 16>;
+        vec16_t res16;
+
+        T res16_8_tmp       ;
+        T res16_1_tmp       ;
+        T res16_9_tmp       ;
+        T res16_2_tmp       ;
+        T res16_10_tmp      ;
+        T res16_3_tmp       ;
+        T res16_11_tmp      ;
+        T res16_4_tmp       ;
+        T res16_12_tmp      ;
+        T res16_5_tmp       ;
+        T res16_13_tmp      ;
+        T res16_6_tmp       ;
+        T res16_14_tmp      ;
+        T res16_7_tmp       ;
+        T res16_4_tmp_x     ;
+        T res16_8_tmp_x     ;
+        T res16_5_tmp_x     ;
+        T res16_9_tmp_x     ;
+        T res16_6_tmp_x     ;
+        T res16_10_tmp_x    ;
+        T res16_7_tmp_x     ;
+        T res16_11_tmp_x    ;
+        T res16_2_tmp_x     ;
+        T res16_4_tmp_xx    ;
+        T res16_3_tmp_x     ;
+        T res16_5_tmp_xx    ;
+        T res16_6_tmp_xx    ;
+        T res16_8_tmp_xx    ;
+        T res16_7_tmp_xx    ;
+        T res16_9_tmp_xx    ;
+        T res16_10_tmp_xx   ;
+        T res16_12_tmp_xx   ;
+        T res16_11_tmp_xx   ;
+        T res16_13_tmp_xx   ;
+
+        asm volatile(
+            "s_nop 1\n"
+            "v_max_f32 %[v_res2_0], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res2_1], %[v_res1], %[v_res1] quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "s_nop 0\n"
+
+            "v_max_f32 %[v_res4_0], %[v_res2_0], %[v_res2_0] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_m_1], %[v_res2_0], %[v_res2_0] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_m_2], %[v_res2_1], %[v_res2_1] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res4_3], %[v_res2_1], %[v_res2_1] quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res4_1], %[v_m_1], %[v_m_2] \n"
+            "v_min_f32 %[v_res4_2], %[v_m_1], %[v_m_2] \n"
+
+            "v_max_f32 %[v_res8_0],     %[v_res4_0], %[v_res4_0] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_4_tmp], %[v_res4_0], %[v_res4_0] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_1_tmp], %[v_res4_1], %[v_res4_1] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_5_tmp], %[v_res4_1], %[v_res4_1] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_2_tmp], %[v_res4_2], %[v_res4_2] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_6_tmp], %[v_res4_2], %[v_res4_2] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_3_tmp], %[v_res4_3], %[v_res4_3] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res8_7],     %[v_res4_3], %[v_res4_3] row_shl:4 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res8_2_tmp_r], %[v_res8_2_tmp], %[v_res8_4_tmp]\n"
+            "v_min_f32 %[v_res8_4_tmp_r], %[v_res8_2_tmp], %[v_res8_4_tmp]\n"
+            "v_max_f32 %[v_res8_3_tmp_r], %[v_res8_3_tmp], %[v_res8_5_tmp]\n"
+            "v_min_f32 %[v_res8_5_tmp_r], %[v_res8_3_tmp], %[v_res8_5_tmp]\n"
+            "v_max_f32 %[v_res8_1], %[v_res8_1_tmp], %[v_res8_2_tmp_r]\n"
+            "v_min_f32 %[v_res8_2], %[v_res8_1_tmp], %[v_res8_2_tmp_r]\n"
+            "v_max_f32 %[v_res8_3], %[v_res8_3_tmp_r], %[v_res8_4_tmp_r]\n"
+            "v_min_f32 %[v_res8_4], %[v_res8_3_tmp_r], %[v_res8_4_tmp_r]\n"
+            "v_max_f32 %[v_res8_5], %[v_res8_5_tmp_r], %[v_res8_6_tmp]\n"
+            "v_min_f32 %[v_res8_6], %[v_res8_5_tmp_r], %[v_res8_6_tmp]\n"
+
+            "v_max_f32 %[v_res16_0],      %[v_res8_0], %[v_res8_0] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_8_tmp],  %[v_res8_0], %[v_res8_0] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_1_tmp],  %[v_res8_1], %[v_res8_1] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_9_tmp],  %[v_res8_1], %[v_res8_1] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_2_tmp],  %[v_res8_2], %[v_res8_2] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_10_tmp], %[v_res8_2], %[v_res8_2] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_3_tmp],  %[v_res8_3], %[v_res8_3] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_11_tmp], %[v_res8_3], %[v_res8_3] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_4_tmp],  %[v_res8_4], %[v_res8_4] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_12_tmp], %[v_res8_4], %[v_res8_4] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_5_tmp],  %[v_res8_5], %[v_res8_5] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_13_tmp], %[v_res8_5], %[v_res8_5] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_6_tmp],  %[v_res8_6], %[v_res8_6] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_14_tmp], %[v_res8_6], %[v_res8_6] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_7_tmp],  %[v_res8_7], %[v_res8_7] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_min_f32 %[v_res16_15],     %[v_res8_7], %[v_res8_7] row_shl:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n"
+            "v_max_f32 %[v_res16_4_tmp_x],    %[v_res16_4_tmp], %[v_res16_8_tmp]\n"
+            "v_min_f32 %[v_res16_8_tmp_x],    %[v_res16_4_tmp], %[v_res16_8_tmp]\n"
+            "v_max_f32 %[v_res16_5_tmp_x],    %[v_res16_5_tmp], %[v_res16_9_tmp]\n"
+            "v_min_f32 %[v_res16_9_tmp_x],    %[v_res16_5_tmp], %[v_res16_9_tmp]\n"
+            "v_max_f32 %[v_res16_6_tmp_x],    %[v_res16_6_tmp], %[v_res16_10_tmp]\n"
+            "v_min_f32 %[v_res16_10_tmp_x],   %[v_res16_6_tmp], %[v_res16_10_tmp]\n"
+            "v_max_f32 %[v_res16_7_tmp_x],    %[v_res16_7_tmp], %[v_res16_11_tmp]\n"
+            "v_min_f32 %[v_res16_11_tmp_x],   %[v_res16_7_tmp], %[v_res16_11_tmp]\n"
+            "v_max_f32 %[v_res16_2_tmp_x],    %[v_res16_2_tmp], %[v_res16_4_tmp_x]\n"
+            "v_min_f32 %[v_res16_4_tmp_xx],   %[v_res16_2_tmp], %[v_res16_4_tmp_x]\n"
+            "v_max_f32 %[v_res16_3_tmp_x],    %[v_res16_3_tmp], %[v_res16_5_tmp_x]\n"
+            "v_min_f32 %[v_res16_5_tmp_xx],   %[v_res16_3_tmp], %[v_res16_5_tmp_x]\n"
+            "v_max_f32 %[v_res16_6_tmp_xx],   %[v_res16_6_tmp_x], %[v_res16_8_tmp_x]\n"
+            "v_min_f32 %[v_res16_8_tmp_xx],   %[v_res16_6_tmp_x], %[v_res16_8_tmp_x]\n"
+            "v_max_f32 %[v_res16_7_tmp_xx],   %[v_res16_7_tmp_x], %[v_res16_9_tmp_x]\n"
+            "v_min_f32 %[v_res16_9_tmp_xx],   %[v_res16_7_tmp_x], %[v_res16_9_tmp_x]\n"
+            "v_max_f32 %[v_res16_10_tmp_xx],  %[v_res16_10_tmp_x], %[v_res16_12_tmp]\n"
+            "v_min_f32 %[v_res16_12_tmp_xx],  %[v_res16_10_tmp_x], %[v_res16_12_tmp]\n"
+            "v_max_f32 %[v_res16_11_tmp_xx],  %[v_res16_11_tmp_x], %[v_res16_13_tmp]\n"
+            "v_min_f32 %[v_res16_13_tmp_xx],  %[v_res16_11_tmp_x], %[v_res16_13_tmp]\n"
+            "v_max_f32 %[v_res16_1],    %[v_res16_1_tmp], %[v_res16_2_tmp_x]\n"
+            "v_min_f32 %[v_res16_2],    %[v_res16_1_tmp], %[v_res16_2_tmp_x]\n"
+            "v_max_f32 %[v_res16_3],    %[v_res16_3_tmp_x], %[v_res16_4_tmp_xx]\n"
+            "v_min_f32 %[v_res16_4],    %[v_res16_3_tmp_x], %[v_res16_4_tmp_xx]\n"
+            "v_max_f32 %[v_res16_5],    %[v_res16_5_tmp_xx], %[v_res16_6_tmp_xx]\n"
+            "v_min_f32 %[v_res16_6],    %[v_res16_5_tmp_xx], %[v_res16_6_tmp_xx]\n"
+            "v_max_f32 %[v_res16_7],    %[v_res16_7_tmp_xx], %[v_res16_8_tmp_xx]\n"
+            "v_min_f32 %[v_res16_8],    %[v_res16_7_tmp_xx], %[v_res16_8_tmp_xx]\n"
+            "v_max_f32 %[v_res16_9],    %[v_res16_9_tmp_xx], %[v_res16_10_tmp_xx]\n"
+            "v_min_f32 %[v_res16_10],   %[v_res16_9_tmp_xx], %[v_res16_10_tmp_xx]\n"
+            "v_max_f32 %[v_res16_11],   %[v_res16_11_tmp_xx], %[v_res16_12_tmp_xx]\n"
+            "v_min_f32 %[v_res16_12],   %[v_res16_11_tmp_xx], %[v_res16_12_tmp_xx]\n"
+            "v_max_f32 %[v_res16_13],   %[v_res16_13_tmp_xx], %[v_res16_14_tmp]\n"
+            "v_min_f32 %[v_res16_14],   %[v_res16_13_tmp_xx], %[v_res16_14_tmp]\n"
+
+            :   [v_res2_0]"+v"(res2[0]),
+                [v_res2_1]"+v"(res2[1]),
+                [v_res4_0]"+v"(res4[0]),
+                [v_res4_1]"+v"(res4[1]),
+                [v_res4_2]"+v"(res4[2]),
+                [v_res4_3]"+v"(res4[3]),
+                [v_m_1]"+v"(m_1),
+                [v_m_2]"+v"(m_2),
+                [v_res8_0]"+v"(res8[0]),
+                [v_res8_1]"+v"(res8[1]),
+                [v_res8_2]"+v"(res8[2]),
+                [v_res8_3]"+v"(res8[3]),
+                [v_res8_4]"+v"(res8[4]),
+                [v_res8_5]"+v"(res8[5]),
+                [v_res8_6]"+v"(res8[6]),
+                [v_res8_7]"+v"(res8[7]),
+                [v_res8_4_tmp  ]"+v"(res8_4_tmp  ),
+                [v_res8_1_tmp  ]"+v"(res8_1_tmp  ),
+                [v_res8_5_tmp  ]"+v"(res8_5_tmp  ),
+                [v_res8_2_tmp  ]"+v"(res8_2_tmp  ),
+                [v_res8_6_tmp  ]"+v"(res8_6_tmp  ),
+                [v_res8_3_tmp  ]"+v"(res8_3_tmp  ),
+                [v_res8_2_tmp_r]"+v"(res8_2_tmp_r),
+                [v_res8_4_tmp_r]"+v"(res8_4_tmp_r),
+                [v_res8_3_tmp_r]"+v"(res8_3_tmp_r),
+                [v_res8_5_tmp_r]"+v"(res8_5_tmp_r),
+
+                [v_res16_0 ]"+v"(res16[0 ]),
+                [v_res16_1 ]"+v"(res16[1 ]),
+                [v_res16_2 ]"+v"(res16[2 ]),
+                [v_res16_3 ]"+v"(res16[3 ]),
+                [v_res16_4 ]"+v"(res16[4 ]),
+                [v_res16_5 ]"+v"(res16[5 ]),
+                [v_res16_6 ]"+v"(res16[6 ]),
+                [v_res16_7 ]"+v"(res16[7 ]),
+                [v_res16_8 ]"+v"(res16[8 ]),
+                [v_res16_9 ]"+v"(res16[9 ]),
+                [v_res16_10]"+v"(res16[10]),
+                [v_res16_11]"+v"(res16[11]),
+                [v_res16_12]"+v"(res16[12]),
+                [v_res16_13]"+v"(res16[13]),
+                [v_res16_14]"+v"(res16[14]),
+                [v_res16_15]"+v"(res16[15]),
+
+                [v_res16_8_tmp     ]"+v"(res16_8_tmp     ),
+                [v_res16_1_tmp     ]"+v"(res16_1_tmp     ),
+                [v_res16_9_tmp     ]"+v"(res16_9_tmp     ),
+                [v_res16_2_tmp     ]"+v"(res16_2_tmp     ),
+                [v_res16_10_tmp    ]"+v"(res16_10_tmp    ),
+                [v_res16_3_tmp     ]"+v"(res16_3_tmp     ),
+                [v_res16_11_tmp    ]"+v"(res16_11_tmp    ),
+                [v_res16_4_tmp     ]"+v"(res16_4_tmp     ),
+                [v_res16_12_tmp    ]"+v"(res16_12_tmp    ),
+                [v_res16_5_tmp     ]"+v"(res16_5_tmp     ),
+                [v_res16_13_tmp    ]"+v"(res16_13_tmp    ),
+                [v_res16_6_tmp     ]"+v"(res16_6_tmp     ),
+                [v_res16_14_tmp    ]"+v"(res16_14_tmp    ),
+                [v_res16_7_tmp     ]"+v"(res16_7_tmp     ),
+                [v_res16_4_tmp_x   ]"+v"(res16_4_tmp_x   ),
+                [v_res16_8_tmp_x   ]"+v"(res16_8_tmp_x   ),
+                [v_res16_5_tmp_x   ]"+v"(res16_5_tmp_x   ),
+                [v_res16_9_tmp_x   ]"+v"(res16_9_tmp_x   ),
+                [v_res16_6_tmp_x   ]"+v"(res16_6_tmp_x   ),
+                [v_res16_10_tmp_x  ]"+v"(res16_10_tmp_x  ),
+                [v_res16_7_tmp_x   ]"+v"(res16_7_tmp_x   ),
+                [v_res16_11_tmp_x  ]"+v"(res16_11_tmp_x  ),
+                [v_res16_2_tmp_x   ]"+v"(res16_2_tmp_x   ),
+                [v_res16_4_tmp_xx  ]"+v"(res16_4_tmp_xx  ),
+                [v_res16_3_tmp_x   ]"+v"(res16_3_tmp_x   ),
+                [v_res16_5_tmp_xx  ]"+v"(res16_5_tmp_xx  ),
+                [v_res16_6_tmp_xx  ]"+v"(res16_6_tmp_xx  ),
+                [v_res16_8_tmp_xx  ]"+v"(res16_8_tmp_xx  ),
+                [v_res16_7_tmp_xx  ]"+v"(res16_7_tmp_xx  ),
+                [v_res16_9_tmp_xx  ]"+v"(res16_9_tmp_xx  ),
+                [v_res16_10_tmp_xx ]"+v"(res16_10_tmp_xx ),
+                [v_res16_12_tmp_xx ]"+v"(res16_12_tmp_xx ),
+                [v_res16_11_tmp_xx ]"+v"(res16_11_tmp_xx ),
+                [v_res16_13_tmp_xx ]"+v"(res16_13_tmp_xx ),
+
+
+                [v_res1]"+v"(res1)
+            :
+        );
+#else
         DPP_MERGE_2_DPP_();
         DPP_MERGE_2_CMP_(res1_r, res1);
         DPP_MERGE_4_DPP_();
@@ -602,6 +965,7 @@ __device__ __inline__ auto warp_merge_sort_to_reg(const T& x, ck_tile::number<la
         DPP_MERGE_8_CMP_(res4_r, res4);
         DPP_MERGE_16_DPP_();
         DPP_MERGE_16_CMP_(res8_r, res8);
+#endif
         // TODO: only lane:1,2,3,4 within 16 lanes does not have correct result !
         return res16;
     } else {
@@ -895,8 +1259,19 @@ void run()
             printf("\n");
         }
     }
+    bool allright = true;
+    {
+        std::vector<T> input_v;
+        for(auto i = 0; i < lanegroup_size; i++) input_v.push_back(input[i]);
+        std::sort(input_v.begin(), input_v.end(), [&](auto a, auto b){return a > b; });
+        for(auto i = 0; i < lanegroup_size; i++) {
+            if(input_v[i] != output[i])
+                allright = false;
+        }
+
+    }
     bool is_ordered = check_ordered(output, lanegroup_size);
-    printf("-------------------------------------- %s\n", is_ordered?"ordered":"non-order");
+    printf("-------------------------------------- %s[%s]\n", is_ordered?"ordered":"non-order", allright ? "y" : "n");
 
     free(input);
     free(output);
