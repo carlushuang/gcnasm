@@ -49,7 +49,7 @@ using uint32x8_t = uint32_t __attribute__((ext_vector_type(8)));
   STATE_ID    29:27   State ID (graphics only, not compute).
   ME_ID       31:30   Micro-engine ID.
 
-  XCC_ID Register bit structure for gfx940
+  XCC_ID Register bit structure for gfx940/950
   XCC_ID      3:0     XCC the wave is assigned to.
 
 #if (defined (__GFX10__) || defined (__GFX11__))
@@ -71,7 +71,7 @@ size     = immed.u16[15 : 11].u32 + 1U;
   #define _HWREG_HW_ID    4
 #endif
 
-#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__))
   #define _HWREG_XCC_ID                   20
 #endif
 
@@ -90,7 +90,7 @@ struct hwreg {
     __host__ hwreg() {}
     __device__ hwreg(){
         hw_id_ = __builtin_amdgcn_s_getreg(_GETREG_IMMED(31, 0, _HWREG_HW_ID));    // we cache all hw id reg
-#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__))
         xcc_id_ = __builtin_amdgcn_s_getreg(_GETREG_IMMED(3, 0, _HWREG_XCC_ID));    // we cache all xcc reg
 #endif
     }
@@ -98,11 +98,11 @@ struct hwreg {
     __device__ unsigned sh_id() { return (hw_id_ >> 12) & _BM(1); }
     __device__ unsigned se_id() { return (hw_id_ >> 13) & _BM(_HW_ID_SE_ID_SIZE); }
     __device__ unsigned wave_id() { return (hw_id_ >> 0) & _BM(4); }
-#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__))
     __device__ unsigned xcc_id() { return xcc_id_; }
 #endif
     unsigned hw_id_;
-#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__))
     unsigned xcc_id_;
 #endif
 };
@@ -125,7 +125,7 @@ dump_hwreg(const void * input, void * output, int /**/)
     output_data[4] = r.sh_id();
     output_data[5] = r.se_id();
     output_data[6] = r.wave_id();
-#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__))
     output_data[7] = r.xcc_id();
 #endif    
     *(reinterpret_cast<uint32x8_t*>(output) + offset) = output_data;
@@ -171,13 +171,11 @@ int main(int argc, char ** argv)
         uint32_t sh_id = o[4];
         uint32_t se_id = o[5];
         uint32_t wave_id = o[6];
-#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
-        uint32_t xcc_id = o[7];
-#endif
+        uint32_t xcc_id = o[7]; // host not valid
+
         printf("block:%4d, cu_id:%2u, sh_id:%2u, se_id:%2u, wave_id:%2u", blk_id, cu_id, sh_id, se_id, wave_id);
-#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
-        printf("xcc_id:%2u", xcc_id);
-#endif
+        printf(", xcc_id:%2u", xcc_id);
+
         printf("\n");
     }
 }

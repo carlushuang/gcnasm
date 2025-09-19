@@ -1,6 +1,6 @@
 #!/bin/sh
-#ARCH=gfx942
-ARCH=gfx90a
+#ARCH=gfx950
+ARCH=native
 
 rm -rf build && mkdir build && cd build 
 
