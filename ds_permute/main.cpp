@@ -1,62 +1,116 @@
-#include <stdio.h>
 #include <hip/hip_runtime.h>
-#define HIP_CALL(call) do{  \
-    hipError_t err = call;  \
-    if(err != hipSuccess){  \
-        printf("[hiperror](%d) fail to call %s",(int)err,#call);    \
-        exit(0);            \
-    }                       \
+#include <stdio.h>
+#include <assert.h>
+#include <iostream>
+#include <stdlib.h>
+#include <unistd.h>
+#include <stdint.h>
+
+
+
+#define CALL(cmd) \
+do {\
+    hipError_t cuda_error  = cmd;\
+    if (cuda_error != hipSuccess) { \
+        std::cout<<"'"<<hipGetErrorString(cuda_error)<<"'("<<cuda_error<<")"<<" at "<<__FILE__<<":"<<__LINE__<<std::endl;\
+        exit(EXIT_FAILURE);\
+    }\
 } while(0)
 
-int get_int(const char* name, int default_val){
-    char * v = getenv(name);
-    if(v){
-        return atoi(v);
-    }
-    return default_val;
+static inline float get_rand_float(){
+    static int inited = 0;
+    float v;
+    if(!inited){ srand(time(NULL)); inited = 1; }
+    v = rand() % 100 + 1;
+    return v / 100.0f;
 }
 
-#define HSACO "kernel.co"
-#define HSA_KERNEL "shfl_xor_test"
-int main(int argc, char ** argv){
-    hipModule_t module;
-    hipFunction_t kernel_func;
-    int len = 32;
-    int * host_in, * host_out, *dev_in, *dev_out;
-    int mask = get_int("mask",1);
-    int width = get_int("width",32);
-    printf("mask:%d, width:%d\n",mask, width);
+static inline float get_rand_int(int max){
+    static int inited = 0;
+    float v;
+    if(!inited){ srand(time(NULL)); inited = 1; }
+    v = rand() % max;
+    return v;
+}
 
-    host_in   = new int[len];
-    host_out  = new int[len];
-    for(int i=0;i<len;i++){
-        host_in[i] = i;
+// always single wave
+template<int lanegroup_size>
+__global__ void test_ds_permute_kernel(float * p_dst, float* p_src, int * p_idx)
+{
+    if(threadIdx.x < lanegroup_size) {
+        int idx = p_idx[threadIdx.x];
+        float src = p_src[threadIdx.x];
+        float dst = -0.3;
+        dst = __builtin_bit_cast(float,
+                            __builtin_amdgcn_ds_permute(idx << 2, __builtin_bit_cast(int, src)));
+        dst = dst == 0.f ? 1.f : dst;
+        p_dst[threadIdx.x] = dst;
     }
-    HIP_CALL(hipSetDevice(0));
-    HIP_CALL(hipMalloc(&dev_in, sizeof(int)*len));
-    HIP_CALL(hipMalloc(&dev_out, sizeof(int)*len));
-    HIP_CALL(hipMemcpy(dev_in, host_in, sizeof(int)*len, hipMemcpyHostToDevice));
-    struct {
-        int * in;
-        int * out;
-        int mask;
-        int width;
-    } args;
-    args.in = dev_in;
-    args.out = dev_out;
-    args.mask = mask;
-    args.width = width;
-    size_t arg_size = sizeof(args);
-    void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, &args, HIP_LAUNCH_PARAM_BUFFER_SIZE,
-                      &arg_size, HIP_LAUNCH_PARAM_END};
+}
 
-    HIP_CALL(hipModuleLoad( &module, HSACO ));
-    HIP_CALL(hipModuleGetFunction(&kernel_func, module, HSA_KERNEL));
-    HIP_CALL(hipModuleLaunchKernel(kernel_func, 1,1,1, 32,1,1,  0, 0, NULL, (void**)&config ));
-    HIP_CALL(hipMemcpy(host_out, dev_out, sizeof(int)*len, hipMemcpyDeviceToHost));
-    for(int i=0;i<len;i++){
-        printf("%2d - %2d\n", host_in[i], host_out[i]);
+template<int lanegroup_size>
+__global__ void test_ds_permute_kernel_v2(float * p_dst, float* p_src, int * p_idx)
+{
+    if(threadIdx.x < lanegroup_size) {
+        int idx = p_idx[threadIdx.x];
+        float src = p_src[threadIdx.x];
+        float src_1 = p_src[threadIdx.x + 256];
+        float dst = -0.3;
+        dst = __builtin_bit_cast(float,
+                            __builtin_amdgcn_ds_permute(idx << 2, __builtin_bit_cast(int, src)));
+        if(dst ==  99999999.f) {
+            p_dst[blockIdx.x * 256 + threadIdx.x * 2] = dst  + src;
+        }
+        dst = __builtin_bit_cast(float,
+                            __builtin_amdgcn_ds_permute((idx ^ 1) << 2, __builtin_bit_cast(int, src_1)));
+        p_dst[threadIdx.x] = dst;
     }
-    delete [] host_in;
-    delete [] host_out;
+}
+
+
+int main(int argc, char ** argv) {
+    constexpr int wave_size = 64;
+    constexpr int lanegroup_size = 8;
+    {
+        int * h_idx;
+        float * h_src, * h_dst;
+        int * d_idx;
+        float * d_src, * d_dst;
+
+        h_idx = (int*)malloc(lanegroup_size * sizeof(int));
+        h_src = (float*)malloc(lanegroup_size * sizeof(float));
+        h_dst = (float*)malloc(lanegroup_size * sizeof(float));
+
+        for(int i = 0; i < lanegroup_size ; i++) {
+            h_src[i] = get_rand_float();
+            h_idx[i] = get_rand_int(lanegroup_size);
+        }
+
+        CALL(hipMalloc(&d_idx, lanegroup_size * sizeof(int)));
+        CALL(hipMalloc(&d_src, lanegroup_size * sizeof(float)));
+        CALL(hipMalloc(&d_dst, lanegroup_size * sizeof(float)));
+
+        CALL(hipMemcpy(d_src, h_src, lanegroup_size * sizeof(float), hipMemcpyHostToDevice));
+        CALL(hipMemcpy(d_idx, h_idx, lanegroup_size * sizeof(int), hipMemcpyHostToDevice));
+
+        test_ds_permute_kernel<lanegroup_size><<<1, wave_size>>>(d_dst, d_src, d_idx);
+
+        CALL(hipMemcpy(h_dst, d_dst, lanegroup_size * sizeof(float), hipMemcpyDeviceToHost));
+
+        for(int i = 0; i < lanegroup_size; i++) {
+            printf("%.2f ", h_src[i]);
+        }
+        printf("\n");
+        
+        for(int i = 0; i < lanegroup_size; i++) {
+            printf("%4d ", h_idx[i]);
+        }
+        printf("\n");
+
+        for(int i = 0; i < lanegroup_size; i++) {
+            printf("%.2f ", h_dst[i]);
+        }
+        printf("\n");
+
+    }
 }
