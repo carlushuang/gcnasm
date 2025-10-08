@@ -1,5 +1,5 @@
 #!/bin/sh
-ARCH=gfx942
+ARCH=native
 CK_DIR=/raid0/carhuang/repo/composable_kernel
 
 rm -rf build && mkdir build && cd build 

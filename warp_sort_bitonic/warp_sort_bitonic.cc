@@ -23,27 +23,27 @@
 #define FMT_LIMIT_MAX 16
 #endif
 
-template<typename T, int dpp_i, int bank_mask = 0xf>
-__device__ __inline__ T mov_dpp_(T x, ck_tile::number<dpp_i>, ck_tile::number<bank_mask> = {}) {
+template <typename T, int dpp_i, int row_mask = 0xf, int bank_mask = 0xf, bool bound_ctrl = true>
+__device__ __inline__ T mov_dpp_(T x,
+                                 ck_tile::number<dpp_i>,
+                                 ck_tile::number<row_mask>          = {},
+                                 ck_tile::number<bank_mask>         = {},
+                                 ck_tile::bool_constant<bound_ctrl> = {})
+{
     static_assert(sizeof(T) == 4);
-    constexpr int row_mask    = 0xf;
-    // constexpr int bank_mask   = 0xf;
-    constexpr bool bound_ctrl = true;   // ! out-of-bound is zero !
-    return __builtin_bit_cast(T,
-                        // __builtin_amdgcn_update_dpp(0,__builtin_bit_cast(int, x),
-                        __builtin_amdgcn_mov_dpp(__builtin_bit_cast(int, x),
-                                    dpp_i,
-                                    row_mask,
-                                    bank_mask,
-                                    bound_ctrl));
+    return __builtin_bit_cast(
+        T,
+        // __builtin_amdgcn_update_dpp(0,__builtin_bit_cast(int, x),
+        __builtin_amdgcn_mov_dpp(
+            __builtin_bit_cast(int, x), dpp_i, row_mask, bank_mask, bound_ctrl));
 }
 
-template<typename O, typename T, int dpp_i, int bank_mask = 0xf>
-__device__ __inline__ T upd_dpp_(const O& old, T x, ck_tile::number<dpp_i>, ck_tile::number<bank_mask> = {}) {
+template<typename O, typename T, int dpp_i, int row_mask = 0xf, int bank_mask = 0xf, bool bound_ctrl = true>
+__device__ __inline__ T upd_dpp_(const O& old, T x, ck_tile::number<dpp_i>,
+                                ck_tile::number<row_mask>          = {},
+                                 ck_tile::number<bank_mask>         = {},
+                                 ck_tile::bool_constant<bound_ctrl> = {}) {
     static_assert(sizeof(T) == 4);
-    constexpr int row_mask    = 0xf;
-    // constexpr int bank_mask   = 0xf;
-    constexpr bool bound_ctrl = true;   // ! out-of-bound is zero !
     return __builtin_bit_cast(T,
                         __builtin_amdgcn_update_dpp(__builtin_bit_cast(int, old), __builtin_bit_cast(int, x),
                                     dpp_i,
@@ -115,16 +115,16 @@ __device__ __inline__ auto warp_swap_(const T& x, int lane_idx, ck_tile::number<
         //
         // NOTE: we can also use volatile, but compiler will generate scratch (it's memory operation?)
         T r;
-        r = upd_dpp_(r, x, ck_tile::number<260>{}, ck_tile::number<0b0101>{}); /*row_shl:4*/
-        r = upd_dpp_(r, x, ck_tile::number<276>{}, ck_tile::number<0b1010>{}); /*row_shr:4*/
+        r = upd_dpp_(r, x, ck_tile::number<260>{}, ck_tile::number<0xf>{}, ck_tile::number<0b0101>{}); /*row_shl:4*/
+        r = upd_dpp_(r, x, ck_tile::number<276>{}, ck_tile::number<0xf>{}, ck_tile::number<0b1010>{}); /*row_shr:4*/
 #pragma clang diagnostic pop
         return  r;
     } else if constexpr(lanegroup_size == 16) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wuninitialized"
         T r;
-        r = upd_dpp_(r, x, ck_tile::number<264>{}, ck_tile::number<0b0011>{}); /*row_shl:8*/
-        r = upd_dpp_(r, x, ck_tile::number<280>{}, ck_tile::number<0b1100>{}); /*row_shr:8*/
+        r = upd_dpp_(r, x, ck_tile::number<264>{}, ck_tile::number<0xf>{}, ck_tile::number<0b0011>{}); /*row_shl:8*/
+        r = upd_dpp_(r, x, ck_tile::number<280>{}, ck_tile::number<0xf>{}, ck_tile::number<0b1100>{}); /*row_shr:8*/
 #pragma clang diagnostic pop
         return r;
     } else if constexpr(lanegroup_size == 32) {
