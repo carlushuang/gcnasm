@@ -93,8 +93,8 @@ void memread_kernel_2d(DType* p_src, DType* p_dst, int rows, int cols, int strid
         if constexpr (need_bin) {
             uint32_t binIdx = extractBinIdx<0>(f);
             // if(threadIdx.x == 0)
-            // atomicAdd(&smemHistogram[binIdx], 1);
-            smemHistogram[binIdx] = smemHistogram[binIdx] + 1;
+            atomicAdd(&smemHistogram[binIdx], 1);
+            // smemHistogram[binIdx] = smemHistogram[binIdx] + 1;
         }
     }
 
