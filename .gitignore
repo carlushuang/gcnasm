@@ -1,3 +1,8 @@
 *.o
 *.co
 *.exe
+*.bc
+*.hipi
+*.out
+*.out.resolution.txt
+*.hipfb

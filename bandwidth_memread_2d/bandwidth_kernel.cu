@@ -77,7 +77,7 @@ void memread_kernel_2d(DType* p_src, DType* p_dst, int rows, int cols, int strid
     p_src += i_row * stride;
     DType v {};
 
-    __shared__ DType smemHistogram[64];
+    __shared__ int smemHistogram[64];
 
     int iters = cols / vec / BLOCK_SIZE;
 
