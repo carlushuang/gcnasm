@@ -6,3 +6,7 @@
 *.out
 *.out.resolution.txt
 *.hipfb
+*.egg
+build/
+dist/
+*_hip.*
