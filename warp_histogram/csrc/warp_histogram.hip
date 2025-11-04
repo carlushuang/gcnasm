@@ -93,76 +93,153 @@ __device__ int count_8_lane(int v)
 template<int count_group = 4, int WarpSize = 64, int bucket = 64>
 __device__ __inline__ auto warp_histogram_step(int32_t value, int8_t* smem /*[bucket x bucket / 4]*/)
 {
-    static_assert(bucket == 64, "currently only 64 buckets supported");
-    constexpr int smem_dwrd = smem_dword_for_count_b64(opus::number<count_group>{});
-    constexpr int smem_cols = WarpSize / smem_dwrd;
+    if constexpr(bucket == 64) {
+        static_assert(bucket == 64, "currently only 64 buckets supported");
+        constexpr int smem_dwrd = smem_dword_for_count_b64(opus::number<count_group>{});
+        constexpr int smem_cols = WarpSize / smem_dwrd;
 
-    // reinterpret_cast<int32x4_t>(smem + xrow_id * bucket);
-    int32_t v = value % bucket; // just make sure value is within bucket
+        // reinterpret_cast<int32x4_t>(smem + xrow_id * bucket);
+        int32_t v = value % bucket; // just make sure value is within bucket
 
-    int count = [&](){
-        if      constexpr(count_group == 4) return count_4_lane(v);   // 4 bit
-        else if constexpr(count_group == 8) return count_8_lane(v);   // 8 bit
-    }();
+        int count = [&](){
+            if      constexpr(count_group == 4) return count_4_lane(v);   // 4 bit
+            else if constexpr(count_group == 8) return count_8_lane(v);   // 8 bit
+        }();
 
-    int xrow_id = threadIdx.x % bucket;
+        int xrow_id = threadIdx.x % bucket;
 
-    using smem_vtype = opus::vector_t<int, smem_dwrd>;
+        using smem_vtype = opus::vector_t<int, smem_dwrd>;
 
-    *reinterpret_cast<smem_vtype*>(smem + xrow_id * smem_cols) = 0;
-    opus::s_waitcnt_lgkmcnt(opus::number<0>{}); // this is needed, otherwise compiler wont generate for ds_write
+        *reinterpret_cast<smem_vtype*>(smem + xrow_id * smem_cols) = 0;
+        // opus::s_waitcnt_lgkmcnt(opus::number<0>{}); // this is needed, otherwise compiler wont generate for ds_write
 
-    int row_id = v;
-    int col_id = threadIdx.x / count_group;
+        int row_id = v;
+        int col_id = threadIdx.x / count_group;
 
-    union {
-        struct {
-            int8_t x;
-            int8_t y;
-            int8_t z;
-            int8_t w;
-        };
-        int32_t v;
-    } pool;
+        union {
+            struct {
+                int8_t x;
+                int8_t y;
+                int8_t z;
+                int8_t w;
+            };
+            int32_t v;
+        } pool;
 
-    pool.v = count;
+        pool.v = count;
 
-    smem[row_id * (smem_cols) + col_id] = pool.x;
+        smem[row_id * (smem_cols) + col_id] = pool.x;
 
-    opus::s_waitcnt_lgkmcnt(opus::number<0>{});
+        opus::s_waitcnt_lgkmcnt(opus::number<0>{});
 
-    smem_vtype r = *reinterpret_cast<smem_vtype*>(smem + xrow_id * smem_cols);
+        smem_vtype r = *reinterpret_cast<smem_vtype*>(smem + xrow_id * smem_cols);
 
-    int cnt = 0;
-    for(int i = 0; i < smem_dwrd; i++) {
-        cnt += __builtin_popcount(r[i]);
+        int cnt = 0;
+        for(int i = 0; i < smem_dwrd; i++) {
+            cnt += __builtin_popcount(r[i]);
+        }
+        return cnt;
     }
-    return cnt;
+    else if constexpr(bucket == 256) {
+        int lane_id = threadIdx.x % WarpSize;
+        // 256 bucket
+        // [0, 1, 2, 3] (bucket id for 0~63, 64~127, 128~191, 192~255)
+        // [64 64 64 64] (bdim 64bit, 2dword)
+        // -> [(0, 1), (0, 1), ..... (2, 3), (2, 3),.....]
+        //     t0      t1      t2    t0      t1    t2   (issue ds_read/write_b128)
+        //    [bid_1, bid_0, bdim]
+        using smem_vtype = opus::vector_t<int, 4>;
+        *(reinterpret_cast<smem_vtype*>(smem) + lane_id ) = 0;
+        *(reinterpret_cast<smem_vtype*>(smem) + lane_id + WarpSize) = 0;
+
+        int32_t v = value % bucket; // just make sure value is within bucket
+
+        int count = [&](){
+            if      constexpr(count_group == 4) return count_4_lane(v);   // 4 bit
+            else if constexpr(count_group == 8) return count_8_lane(v);   // 8 bit
+        }();
+
+        int bucket_group_id = v / 64;
+        int bid_g  = v % 64;
+        int bid_0  = bucket_group_id % 2;
+        int bid_1  = bucket_group_id / 2;
+        int col_id = threadIdx.x / count_group;
+
+        union {
+            struct {
+                int8_t x;
+                int8_t y;
+                int8_t z;
+                int8_t w;
+            };
+            int32_t v;
+        } pool;
+
+        pool.v = count;
+
+        smem[bid_1 * WarpSize * 16 + bid_g * 16 + bid_0 * 8 + col_id] = pool.x;
+        opus::s_waitcnt_lgkmcnt(opus::number<0>{});
+
+        smem_vtype r_x =  *(reinterpret_cast<smem_vtype*>(smem) + lane_id );
+        smem_vtype r_y =  *(reinterpret_cast<smem_vtype*>(smem) + lane_id + WarpSize);
+
+        int cnt_0 = 0, cnt_1 = 0, cnt_2 = 0, cnt_3 = 0;
+        //for(int i = 0; i < 2; i++) {
+        cnt_0 += __builtin_popcount(r_x[0]);
+        cnt_0 += __builtin_popcount(r_x[1]);
+        cnt_1 += __builtin_popcount(r_x[2]);
+        cnt_1 += __builtin_popcount(r_x[3]);
+        cnt_2 += __builtin_popcount(r_y[0]);
+        cnt_2 += __builtin_popcount(r_y[1]);
+        cnt_3 += __builtin_popcount(r_y[2]);
+        cnt_3 += __builtin_popcount(r_y[3]);
+        //}
+        return opus::make_tuple(cnt_0, cnt_1, cnt_2, cnt_3);
+    }
 }
 
 // TODO: bucket size is always 64 (same as warp size)
-template<typename DType, typename IndexType, int count_group = 4, int WarpSize = 64>
+template<typename DType, typename IndexType, int buckets = 256, int count_group = 8, int WarpSize = 64>
 __global__ void warp_histogram_kernel(DType* i_ptr, IndexType * o_ptr, int nelem)
 {
+    static_assert(buckets == 64 || buckets == 256);
     static_assert(count_group == 4 || count_group == 8);
 
     constexpr int smem_cols = WarpSize / smem_dword_for_count_b64(opus::number<count_group>{});
 
-    __shared__ int8_t smem[WarpSize *smem_cols];   // ! our histogram using a 64x16 smem to reduce :)
+    __shared__ int8_t smem[WarpSize * smem_cols * (buckets / WarpSize)];   // ! our histogram using a 64x16 smem to reduce :)
 
-    int cnt = 0;
-    int loops = (nelem + WarpSize - 1) / WarpSize;
-    for(int i = 0; i < loops; i++) {
-        DType value = i_ptr[WarpSize * i + threadIdx.x];
-        cnt += warp_histogram_step<count_group, WarpSize>(value, smem);
+    if constexpr (buckets == 64) {
+        int cnt = 0;
+        int loops = (nelem + WarpSize - 1) / WarpSize;
+        for(int i = 0; i < loops; i++) {
+            DType value = i_ptr[WarpSize * i + threadIdx.x];
+            cnt += warp_histogram_step<count_group, WarpSize, buckets>(value, smem);
+        }
+        o_ptr[threadIdx.x] = cnt;
     }
-    o_ptr[threadIdx.x] = cnt;
+    else if constexpr (buckets == 256) {
+        int cnt_0 = 0, cnt_1 = 0, cnt_2 = 0, cnt_3 = 0;
+        int loops = (nelem + WarpSize - 1) / WarpSize;
+        for(int i = 0; i < loops; i++) {
+            DType value = i_ptr[WarpSize * i + threadIdx.x];
+            const auto [c0, c1, c2, c3] = warp_histogram_step<count_group, WarpSize, buckets>(value, smem);
+            cnt_0 += c0; cnt_1 += c1; cnt_2 += c2; cnt_3 += c3;
+        }
+        o_ptr[threadIdx.x + 0 * WarpSize] = cnt_0;
+        o_ptr[threadIdx.x + 1 * WarpSize] = cnt_1;
+        o_ptr[threadIdx.x + 2 * WarpSize] = cnt_2;
+        o_ptr[threadIdx.x + 3 * WarpSize] = cnt_3;
+    }
 }
 
 // host c++ API
-void warp_histogram(void* i_ptr, void* o_ptr, int num_element)
+void warp_histogram(void* i_ptr, void* o_ptr, int buckets, int num_element)
 {
     using DType = int;
     using IndexType = int;
-    warp_histogram_kernel<DType, IndexType, 8><<<1, 64>>>(reinterpret_cast<DType*>(i_ptr), reinterpret_cast<IndexType*>(o_ptr), num_element);
+    if(buckets == 64)
+        warp_histogram_kernel<DType, IndexType, 64, 8><<<1, 64>>>(reinterpret_cast<DType*>(i_ptr), reinterpret_cast<IndexType*>(o_ptr), num_element);
+    else if(buckets == 256)
+        warp_histogram_kernel<DType, IndexType, 256, 8><<<1, 64>>>(reinterpret_cast<DType*>(i_ptr), reinterpret_cast<IndexType*>(o_ptr), num_element);
 }
