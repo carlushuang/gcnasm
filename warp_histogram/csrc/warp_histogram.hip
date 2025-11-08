@@ -93,6 +93,7 @@ __device__ int count_8_lane(int v)
 template<int count_group = 4, int WarpSize = 64, int bucket = 64>
 __device__ __inline__ auto warp_histogram_step(int32_t value, int8_t* smem /*[bucket x bucket / 4]*/)
 {
+    using opus::operator""_I;
     if constexpr(bucket == 64) {
         static_assert(bucket == 64, "currently only 64 buckets supported");
         constexpr int smem_dwrd = smem_dword_for_count_b64(opus::number<count_group>{});
@@ -149,21 +150,33 @@ __device__ __inline__ auto warp_histogram_step(int32_t value, int8_t* smem /*[bu
         //     t0      t1      t2    t0      t1    t2   (issue ds_read/write_b128)
         //    [bid_1, bid_0, bdim]
         using smem_vtype = opus::vector_t<int, 4>;
-        *(reinterpret_cast<smem_vtype*>(smem) + lane_id ) = 0;
-        *(reinterpret_cast<smem_vtype*>(smem) + lane_id + WarpSize) = 0;
+        
 
         int32_t v = value % bucket; // just make sure value is within bucket
-
-        int count = [&](){
-            if      constexpr(count_group == 4) return count_4_lane(v);   // 4 bit
-            else if constexpr(count_group == 8) return count_8_lane(v);   // 8 bit
-        }();
-
         int bucket_group_id = v / 64;
         int bid_g  = v % 64;
         int bid_0  = bucket_group_id % 2;
         int bid_1  = bucket_group_id / 2;
         int col_id = threadIdx.x / count_group;
+
+        auto s = opus::make_smem(smem);
+        auto u = opus::make_layout_packed<1>(opus::make_tuple(2_I, opus::number<WarpSize>{}, 2_I, 8_I), opus::make_tuple(bid_1, bid_g, bid_0, col_id));
+        // auto u = opus::make_layout_packed<1>(opus::make_tuple(2_I, opus::number<WarpSize>{}, 2_I, 8_I));
+
+        auto s_i = opus::make_smem(reinterpret_cast<int*>(smem));
+        auto u_i = opus::make_layout_packed(opus::make_tuple(2_I, opus::number<WarpSize>{}, 4_I), opus::make_tuple(opus::_, lane_id, opus::_));
+
+        // *(reinterpret_cast<smem_vtype*>(smem) + lane_id ) = 0;
+        // *(reinterpret_cast<smem_vtype*>(smem) + lane_id + WarpSize) = 0;
+        s_i.store<4>(0, u_i);
+        //s_i.store<4>(0, u_i(opus::make_tuple(0_I, 0_I)));
+        //s_i.store<4>(0, u_i(opus::make_tuple(1_I, 0_I)));
+
+
+        int count = [&](){
+            if      constexpr(count_group == 4) return count_4_lane(v);   // 4 bit
+            else if constexpr(count_group == 8) return count_8_lane(v);   // 8 bit
+        }();
 
         union {
             struct {
@@ -177,7 +190,8 @@ __device__ __inline__ auto warp_histogram_step(int32_t value, int8_t* smem /*[bu
 
         pool.v = count;
 
-        smem[bid_1 * WarpSize * 16 + bid_g * 16 + bid_0 * 8 + col_id] = pool.x;
+        // smem[bid_1 * WarpSize * 16 + bid_g * 16 + bid_0 * 8 + col_id] = pool.x;
+        s.store(pool.x, u);
         opus::s_waitcnt_lgkmcnt(opus::number<0>{});
 
         smem_vtype r_x =  *(reinterpret_cast<smem_vtype*>(smem) + lane_id );
