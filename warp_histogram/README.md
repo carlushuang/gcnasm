@@ -1,6 +1,7 @@
 # build and install
 ```
 # need change setup.py for aiter/opus location
+# need install aiter for easy benchmarking
 sh rebuild.sh
 ```
 

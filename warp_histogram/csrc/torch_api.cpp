@@ -15,13 +15,14 @@
 // write less sw logic here, only torch->C++ dispatch
 at::Tensor warp_histogram_torch(at::Tensor x, int buckets)
 {
-    int num_element = x.size(0);
+    int num_row     = x.size(0);
+    int num_element = x.size(1);
     auto options = x.options();
     at::cuda::CUDAGuard device_guard{(char)x.get_device()};
 
-    auto o = torch::empty({buckets}, options.dtype(torch::kInt32));
+    auto o = torch::empty({num_row, buckets}, options.dtype(torch::kInt32));
 
-    warp_histogram(x.data_ptr(), o.data_ptr(), buckets, num_element);
+    warp_histogram(x.data_ptr(), o.data_ptr(), buckets, num_row, num_element);
 
     return o;
 }
