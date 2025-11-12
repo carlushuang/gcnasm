@@ -295,12 +295,33 @@ __global__ void block_histogram_kernel(DType* i_ptr_, IndexType * o_ptr_, int ne
     }
     else if constexpr (buckets == 256) {
         int cnt_0 = 0, cnt_1 = 0, cnt_2 = 0, cnt_3 = 0;
-        int loops = (nelem + block_size - 1) / block_size;
-        for(int i = 0; i < loops; i++) {
-            DType value = i_ptr[block_size * i + threadIdx.x];
-            const auto [c0, c1, c2, c3] = warp_histogram_step<count_group, WarpSize, buckets>(value, smem + wave_id * WarpSize * smem_cols * (buckets / WarpSize));
+        int loops = (nelem + block_size - 1) / block_size / 2;
+        // 2 buffer
+        DType value[2];
+        // load buffer 0
+        value[0] = i_ptr[block_size * 2 * 0 + threadIdx.x];
+        for(int i = 1; i < loops; i++) {
+            // load buffer 1, compute buffer 0
+            value[1] = i_ptr[block_size * (2 * i - 1) + threadIdx.x];
+            const auto [c0, c1, c2, c3] = warp_histogram_step<count_group, WarpSize, buckets>(value[0], smem + wave_id * WarpSize * smem_cols * (buckets / WarpSize));
             cnt_0 += c0; cnt_1 += c1; cnt_2 += c2; cnt_3 += c3;
+
+            // load buffer 0, compute buffer 1
+            value[0] = i_ptr[block_size * 2 * i + threadIdx.x];
+            const auto [z0, z1, z2, z3] = warp_histogram_step<count_group, WarpSize, buckets>(value[1], smem + wave_id * WarpSize * smem_cols * (buckets / WarpSize));
+            cnt_0 += z0; cnt_1 += z1; cnt_2 += z2; cnt_3 += z3;
         }
+        // load buffer 1, compute buffer 0
+        value[1] = i_ptr[block_size * (loops * 2 - 1) + threadIdx.x];
+        const auto [c0, c1, c2, c3] = warp_histogram_step<count_group, WarpSize, buckets>(value[0], smem + wave_id * WarpSize * smem_cols * (buckets / WarpSize));
+        cnt_0 += c0; cnt_1 += c1; cnt_2 += c2; cnt_3 += c3;
+
+        // tail, compute buffer 1
+        const auto [z0, z1, z2, z3] = warp_histogram_step<count_group, WarpSize, buckets>(value[1], smem + wave_id * WarpSize * smem_cols * (buckets / WarpSize));
+        cnt_0 += z0; cnt_1 += z1; cnt_2 += z2; cnt_3 += z3;
+
+
+
         int * s_final = reinterpret_cast<int*>(smem);
         __syncthreads();
         s_final[threadIdx.x + 0 * block_size] = cnt_0;
