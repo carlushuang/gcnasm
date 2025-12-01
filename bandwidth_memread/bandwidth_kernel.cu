@@ -22,6 +22,10 @@ using fp32x4 = __attribute__((__ext_vector_type__(4))) float;
 #define USE_NT_LOAD 1
 #endif
 
+#ifndef USE_NT_STORE
+#define USE_NT_STORE 1
+#endif
+
 #if USE_NT_LOAD
 template<typename T>
 __device__ __forceinline__ T nt_load(const T& ref)
@@ -33,6 +37,19 @@ __device__ __forceinline__ T nt_load(const T& ref)
 #endif
 }
 #endif
+
+#if USE_NT_STORE
+template<typename T>
+__device__ __forceinline__ void nt_store(const T& value, T* addr)
+{
+#ifdef __HIPCC__
+    __builtin_nontemporal_store(value, addr);
+#else
+    *addr = value;
+#endif
+}
+#endif
+
 
 template<typename T>
 __device__  __forceinline__ void acc(T& v, const T& other)
@@ -70,6 +87,36 @@ void memread_kernel(T* p_src, T* p_dst, int issues_per_block, int iters)
     if constexpr(vec == 4) {
         if(v.x == 10000 && v.y == 10000 && v.z == 10000 && v.w == 10000)
             *p_dst  = v;
+    }
+}
+
+template<typename T, int UNROLL = 8>
+__global__
+void memcpy_kernel(T* p_src, T* p_dst, int issues_per_block, int iters)
+{
+    auto current = blockIdx.x * issues_per_block;
+    T v {};
+    for(auto i = 0; i < iters; i++) {
+        auto offs = UNROLL * BLOCK_SIZE * i + threadIdx.x;
+        T tmp[UNROLL];
+
+        #pragma unroll
+        for(auto j = 0; j < UNROLL; j++) {
+#if USE_NT_LOAD
+            tmp[j] = nt_load(p_src[current + offs + j * BLOCK_SIZE]);
+#else
+            tmp[j] = p_src[current + offs + j * BLOCK_SIZE];
+#endif
+        }
+
+        #pragma unroll
+        for(auto j = 0; j < UNROLL; j++) {
+#if USE_NT_STORE
+            nt_store(tmp[j], p_dst + current + offs + j * BLOCK_SIZE);
+#else
+            p_dst[current + offs + j * BLOCK_SIZE] = tmp[j];
+#endif
+        }
     }
 }
 
@@ -126,8 +173,8 @@ static inline int valid_vec(const float * vec_a, const float * vec_b, int num)
     return err_cnt;
 }
 
-template<typename VEC, int OCCUPANCY, int UNROLL>
-float bench_memread_kernel(void * B, void * A, int64_t dwords)
+template<typename VEC, int OCCUPANCY, int UNROLL, int kernel_id = 0>
+float bench_kernel(void * B, void * A, int64_t dwords)
 {
     // benchmark kernel
     int num_cu = [&](){
@@ -149,12 +196,24 @@ float bench_memread_kernel(void * B, void * A, int64_t dwords)
     CALL(cudaEventCreate(&start_ev));
     CALL(cudaEventCreate(&stop_ev));
 
-    for(int i=0;i<WARMUP;i++)
-        memread_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+    if constexpr ( kernel_id == 0) {
+        for(int i=0;i<WARMUP;i++)
+            memread_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+    }
+    else if constexpr(kernel_id == 1) {
+        for(int i=0;i<WARMUP;i++)
+            memcpy_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+    }
 
     CALL(cudaEventRecord(start_ev, 0));
-    for(int i=0;i<LOOP;i++)
-        memread_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+    if constexpr ( kernel_id == 0) {
+        for(int i=0;i<LOOP;i++)
+            memread_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+    }
+    else if constexpr(kernel_id == 1) {
+        for(int i=0;i<LOOP;i++)
+            memcpy_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+    }
     CALL(cudaEventRecord( stop_ev, 0 ));
     CALL(cudaEventSynchronize(stop_ev));
 
@@ -164,6 +223,7 @@ float bench_memread_kernel(void * B, void * A, int64_t dwords)
     return ms;
 }
 
+template<int kernel_id = 0>
 int run(int64_t dwords)
 {
     unsigned char *A, *B;
@@ -177,15 +237,15 @@ int run(int64_t dwords)
     CALL(cudaMalloc(&B, dwords * sizeof(float)));
     CALL(cudaMemcpy(A, h_A, dwords * sizeof(float), cudaMemcpyHostToDevice));
 
-    float ms = bench_memread_kernel<fp32x4, 1, 4>(B, A, dwords);
-
+    float ms = bench_kernel<fp32x4, 1, 4, kernel_id>(B, A, dwords);
 
     auto get_gbps = [](int64_t dwords_, float ms_){
         return  ((double)dwords_*sizeof(float))/((double)ms_/1000)/1000000000.0;
     };
     char str[64];
     b2s(dwords*sizeof(float), str);
-    printf("%9s -> %.4fms, %.3f(GB/s)\n", str, ms, get_gbps(dwords, ms));
+    printf("%9s(%s) -> %.4fms, %.3f(GB/s)\n", str, kernel_id == 0 ? "[ro]" : "[rw]",
+        ms, get_gbps(dwords * (kernel_id == 0 ? 1 : 2), ms));
 
     free(h_A);
     free(h_B);
@@ -207,7 +267,7 @@ int main(int argc, char ** argv) {
             CALL(cudaGetDeviceProperties(&dev_prop,dev ));
             return dev_prop.multiProcessorCount;
         }();
-        printf("cu:%d\n", num_cu);
+        printf("cu:%d, nt_load:%d, nt_store:%d\n", num_cu, USE_NT_LOAD, USE_NT_STORE);
 
         int64_t dwords_list[] = {
             20000,
@@ -218,14 +278,24 @@ int main(int argc, char ** argv) {
             static_cast<int64_t>(820) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(1638) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(3276) * num_cu * BLOCK_SIZE,
-            static_cast<int64_t>(12032) * num_cu * BLOCK_SIZE};
+            static_cast<int64_t>(5710) * num_cu * BLOCK_SIZE
+            // static_cast<int64_t>(12032) * num_cu * BLOCK_SIZE
+        };
 
         int iters = sizeof(dwords_list) / sizeof(dwords_list[0]);
 
+        printf("---------------------------------------------\n");
         for(auto i = 0; i < iters; i++) {
             int64_t dwords = dwords_list[i];
-            run(dwords);
-            usleep(100000);
+            run<0>(dwords);
+            usleep(200000);
+        }
+        printf("---------------------------------------------\n");
+        usleep(200000 * 10);
+        for(auto i = 0; i < iters; i++) {
+            int64_t dwords = dwords_list[i];
+            run<1>(dwords);
+            usleep(200000);
         }
     }
 }
