@@ -260,6 +260,7 @@ int main(int argc, char ** argv) {
         int64_t dwords = atoll(argv[1]);
         run(dwords);
     } else {
+        int btc = env_get_int("BANDWIDTH_TEST_CASE", 0);
         int num_cu = [&](){
             cudaDeviceProp dev_prop;
             int dev;
@@ -267,15 +268,19 @@ int main(int argc, char ** argv) {
             CALL(cudaGetDeviceProperties(&dev_prop,dev ));
             return dev_prop.multiProcessorCount;
         }();
-        printf("cu:%d, nt_load:%d, nt_store:%d\n", num_cu, USE_NT_LOAD, USE_NT_STORE);
+
+        printf("cu:%d, nt_load:%d, nt_store:%d (%d)\n", num_cu, USE_NT_LOAD, USE_NT_STORE, btc);
+        num_cu = btc == 0 ? num_cu : 256;
 
         int64_t dwords_list[] = {
             20000,
             400000,
+            16711680,
             static_cast<int64_t>(116) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(212) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(476) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(820) * num_cu * BLOCK_SIZE,
+            static_cast<int64_t>(1024) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(1638) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(3276) * num_cu * BLOCK_SIZE,
             static_cast<int64_t>(5710) * num_cu * BLOCK_SIZE
