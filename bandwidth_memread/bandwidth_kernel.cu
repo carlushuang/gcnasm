@@ -261,6 +261,7 @@ int main(int argc, char ** argv) {
         run(dwords);
     } else {
         int btc = env_get_int("BANDWIDTH_TEST_CASE", 0);
+        int list = env_get_int("BANDWIDTH_TEST_LIST", 0);
         int num_cu = [&](){
             cudaDeviceProp dev_prop;
             int dev;
@@ -272,7 +273,7 @@ int main(int argc, char ** argv) {
         printf("cu:%d, nt_load:%d, nt_store:%d (%d)\n", num_cu, USE_NT_LOAD, USE_NT_STORE, btc);
         num_cu = btc == 0 ? num_cu : (btc == -1 ? 304 : btc);
 
-        int64_t dwords_list[] = {
+        int64_t dwords_list_1[] = {
             20000,
             400000,
             16711680,
@@ -287,7 +288,24 @@ int main(int argc, char ** argv) {
             // static_cast<int64_t>(12032) * num_cu * BLOCK_SIZE
         };
 
-        int iters = sizeof(dwords_list) / sizeof(dwords_list[0]);
+        int64_t dwords_list_2[] = {
+            20000,
+            400000,
+            16711680,
+            static_cast<int64_t>(10032 * 3) * BLOCK_SIZE,
+            static_cast<int64_t>(10032 * 6) * BLOCK_SIZE,
+            static_cast<int64_t>(10032 * 14) * BLOCK_SIZE,
+            static_cast<int64_t>(10032 * 25) * BLOCK_SIZE,
+            static_cast<int64_t>(10032 * 38) * BLOCK_SIZE,
+            static_cast<int64_t>(10032 * 54) * BLOCK_SIZE,
+            static_cast<int64_t>(10032 * 95) * BLOCK_SIZE,
+            static_cast<int64_t>(10032 * 158) * BLOCK_SIZE
+            // static_cast<int64_t>(12032) * num_cu * BLOCK_SIZE
+        };
+
+        int64_t * dwords_list = list == 2 ? dwords_list_2 : dwords_list_1;
+
+        int iters = sizeof(dwords_list_1) / sizeof(dwords_list_1[0]);
 
         printf("---------------------------------------------\n");
         for(auto i = 0; i < iters; i++) {
