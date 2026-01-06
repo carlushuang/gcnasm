@@ -270,7 +270,7 @@ int main(int argc, char ** argv) {
         }();
 
         printf("cu:%d, nt_load:%d, nt_store:%d (%d)\n", num_cu, USE_NT_LOAD, USE_NT_STORE, btc);
-        num_cu = btc == 0 ? num_cu : 256;
+        num_cu = btc == 0 ? num_cu : (btc == -1 ? 304 : btc);
 
         int64_t dwords_list[] = {
             20000,
