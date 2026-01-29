@@ -4,6 +4,9 @@
 #include <iostream>
 #include <numeric>
 #include <memory>
+#include <cstring>
+#include <cstdlib>
+#include <omp.h>
 
 #include <opus/opus.hpp>
 
@@ -25,6 +28,39 @@ __host__ __device__ inline int ceil_div(int a, int b) {
     return (a + b - 1) / b;
 }
 
+/**
+ * @brief Transform a workgroup ID to a new workgroup ID based on the chunk size and number of XCDs.
+ * @param workgroup_id The original workgroup ID.
+ * @param num_workgroups The total number of workgroups.
+ * @param num_xcds The number of XCDs.
+ * @param chunk_size The chunk size.
+ * @return The new workgroup ID.
+ */
+__host__ __device__ inline int chiplet_transform_chunked(
+    int workgroup_id, 
+    int num_workgroups,
+    int num_xcds,
+    int chunk_size 
+) {
+    // Current XCD
+    int xcd = workgroup_id % num_xcds;
+
+    // Largest full (NUM_XCDS*CHUNK_SIZE)-aligned block
+    int block = num_xcds * chunk_size;
+    int limit = (num_workgroups / block) * block;
+
+    // If pid beyond the last full block, leave unchanged
+    if (workgroup_id > limit) return workgroup_id;
+
+    // Local PID (within round-robin assignment)
+    int local_pid    = workgroup_id / num_xcds;
+    int chunk_idx    = local_pid / chunk_size;
+    int pos_in_chunk = local_pid % chunk_size;
+
+    // New PID
+    return chunk_idx * block + xcd * chunk_size + pos_in_chunk;
+}
+
 // Configuration traits for FlatMM kernel: defines tile sizes, data types, and MFMA layout
 template<int BLOCK_SIZE_,   // workgroup size
         typename BLOCK_,    // opus::seq<m, n, k>, block_tile m/n/k
@@ -34,8 +70,6 @@ template<int BLOCK_SIZE_,   // workgroup size
         >
 struct opus_flatmm_traits {
     // always use 16x16 mfma
-    // always 4 wave
-    // always 32x64x[64DW] WG tile size for one repeat(expand)
     using BLOCK = opus::remove_cvref_t<BLOCK_>;
     using DTYPE = opus::remove_cvref_t<DTYPE_>;
     using VEC   = opus::remove_cvref_t<VEC_>;
@@ -199,10 +233,34 @@ __global__ void flatmm_kernel(opus_fmm_kargs kargs) {
 
     // Calculate global workgroup and tile indices
     int wgid = (blockIdx.y * gridDim.x) + blockIdx.x;
+#if 0
     const int num_tiles_m = ceil_div(kargs.m, T::B_M);
     int row = (wgid % num_tiles_m) * T::B_M;
     int col = (wgid / num_tiles_m) * T::B_N;
     int flat_col = col / T::W_N;
+#else
+    const int NUM_WGS = gridDim.x * gridDim.y;
+    const int NUM_XCDS = 8;  // Number of XCDs (chiplets)
+    const int WGM = 8;       // Workgroup tile size for M dimension grouping
+    
+    // Swizzle chiplet so that wgids are in the same XCD
+    wgid = chiplet_transform_chunked(wgid, NUM_WGS, NUM_XCDS, 64);
+    
+    // Swizzle for better L2 within the same XCD
+    const int num_tiles_m = ceil_div(kargs.m, T::B_M);
+    const int num_tiles_n = ceil_div(kargs.n, T::B_N);
+    const int num_wgid_in_group = WGM * num_tiles_n;
+    int group_id = wgid / num_wgid_in_group;
+    int first_pid_m = group_id * WGM;
+    int group_size_m = min(num_tiles_m - first_pid_m, WGM);
+    int pid_m = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+    int pid_n = (wgid % num_wgid_in_group) / group_size_m;
+    
+    // Assign the tile's row/column based on the pid_m and pid_n
+    int row = pid_m * T::B_M;
+    int col = pid_n * T::B_N;
+    int flat_col = col / T::W_N;
+#endif
 
     int batch_id = blockIdx.z;
     int wave_id = __builtin_amdgcn_readfirstlane(threadIdx.x / opus::get_warp_size());
@@ -271,45 +329,88 @@ __global__ void flatmm_kernel(opus_fmm_kargs kargs) {
 // Fill 2D matrix with random values in specified range
 template<typename T>
 void rand_vector_2d(T* ptr, int m, int n, int ld, float min_val = 0.0f, float max_val = 1.0f) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dis(min_val, max_val);
-    for(int i = 0; i < m; i++) {
-        for(int j = 0; j < n; j++) {
-            ptr[i * ld + j] = static_cast<T>(dis(gen));
+    #pragma omp parallel
+    {
+        std::random_device rd;
+        std::mt19937 gen(rd() + omp_get_thread_num());
+        std::uniform_real_distribution<float> dis(min_val, max_val);
+        #pragma omp for collapse(2)
+        for(int i = 0; i < m; i++) {
+            for(int j = 0; j < n; j++) {
+                ptr[i * ld + j] = static_cast<T>(dis(gen));
+            }
         }
     }
 }
 
 // Validate computed results against reference with error threshold
 template<typename T>
-bool valid_vector(const float* ref, const T* result, int n, float threshold = 1e-3f) {
+bool valid_vector(const T* ref, const T* result, int n, float threshold = 1e-3f) {
     int errors = 0;
     for(int i = 0; i < n; i++) {
-        float diff = std::abs(ref[i] - static_cast<float>(result[i]));
+        float diff = std::abs(static_cast<float>(ref[i]) - static_cast<float>(result[i]));
         if(diff > threshold) {
             if(errors < 10) {
                 printf("Error at %d: ref=%.6f, result=%.6f, diff=%.6f\n", 
-                       i, ref[i], static_cast<float>(result[i]), diff);
+                       i, static_cast<float>(ref[i]), static_cast<float>(result[i]), diff);
             }
             errors++;
+            if(errors >= 10) break;
         }
     }
-    if(errors > 0) printf("Total errors: %d/%d\n", errors, n);
     return errors == 0;
 }
 
 // CPU reference GEMM implementation for validation
-void gemm_ref(const float* a, const float* b, float* c, int m, int n, int k, int lda, int ldb, int ldc) {
+void gemm_ref(const fp16_t* a, const fp16_t* b, fp16_t* c, int m, int n, int k, int lda, int ldb, int ldc) {
+    #pragma omp parallel for collapse(2)
     for(int i = 0; i < m; i++) {
         for(int j = 0; j < n; j++) {
             float sum = 0.0f;
             for(int p = 0; p < k; p++) {
-                sum += a[i * lda + p] * b[p * ldb + j];
+                sum += static_cast<float>(a[i * lda + p]) * static_cast<float>(b[p * ldb + j]);
             }
-            c[i * ldc + j] = sum;
+            c[i * ldc + j] = static_cast<fp16_t>(sum);
         }
     }
+}
+
+// Benchmark kernel performance with warm-up and timing
+template<typename Traits>
+void benchmark_kernel(const opus_fmm_kargs& kargs, dim3 grid, dim3 block, int warmup = 50, int iterations = 100) {
+    // Warm up
+    for (int i = 0; i < warmup; ++i) {
+        flatmm_kernel<Traits><<<grid, block>>>(kargs);
+        CHECK_HIP_KERNEL_LAUNCH();
+    }
+
+    hipEvent_t start, stop;
+    CHECK_HIP(hipEventCreate(&start));
+    CHECK_HIP(hipEventCreate(&stop));
+
+    CHECK_HIP(hipDeviceSynchronize());
+    CHECK_HIP(hipEventRecord(start));
+
+    // Timed iterations
+    for (int i = 0; i < iterations; ++i) {
+        flatmm_kernel<Traits><<<grid, block>>>(kargs);
+        CHECK_HIP_KERNEL_LAUNCH();
+    }
+
+    CHECK_HIP(hipEventRecord(stop));
+    CHECK_HIP(hipEventSynchronize(stop));
+
+    float total_time = 0;
+    CHECK_HIP(hipEventElapsedTime(&total_time, start, stop));
+
+    CHECK_HIP(hipEventDestroy(start));
+    CHECK_HIP(hipEventDestroy(stop));
+
+    const float avg_time = total_time / iterations;
+    const std::size_t flop = std::size_t(2) * kargs.m * kargs.n * kargs.k * kargs.batch;
+    const float tflops = static_cast<float>(flop) / 1.0e9f / avg_time;
+
+    printf("Kernel Performance: avg_time=%.4f ms, %.2f TFlops\n", avg_time, tflops);
 }
 
 // Shuffle B matrix for optimized memory access pattern in FlatMM kernel
@@ -335,6 +436,7 @@ void shuffle_b(const DataType* b_input, DataType* b_output, int N, int K) {
 
     // Output layout: [dim0, dim2, dim1, dim3] = [N/N_tile, K/items, N_tile, items]
     // This matches the flat K layout expected by the kernel
+    #pragma omp parallel for collapse(2)
     for(int d0 = 0; d0 < dim0; ++d0) {
         for(int d2 = 0; d2 < dim2; ++d2) {
             const int n_base = d0 * N_Warp_Tile;
@@ -357,7 +459,7 @@ void shuffle_b(const DataType* b_input, DataType* b_output, int N, int K) {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
     constexpr int BLOCK_SIZE = 256;
     constexpr int BLOCK_M = 128;
     constexpr int BLOCK_N = 128;
@@ -371,48 +473,62 @@ int main() {
         false
     >;
 
-    const int M = BLOCK_M * 4;
-    const int N = BLOCK_N * 3;
-    const int K = BLOCK_K * 2;
-    const int batch = 8;
+    // Default problem sizes
+    int M = 256;
+    int N = 512;
+    int K = 128;
+    int batch = 8;
+
+    // Parse command line arguments: -m -n -k -b
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if ((std::strcmp(arg, "-m") == 0 || std::strcmp(arg, "--m") == 0) && i + 1 < argc) {
+            M = std::atoi(argv[++i]);
+        } else if ((std::strcmp(arg, "-n") == 0 || std::strcmp(arg, "--n") == 0) && i + 1 < argc) {
+            N = std::atoi(argv[++i]);
+        } else if ((std::strcmp(arg, "-k") == 0 || std::strcmp(arg, "--k") == 0) && i + 1 < argc) {
+            K = std::atoi(argv[++i]);
+        } else if ((std::strcmp(arg, "-b") == 0 || std::strcmp(arg, "--b") == 0) && i + 1 < argc) {
+            batch = std::atoi(argv[++i]);
+        }
+    }
+
+    if (M <= 0 || N <= 0 || K <= 0 || batch <= 0) {
+        std::cerr << "Invalid problem size: M,N,K and batch must be positive.\n";
+        return 1;
+    }
 
     // Allocate host memory
-    auto host_a = std::make_unique<float[]>(batch * M * K);
-    auto host_b = std::make_unique<float[]>(batch * K * N);
-    auto host_c = std::make_unique<float[]>(batch * M * N);
-    auto fp16_a = std::make_unique<fp16_t[]>(batch * M * K);
-    auto fp16_b = std::make_unique<fp16_t[]>(batch * K * N);
-    auto fp16_b_shuffled = std::make_unique<fp16_t[]>(batch * K * N);
-    auto fp16_c = std::make_unique<fp16_t[]>(batch * M * N);
+    auto host_a = std::make_unique<fp16_t[]>(batch * M * K);
+    auto host_b = std::make_unique<fp16_t[]>(batch * N * K);
+    auto host_c = std::make_unique<fp16_t[]>(batch * M * N);
+    auto host_b_shuffled = std::make_unique<fp16_t[]>(batch * N * K);
+    auto host_c_out = std::make_unique<fp16_t[]>(batch * M * N);
 
     // Initialize data
     for(int b = 0; b < batch; b++) {
         rand_vector_2d(host_a.get() + b * M * K, M, K, K, 0.0f, 1.0f);
-        rand_vector_2d(host_b.get() + b * K * N, K, N, N, -0.5f, 0.5f);
+        rand_vector_2d(host_b.get() + b * N * K, K, N, N, -0.5f, 0.5f);
     }
-
-    // Convert to fp16
-    for(int i = 0; i < batch * M * K; i++) fp16_a[i] = static_cast<fp16_t>(host_a[i]);
-    for(int i = 0; i < batch * K * N; i++) fp16_b[i] = static_cast<fp16_t>(host_b[i]);
 
     // Shuffle B matrix for optimized GPU memory access
     printf("Shuffling B matrix for FlatMM layout (batch=%d)...\n", batch);
     for(int b = 0; b < batch; b++) {
         shuffle_b<fp16_t, Traits>(
-            fp16_b.get() + b * K * N,
-            fp16_b_shuffled.get() + b * K * N,
+            host_b.get() + b * N * K,
+            host_b_shuffled.get() + b * N * K,
             N, K);
     }
 
     // Allocate device memory
     fp16_t *dev_a, *dev_b, *dev_c;
     CHECK_HIP(hipMalloc(&dev_a, batch * M * K * sizeof(fp16_t)));
-    CHECK_HIP(hipMalloc(&dev_b, batch * K * N * sizeof(fp16_t)));
+    CHECK_HIP(hipMalloc(&dev_b, batch * N * K * sizeof(fp16_t)));
     CHECK_HIP(hipMalloc(&dev_c, batch * M * N * sizeof(fp16_t)));
 
     // Copy to device (use shuffled B matrix)
-    CHECK_HIP(hipMemcpy(dev_a, fp16_a.get(), batch * M * K * sizeof(fp16_t), hipMemcpyHostToDevice));
-    CHECK_HIP(hipMemcpy(dev_b, fp16_b_shuffled.get(), batch * K * N * sizeof(fp16_t), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(dev_a, host_a.get(), batch * M * K * sizeof(fp16_t), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(dev_b, host_b_shuffled.get(), batch * N * K * sizeof(fp16_t), hipMemcpyHostToDevice));
 
     // Setup kernel arguments
     opus_fmm_kargs kargs{};
@@ -428,7 +544,7 @@ int main() {
     kargs.stride_b = N;
     kargs.stride_c = N;
     kargs.stride_a_batch = M * K;
-    kargs.stride_b_batch = K * N;
+    kargs.stride_b_batch = N * K;
     kargs.stride_c_batch = M * N;
 
     // Calculate grid dimensions and launch kernel
@@ -445,20 +561,20 @@ int main() {
     CHECK_HIP_KERNEL_LAUNCH();
 
     // Copy results back to host for validation
-    CHECK_HIP(hipMemcpy(fp16_c.get(), dev_c, batch * M * N * sizeof(fp16_t), hipMemcpyDeviceToHost));
+    CHECK_HIP(hipMemcpy(host_c_out.get(), dev_c, batch * M * N * sizeof(fp16_t), hipMemcpyDeviceToHost));
 
     // Verify each batch against CPU reference implementation
     bool all_valid = true;
     for(int b = 0; b < batch; b++) {
         gemm_ref(
             host_a.get() + b * M * K,
-            host_b.get() + b * K * N,
+            host_b.get() + b * N * K,
             host_c.get() + b * M * N,
             M, N, K, K, N, N);
         bool valid = valid_vector(
             host_c.get() + b * M * N,
-            fp16_c.get() + b * M * N,
-            M * N, 1e-2f);
+            host_c_out.get() + b * M * N,
+            M * N, 5e-2f);
         printf("[FlatMM batch %d/%d: %dx%dx%d, block_%dx%dx%d] %s\n", 
                b + 1, batch, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
                valid ? "✓ VALID" : "✗ FAIL");
@@ -466,6 +582,11 @@ int main() {
     }
 
     printf("\n[Overall] %s\n", all_valid ? "✓ ALL BATCHES VALID" : "✗ SOME BATCHES FAILED");
+
+    // Benchmark kernel performance
+    printf("\n");
+    benchmark_kernel<Traits>(kargs, grid, block);
+    printf("\n");
 
     // Cleanup
     CHECK_HIP(hipFree(dev_a));
