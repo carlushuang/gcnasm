@@ -86,9 +86,12 @@ struct opus_flatmm_traits {
     using D_ACC  = opus::tuple_element_t<3, DTYPE>;
     using D_BIAS = opus::tuple_element_t<4, DTYPE>;
 
-    static constexpr int T_M = 1; // waves along M
+    static constexpr int T_M = 2; // waves along M
     static constexpr int T_N = 4; // waves along N
     static constexpr int T_K = 1; // waves along K
+
+    static_assert(BLOCK_SIZE / opus::get_warp_size() == T_M * T_N * T_K);
+    static_assert(T_K == 1);
 
     static constexpr int W_M = 16; // wave gemm size M
     static constexpr int W_N = 16; // wave gemm size N
@@ -142,71 +145,78 @@ struct opus_fmm_kargs {
 
 // Create layout for loading A matrix from global memory
 template<typename T>
-inline __device__ auto make_layout_ga(int lane_id, int wave_id, int stride_a) {
+inline __device__ auto make_layout_ga(int lane_id, int wave_id_m, int wave_id_n, int stride_a) {
     constexpr int threads_k = T::B_K / T::VEC_A;
     constexpr int threads_m_per_block = T::BLOCK_SIZE / threads_k;
     constexpr int threads_m_per_wave = opus::get_warp_size() / threads_k;
-    constexpr int num_waves = T::BLOCK_SIZE / opus::get_warp_size();
+
     constexpr auto ga_block_shape = opus::make_tuple(
         opus::number<T::B_M / threads_m_per_block>{},
+        opus::number<T::T_M>{},
         opus::number<threads_m_per_wave>{},
-        opus::number<num_waves>{},
+        opus::number<T::T_N>{},
         opus::number<threads_k>{},
         opus::number<T::VEC_A>{});
+
     constexpr auto ga_block_dim = opus::make_tuple(
-        opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::p_dim{}),
+        opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::p_dim{}, opus::p_dim{}),
         opus::make_tuple(opus::p_dim{}, opus::y_dim{}));
+
     return opus::make_layout<T::VEC_A>(
         ga_block_shape,
         opus::unfold_x_stride(ga_block_dim, ga_block_shape, opus::tuple{stride_a, 1_I}),
-        opus::unfold_p_coord(ga_block_dim, opus::tuple{lane_id / threads_k, wave_id, lane_id % threads_k}));
+        opus::unfold_p_coord(ga_block_dim, opus::tuple{wave_id_m, lane_id / threads_k, wave_id_n, lane_id % threads_k}));
 }
 
 // Create layout for storing A matrix to shared memory
 template<typename T>
-inline __device__ auto make_layout_sa(int lane_id, int wave_id) {
+inline __device__ auto make_layout_sa(int lane_id, int wave_id_m, int wave_id_n) {
     constexpr int num_waves = T::BLOCK_SIZE / opus::get_warp_size();
+
     constexpr auto sa_block_shape = opus::make_tuple(
         opus::number<T::smem_m_rep / num_waves>{},
-        opus::number<num_waves>{},
+        opus::number<T::T_M>{},
+        opus::number<T::T_N>{},
         opus::number<opus::get_warp_size()>{},
         opus::number<T::VEC_A>{});
+
     constexpr auto sa_block_dim = opus::make_tuple(
-        opus::make_tuple(opus::y_dim{}, opus::p_dim{}),
+        opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::p_dim{}),
         opus::make_tuple(opus::p_dim{}, opus::y_dim{}));
+
     return opus::make_layout<T::VEC_A>(
         sa_block_shape,
         opus::unfold_x_stride(sa_block_dim, sa_block_shape, opus::tuple{T::smem_linear_wave + T::smem_padding, 1_I}),
-        opus::unfold_p_coord(sa_block_dim, opus::tuple{wave_id, lane_id}));
+        opus::unfold_p_coord(sa_block_dim, opus::tuple{wave_id_m, wave_id_n, lane_id}));
 }
 
 // Create layout for reading A matrix from shared memory to registers
 template<typename T>
-inline __device__ auto make_layout_ra(int lane_id, int wave_id) {
-    constexpr int threads_k = T::B_K / T::VEC_A;
-    constexpr int threads_m_per_block = T::BLOCK_SIZE / threads_k;
-    constexpr int num_waves = T::BLOCK_SIZE / opus::get_warp_size();
+inline __device__ auto make_layout_ra(int lane_id, int wave_id_m) {
     constexpr auto ra_block_shape = opus::make_tuple(
-        opus::number<T::E_M / (threads_m_per_block / T::W_M)>{},
-        opus::number<num_waves>{},
-        opus::number<threads_m_per_block / T::W_M>{},
-        opus::number<T::W_M / num_waves>{},
+        opus::number<T::E_M>{},
+        opus::number<T::T_N>{},
+        opus::number<T::T_M>{},
+        opus::number<T::W_M / T::T_N>{},
         opus::number<T::E_K>{},
         opus::number<opus::get_warp_size() / T::W_M>{},
         opus::number<T::VEC_A>{});
+
     constexpr auto ra_block_dim = opus::make_tuple(
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}),
-        opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
+        opus::make_tuple(opus::p_dim{}, opus::p_dim{}, opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
+
     auto lane_id_m = lane_id % T::W_M;
+
     return opus::make_layout<T::VEC_A>(
         ra_block_shape,
         opus::unfold_x_stride(ra_block_dim, ra_block_shape, opus::tuple{T::smem_linear_wave + T::smem_padding, 1_I}),
-        opus::unfold_p_coord(ra_block_dim, opus::tuple{lane_id_m % num_waves, lane_id_m / num_waves, lane_id / T::W_M}));
+        opus::unfold_p_coord(ra_block_dim, opus::tuple{lane_id_m % T::T_N, wave_id_m, lane_id_m / T::T_N, lane_id / T::W_M}));
 }
 
 // Create layout for loading flat B matrix from global memory
 template<typename T>
-inline __device__ auto make_layout_gb(int lane_id, int wave_id, int flat_k) {
+inline __device__ auto make_layout_gb(int lane_id, int wave_id_n, int flat_k) {
     constexpr auto flat_b_block_shape = opus::make_tuple(
         opus::number<T::E_N>{},
         opus::number<T::T_N>{},
@@ -219,12 +229,12 @@ inline __device__ auto make_layout_gb(int lane_id, int wave_id, int flat_k) {
     return opus::make_layout<T::VEC_B>(
         flat_b_block_shape,
         opus::unfold_x_stride(flat_b_block_dim, flat_b_block_shape, opus::tuple{flat_k, 1_I}),
-        opus::unfold_p_coord(flat_b_block_dim, opus::tuple{wave_id, lane_id}));
+        opus::unfold_p_coord(flat_b_block_dim, opus::tuple{wave_id_n, lane_id}));
 }
 
 // FlatMM kernel
 template<typename Traits>
-__global__ void flatmm_kernel(opus_fmm_kargs kargs) {
+__global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_kargs kargs) {
     using T = opus::remove_cvref_t<Traits>;
     using D_A = typename T::D_A;
     using D_B = typename T::D_B;
@@ -274,11 +284,15 @@ __global__ void flatmm_kernel(opus_fmm_kargs kargs) {
     auto g_b = opus::make_gmem(reinterpret_cast<const D_B*>(kargs.ptr_b) + batch_id*kargs.stride_b_batch + flat_col*flat_k);
     auto g_c = opus::make_gmem(reinterpret_cast<D_C*>(kargs.ptr_c) + batch_id*kargs.stride_c_batch + row*kargs.stride_c + col);
 
+    // Calculate wave position in the output tile
+    int wave_id_m = wave_id / T::T_N;
+    int wave_id_n = wave_id % T::T_N;
+
     // Create memory layouts for loading A, B matrices
-    auto u_ga = make_layout_ga<T>(lane_id, wave_id, kargs.stride_a);
-    auto u_sa = make_layout_sa<T>(lane_id, wave_id);
-    auto u_ra = make_layout_ra<T>(lane_id, wave_id);
-    auto u_gb = make_layout_gb<T>(lane_id, wave_id, flat_k);
+    auto u_ga = make_layout_ga<T>(lane_id, wave_id_m, wave_id_n, kargs.stride_a);
+    auto u_sa = make_layout_sa<T>(lane_id, wave_id_m, wave_id_n);
+    auto u_ra = make_layout_ra<T>(lane_id, wave_id_m);
+    auto u_gb = make_layout_gb<T>(lane_id, wave_id_n, flat_k);
 
     // Allocate shared memory for A matrix with padding to avoid bank conflicts
     constexpr int smem_a_byte = T::smem_m_rep * (T::smem_linear_wave + T::smem_padding) * sizeof(D_A);
@@ -291,10 +305,6 @@ __global__ void flatmm_kernel(opus_fmm_kargs kargs) {
         opus::seq<T::T_M, T::T_N, T::T_K>{},
         opus::seq<T::W_M, T::W_N, T::W_K>{},
         opus::mfma_adaptor_swap_ab{});
-
-    // Calculate wave position in the output tile
-    int wave_id_m = wave_id / T::T_N;
-    int wave_id_n = wave_id % T::T_N;
 
     auto u_gc = opus::partition_layout_c<T::VEC_C>(
         mma,
@@ -460,9 +470,9 @@ void shuffle_b(const DataType* b_input, DataType* b_output, int N, int K) {
 }
 
 int main(int argc, char** argv) {
-    constexpr int BLOCK_SIZE = 256;
-    constexpr int BLOCK_M = 128;
-    constexpr int BLOCK_N = 128;
+    constexpr int BLOCK_SIZE = 512;
+    constexpr int BLOCK_M = 256;
+    constexpr int BLOCK_N = 256;
     constexpr int BLOCK_K = 64;
 
     using Traits = opus_flatmm_traits<
