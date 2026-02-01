@@ -167,9 +167,9 @@ int main() {
     cast_fwd_bwd_fp8_fp32<8>(2048 * 4);
     cast_fwd_bwd_fp8_fp32<4>(2048 * 4);
     cast_fwd_bwd_fp8_fp32<2>(2048 * 4);
-    //if(is_gfx950) {
+    if(is_gfx950) {
         cast_fwd_bwd_fp4_fp32<16>(2048 * 4);
-    //}
+    }
 
     return EXIT_SUCCESS;
 }
