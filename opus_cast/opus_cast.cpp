@@ -45,7 +45,7 @@ __global__ void cast_kernel_with_f4(DType* __restrict__ dst,  const SType* __res
     const S_VEC_T * src_vec = reinterpret_cast<const S_VEC_T*>(src);
     size_t global_idx = blockIdx.x * blockDim.x + threadIdx.x;
     for (size_t i = global_idx; i < N / VEC_SIZE; i += gridDim.x * blockDim.x) {
-        dst_vec[i] = __builtin_bit_cast(D_VEC_T, opus::cast<DType>(src_vec[i], 0));
+        dst_vec[i] = __builtin_bit_cast(D_VEC_T, opus::cast<DType>(src_vec[i] /*, some_scale_float */));    // opus::cast(x, some_scale_float) <-- pass in scale to optionally scale this cvt!
     }
 }
 
@@ -169,6 +169,9 @@ int main() {
     cast_fwd_bwd_fp8_fp32<2>(2048 * 4);
     if(is_gfx950) {
         cast_fwd_bwd_fp4_fp32<16>(2048 * 4);
+        cast_fwd_bwd_fp4_fp32<8>(2048 * 4);
+        cast_fwd_bwd_fp4_fp32<4>(2048 * 4);
+        cast_fwd_bwd_fp4_fp32<2>(2048 * 4);
     }
 
     return EXIT_SUCCESS;
