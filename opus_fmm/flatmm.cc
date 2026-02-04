@@ -1,5 +1,5 @@
 #include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
 #include <random>
 #include <iostream>
 #include <numeric>
@@ -11,7 +11,7 @@
 
 #include <opus/opus.hpp>
 
-using fp16_t = __fp16;
+using bf16_t = __bf16;
 using opus::operator""_I;
 
 #define CHECK_HIP(call)                                                                                   \
@@ -24,12 +24,6 @@ using opus::operator""_I;
     } while(0)
 
 #define CHECK_HIP_KERNEL_LAUNCH() CHECK_HIP(hipGetLastError())
-
-// sched barrier mask values
-#define MFMA_MASK 0x08
-#define VMEM_MASK 0x20
-#define DS_READ_MASK 0x100
-#define DS_WRITE_MASK 0x200
 
 __host__ __device__ inline int ceil_div(int a, int b) {
     return (a + b - 1) / b;
@@ -93,7 +87,7 @@ struct opus_flatmm_traits {
     using D_ACC  = opus::tuple_element_t<3, DTYPE>;
     using D_BIAS = opus::tuple_element_t<4, DTYPE>;
 
-    static constexpr int T_M = 1; // waves along M
+    static constexpr int T_M = 2; // waves along M
     static constexpr int T_N = 4; // waves along N
     static constexpr int T_K = 1; // waves along K
 
@@ -104,13 +98,16 @@ struct opus_flatmm_traits {
     static constexpr int W_N = 16; // wave gemm size N
     static constexpr int W_K = 32; // wave gemm size K
 
-    static_assert(B_M % (W_M * T_M) == 0);
-    static_assert(B_N % (W_N * T_N) == 0);
+    static constexpr int HALF_B_M = B_M / 2;
+    static constexpr int HALF_B_N = B_N / 2;
+
+    static_assert(HALF_B_M % (W_M * T_M) == 0);
+    static_assert(HALF_B_N % (W_N * T_N) == 0);
     static_assert(B_K % (W_K * T_K) == 0);
 
-    static constexpr int E_M = B_M / (W_M * T_M);   // expand, repeat how many times along each dim
-    static constexpr int E_N = B_N / (W_N * T_N);   // expand, repeat how many times along each dim
-    static constexpr int E_K = B_K / (W_K * T_K);   // expand, repeat how many times along each dim
+    static constexpr int E_M = HALF_B_M / (W_M * T_M); // expand, repeat how many times along each dim
+    static constexpr int E_N = HALF_B_N / (W_N * T_N); // expand, repeat how many times along each dim
+    static constexpr int E_K = B_K / (W_K * T_K);      // expand, repeat how many times along each dim
 
     static constexpr int VEC_A = opus::get<0>(VEC{});
     static constexpr int VEC_B = opus::get<1>(VEC{});
@@ -123,18 +120,20 @@ struct opus_flatmm_traits {
     static_assert(opus::get_warp_size() * VEC_B == flat_k_per_wave);
     static constexpr int flat_k_per_block = flat_k_per_wave * B_K / W_K;
     static constexpr int flat_n_per_block = B_N / W_N;
+    static constexpr int flat_n_per_half_block = flat_n_per_block / 2;
 
     // minimal compact pixels for async copy for one wave
     static_assert(VEC_A == 16 / sizeof(D_A));
     static constexpr int smem_linear_wave = opus::get_warp_size() * 16 / sizeof(D_A);
     static constexpr int smem_m_sub = smem_linear_wave / B_K;
-    static constexpr int smem_m_rep = B_M / smem_m_sub;
+    static constexpr int smem_m_rep = HALF_B_M / smem_m_sub;
     static constexpr int smem_padding = 2 * 16 / sizeof(D_A);
 
-    // number of instructions
-    static constexpr int a_buffer_load_insts = B_M * B_K / (BLOCK_SIZE * VEC_A);
-    static constexpr int b_buffer_load_insts = flat_n_per_block * flat_k_per_block / (opus::get_warp_size() * T_N * VEC_B);   
-    static constexpr int c_mfma_insts = E_M * E_N * E_K;
+    // number of assembly instructions
+    static constexpr int a_buffer_load_insts = HALF_B_M * B_K / (BLOCK_SIZE * VEC_A);
+    static constexpr int b_buffer_load_insts = flat_n_per_half_block * flat_k_per_block / (BLOCK_SIZE * VEC_B);
+    static constexpr int a_ds_read_insts = (E_M * E_K * W_M * W_K) / (opus::get_warp_size() * VEC_A);
+    static constexpr int b_ds_read_insts = (E_N * E_K * W_N * W_K) / (opus::get_warp_size() * VEC_B);
 };
 
 // Kernel arguments structure for FlatMM operation
@@ -163,7 +162,7 @@ inline __device__ auto make_layout_ga(int lane_id, int wave_id_m, int wave_id_n,
     constexpr int threads_m_per_wave = opus::get_warp_size() / threads_k;
 
     constexpr auto ga_block_shape = opus::make_tuple(
-        opus::number<T::B_M / threads_m_per_block>{},
+        opus::number<T::HALF_B_M / threads_m_per_block>{},
         opus::number<T::T_M>{},
         opus::number<threads_m_per_wave>{},
         opus::number<T::T_N>{},
@@ -204,43 +203,65 @@ inline __device__ auto make_layout_sa(int lane_id, int wave_id_m, int wave_id_n)
 
 // Create layout for reading A matrix from shared memory to registers
 template<typename T>
-inline __device__ auto make_layout_ra(int lane_id, int wave_id) {
-    constexpr int threads_k = T::B_K / T::VEC_A;
-    constexpr int threads_m_per_block = T::BLOCK_SIZE / threads_k;
-    constexpr int num_waves = T::BLOCK_SIZE / opus::get_warp_size();
+inline __device__ auto make_layout_ra(int lane_id, int wave_id_m) {
     constexpr auto ra_block_shape = opus::make_tuple(
-        opus::number<T::E_M / (threads_m_per_block / T::W_M)>{},
-        opus::number<num_waves>{},
-        opus::number<threads_m_per_block / T::W_M>{},
-        opus::number<T::W_M / num_waves>{},
+        opus::number<T::E_M>{},
+        opus::number<T::T_N>{},
+        opus::number<T::T_M>{},
+        opus::number<T::W_M / T::T_N>{},
         opus::number<T::E_K>{},
         opus::number<opus::get_warp_size() / T::W_M>{},
         opus::number<T::VEC_A>{});
 
     constexpr auto ra_block_dim = opus::make_tuple(
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}),
-        opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
+        opus::make_tuple(opus::p_dim{}, opus::p_dim{}, opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
 
     auto lane_id_m = lane_id % T::W_M;
 
     return opus::make_layout<T::VEC_A>(
         ra_block_shape,
         opus::unfold_x_stride(ra_block_dim, ra_block_shape, opus::tuple{T::smem_linear_wave + T::smem_padding, 1_I}),
-        opus::unfold_p_coord(ra_block_dim, opus::tuple{lane_id_m % num_waves, lane_id_m / num_waves, lane_id / T::W_M}));
+        opus::unfold_p_coord(ra_block_dim, opus::tuple{lane_id_m % T::T_N, wave_id_m, lane_id_m / T::T_N, lane_id / T::W_M}));
 }
 
-// Create layout for loading flat B matrix from global memory
+// Create layout for loading B matrix from global memory to shared memory
 template<typename T>
-inline __device__ auto make_layout_gb(int lane_id, int wave_id_n, int flat_k) {
+inline __device__ auto make_layout_gb_sb(int lane_id, int wave_id, int stride) {
+    constexpr int num_waves = T::BLOCK_SIZE / opus::get_warp_size();
+    constexpr int waves_n = num_waves / T::E_K;
+    
+    constexpr auto flat_b_block_shape = opus::make_tuple(
+        opus::number<T::flat_n_per_half_block / waves_n>{},
+        opus::number<waves_n>{},
+        opus::number<T::E_K>{},
+        opus::number<opus::get_warp_size()>{},
+        opus::number<T::VEC_B>{});
+
+    constexpr auto flat_b_block_dim = opus::make_tuple(
+        opus::make_tuple(opus::y_dim{}, opus::p_dim{}),
+        opus::make_tuple(opus::p_dim{}, opus::p_dim{}, opus::y_dim{}));
+
+    return opus::make_layout<T::VEC_B>(
+        flat_b_block_shape,
+        opus::unfold_x_stride(flat_b_block_dim, flat_b_block_shape, opus::tuple{stride, 1_I}),
+        opus::unfold_p_coord(flat_b_block_dim, opus::tuple{wave_id / T::E_K, wave_id % T::E_K, lane_id}));
+}
+
+// Create layout for reading B matrix from shared memory to registers
+template<typename T>
+inline __device__ auto make_layout_rb(int lane_id, int wave_id_n, int flat_k) {
     constexpr auto flat_b_block_shape = opus::make_tuple(
         opus::number<T::E_N>{},
         opus::number<T::T_N>{},
         opus::number<T::E_K>{},
         opus::number<opus::get_warp_size()>{},
         opus::number<T::VEC_B>{});
+
     constexpr auto flat_b_block_dim = opus::make_tuple(
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}),
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
+
     return opus::make_layout<T::VEC_B>(
         flat_b_block_shape,
         opus::unfold_x_stride(flat_b_block_dim, flat_b_block_shape, opus::tuple{flat_k, 1_I}),
@@ -306,15 +327,27 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_
     // Create memory layouts for loading A, B matrices
     auto u_ga = make_layout_ga<T>(lane_id, wave_id_m, wave_id_n, kargs.stride_a);
     auto u_sa = make_layout_sa<T>(lane_id, wave_id_m, wave_id_n);
-    auto u_ra = make_layout_ra<T>(lane_id, wave_id);
-    auto u_gb = make_layout_gb<T>(lane_id, wave_id_n, flat_k);
+    auto u_ra = make_layout_ra<T>(lane_id, wave_id_m);
+    auto u_gb = make_layout_gb_sb<T>(lane_id, wave_id, flat_k);
+    auto u_sb = make_layout_gb_sb<T>(lane_id, wave_id, T::flat_k_per_block);
+    auto u_rb = make_layout_rb<T>(lane_id, wave_id_n, T::flat_k_per_block);
 
-    // Allocate shared memory for A matrix with padding to avoid bank conflicts
+    // Allocate shared memory for A/B subtiles and double buffer
     constexpr int smem_a_byte = T::smem_m_rep * (T::smem_linear_wave + T::smem_padding) * sizeof(D_A);
-    __shared__ char smem_a[smem_a_byte * 2];
-    opus::smem<D_A> s_a[2] = {
-        opus::make_smem(reinterpret_cast<D_A*>(smem_a)),
-        opus::make_smem(reinterpret_cast<D_A*>(smem_a + smem_a_byte))
+    __shared__ char smem_a[smem_a_byte * 4];
+    opus::smem<D_A> s_a[2][2] = {
+        {opus::make_smem(reinterpret_cast<D_A*>(smem_a)),
+         opus::make_smem(reinterpret_cast<D_A*>(smem_a + smem_a_byte))},
+        {opus::make_smem(reinterpret_cast<D_A*>(smem_a + 2 * smem_a_byte)),
+         opus::make_smem(reinterpret_cast<D_A*>(smem_a + 3 * smem_a_byte))}
+    };
+    constexpr int smem_b_byte = T::flat_n_per_half_block * T::flat_k_per_block * sizeof(D_B);
+    __shared__ char smem_b[smem_b_byte * 4];
+    opus::smem<D_B> s_b[2][2] = {
+        {opus::make_smem(reinterpret_cast<D_B*>(smem_b)),
+         opus::make_smem(reinterpret_cast<D_B*>(smem_b + smem_b_byte))},
+        {opus::make_smem(reinterpret_cast<D_B*>(smem_b + 2 * smem_b_byte)),
+         opus::make_smem(reinterpret_cast<D_B*>(smem_b + 3 * smem_b_byte))}
     };
 
     // Create tiled MFMA operation with specified tile sizes and types
@@ -326,102 +359,225 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_
 
     typename decltype(mma)::vtype_a v_a;
     typename decltype(mma)::vtype_b v_b[2];
-    typename decltype(mma)::vtype_c v_c;
-    opus::clear(v_c);
+    typename decltype(mma)::vtype_c v_c[2][2];
+    opus::clear(v_c[0][0]);
+    opus::clear(v_c[0][1]);
+    opus::clear(v_c[1][0]);
+    opus::clear(v_c[1][1]);
 
-    int loops = (kargs.k + T::B_K - 1) / T::B_K;
+    // Calculate offsets for A, B, C matrices based on tile indices
+    auto a_offset = [&](int half_tile_m, int tile_k) {
+        return half_tile_m * T::HALF_B_M * kargs.stride_a + tile_k * T::B_K;
+    };
+    auto b_offset = [&](int half_tile_n, int tile_k) {
+        return half_tile_n * T::flat_n_per_half_block * flat_k + tile_k * T::flat_k_per_block;
+    };
+    auto c_offset = [&](int half_tile_m, int half_tile_n) {
+        return half_tile_m * T::HALF_B_M * kargs.stride_c + half_tile_n * T::HALF_B_N;
+    };
+
+    const int loops = ceil_div(kargs.k, T::B_K);
+    int tic = 0, toc = 1;
 
     // Prologue
-    v_b[0] = g_b.template load<T::VEC_B>(u_gb);
-    u_gb += T::flat_k_per_block;
-    __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::b_buffer_load_insts, 0);
+    g_b.template async_load<T::VEC_B>(s_b[tic][0].ptr, u_gb, u_sb, b_offset(0, 0));
+    g_a.template async_load<T::VEC_A>(s_a[tic][0].ptr, u_ga, u_sa, a_offset(0, 0));
+    g_b.template async_load<T::VEC_B>(s_b[tic][1].ptr, u_gb, u_sb, b_offset(1, 0));
+    g_a.template async_load<T::VEC_A>(s_a[tic][1].ptr, u_ga, u_sa, a_offset(1, 0));
 
-    g_a.template async_load<T::VEC_A>(s_a[0].ptr, u_ga, u_sa);
-    u_ga += T::B_K;
-    __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::a_buffer_load_insts, 0);
+    if (wave_id_m == 1) __builtin_amdgcn_s_barrier();
 
-    if (loops > 1) {
-        v_b[1] = g_b.template load<T::VEC_B>(u_gb);
-        u_gb += T::flat_k_per_block;
-        __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::b_buffer_load_insts, 0);
+    opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + T::b_buffer_load_insts>{});
+    __builtin_amdgcn_s_barrier();
 
-        g_a.template async_load<T::VEC_A>(s_a[1].ptr, u_ga, u_sa);
-        u_ga += T::B_K;
-        __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::a_buffer_load_insts, 0);
-    }
+    g_b.template async_load<T::VEC_B>(s_b[toc][0].ptr, u_gb, u_sb, b_offset(0, 1));
+    g_a.template async_load<T::VEC_A>(s_a[toc][0].ptr, u_ga, u_sa, a_offset(0, 1));
+    g_b.template async_load<T::VEC_B>(s_b[toc][1].ptr, u_gb, u_sb, b_offset(1, 1));
 
-    // Main Loop - process 2 tiles per iteration
-    for(auto i = 0; i < loops - 2; i += 2) {
-        // Process tile i
-        opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + T::b_buffer_load_insts>{});
+    opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + 2 * T::b_buffer_load_insts>{});
+    __builtin_amdgcn_s_barrier();
+
+    // Main loop
+    for(int tile = 0; tile < loops - 2; tile += 2) {
+        // First tile
+        v_b[0] = s_b[tic][0].template load<T::VEC_B>(u_rb);
+        v_a = s_a[tic][0].template load<T::VEC_A>(u_ra);
+        g_a.template async_load<T::VEC_A>(s_a[toc][1].ptr, u_ga, u_sa, a_offset(1, tile + 1));
+        opus::s_waitcnt_lgkmcnt(opus::number<T::a_ds_read_insts>{});
         __builtin_amdgcn_s_barrier();
-
-        v_a = s_a[0].template load<T::VEC_A>(u_ra);
-        v_c = mma(v_a, v_b[0], v_c);
-
-        // Load tile i+2
-        v_b[0] = g_b.template load<T::VEC_B>(u_gb);
-        u_gb += T::flat_k_per_block;
-        __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::b_buffer_load_insts, 0);
 
         opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][0] = mma(v_a, v_b[0], v_c[0][0]);
+        __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
-        g_a.template async_load<T::VEC_A>(s_a[0].ptr, u_ga, u_sa);
-        u_ga += T::B_K;
-        __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::a_buffer_load_insts, 0);
-
-        // Process tile i+1
-        opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + T::b_buffer_load_insts>{});
+        v_b[1] = s_b[tic][1].template load<T::VEC_B>(u_rb);
+        g_b.template async_load<T::VEC_B>(s_b[tic][0].ptr, u_gb, u_sb, b_offset(0, tile + 2));
         __builtin_amdgcn_s_barrier();
-
-        v_a = s_a[1].template load<T::VEC_A>(u_ra);
-        v_c = mma(v_a, v_b[1], v_c);
-
-        // Load tile i+3
-        v_b[1] = g_b.template load<T::VEC_B>(u_gb);
-        u_gb += T::flat_k_per_block;
-        __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::b_buffer_load_insts, 0);
 
         opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][1] = mma(v_a, v_b[1], v_c[0][1]);
+        __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
-        
-        g_a.template async_load<T::VEC_A>(s_a[1].ptr, u_ga, u_sa);
-        u_ga += T::B_K;
-        __builtin_amdgcn_sched_group_barrier(VMEM_MASK, T::a_buffer_load_insts, 0);
+
+        v_a = s_a[tic][1].template load<T::VEC_A>(u_ra);
+        g_a.template async_load<T::VEC_A>(s_a[tic][0].ptr, u_ga, u_sa, a_offset(0, tile + 2));
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[1][0] = mma(v_a, v_b[0], v_c[1][0]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        v_b[0] = s_b[toc][0].template load<T::VEC_B>(u_rb);
+        g_b.template async_load<T::VEC_B>(s_b[tic][1].ptr, u_gb, u_sb, b_offset(1, tile + 2));
+        opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + 2 * T::b_buffer_load_insts>{});
+        __builtin_amdgcn_s_barrier();
+
+        __builtin_amdgcn_s_setprio(1);
+        v_c[1][1] = mma(v_a, v_b[1], v_c[1][1]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+
+        // Second tile
+        v_a = s_a[toc][0].template load<T::VEC_A>(u_ra);
+        g_a.template async_load<T::VEC_A>(s_a[tic][1].ptr, u_ga, u_sa, a_offset(1, tile + 2));
+        opus::s_waitcnt_lgkmcnt(opus::number<T::a_ds_read_insts>{});
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][0] = mma(v_a, v_b[0], v_c[0][0]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        v_b[1] = s_b[toc][1].template load<T::VEC_B>(u_rb);
+        g_b.template async_load<T::VEC_B>(s_b[toc][0].ptr, u_gb, u_sb, b_offset(0, tile + 3));
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][1] = mma(v_a, v_b[1], v_c[0][1]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+
+        v_a = s_a[toc][1].template load<T::VEC_A>(u_ra);
+        g_a.template async_load<T::VEC_A>(s_a[toc][0].ptr, u_ga, u_sa, a_offset(0, tile + 3));
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[1][0] = mma(v_a, v_b[0], v_c[1][0]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        g_b.template async_load<T::VEC_B>(s_b[toc][1].ptr, u_gb, u_sb, b_offset(1, tile + 3));
+        opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + 2 * T::b_buffer_load_insts>{});
+        __builtin_amdgcn_s_barrier();
+
+        __builtin_amdgcn_s_setprio(1);
+        v_c[1][1] = mma(v_a, v_b[1], v_c[1][1]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
     }
 
     // Epilogue
-    if (loops >= 2) {
-        // Tile loops-2
+    {
+        int tile = loops - 2;
+
+        v_b[0] = s_b[tic][0].template load<T::VEC_B>(u_rb);
+        v_a = s_a[tic][0].template load<T::VEC_A>(u_ra);
+        g_a.template async_load<T::VEC_A>(s_a[toc][1].ptr, u_ga, u_sa, a_offset(1, tile + 1));
+        __builtin_amdgcn_s_barrier();
+        opus::s_waitcnt_lgkmcnt(0_I);
+
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][0] = mma(v_a, v_b[0], v_c[0][0]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+
+        v_b[1] = s_b[tic][1].template load<T::VEC_B>(u_rb);
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][1] = mma(v_a, v_b[1], v_c[0][1]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+
+        v_a = s_a[tic][1].template load<T::VEC_A>(u_ra);
         opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + T::b_buffer_load_insts>{});
         __builtin_amdgcn_s_barrier();
 
-        v_a = s_a[0].template load<T::VEC_A>(u_ra);
-        v_c = mma(v_a, v_b[0], v_c);
-
-        // Tile loops-1 (last tile)
-        opus::s_waitcnt_vmcnt(0_I);
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[1][0] = mma(v_a, v_b[0], v_c[1][0]);
+        v_c[1][1] = mma(v_a, v_b[1], v_c[1][1]);
+        __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
-
-        v_a = s_a[1].template load<T::VEC_A>(u_ra);
-        v_c = mma(v_a, v_b[1], v_c);
-    } else if (loops == 1) {
-        // Handle single tile case
-        opus::s_waitcnt_vmcnt(0_I);
-        __builtin_amdgcn_s_barrier();
-        
-        v_a = s_a[0].template load<T::VEC_A>(u_ra);
-        v_c = mma(v_a, v_b[0], v_c);
+        tic ^= 1;
+        toc ^= 1;
     }
 
+    {
+        v_b[0] = s_b[tic][0].template load<T::VEC_B>(u_rb);
+        v_a = s_a[tic][0].template load<T::VEC_A>(u_ra);
+        opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts>{});
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][0] = mma(v_a, v_b[0], v_c[0][0]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+
+        v_b[1] = s_b[tic][1].template load<T::VEC_B>(u_rb);
+        opus::s_waitcnt_vmcnt(0_I);
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[0][1] = mma(v_a, v_b[1], v_c[0][1]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+
+        v_a = s_a[tic][1].template load<T::VEC_A>(u_ra);
+        __builtin_amdgcn_s_barrier();
+
+        opus::s_waitcnt_lgkmcnt(0_I);
+        __builtin_amdgcn_s_setprio(1);
+        v_c[1][0] = mma(v_a, v_b[0], v_c[1][0]);
+        v_c[1][1] = mma(v_a, v_b[1], v_c[1][1]);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_s_barrier();
+    }
+
+    if (wave_id_m == 0) __builtin_amdgcn_s_barrier();
+
+    // Store results to global memory
     auto u_gc = opus::partition_layout_c<T::VEC_C>(
         mma,
         opus::make_tuple(kargs.stride_c, 1_I),
         opus::make_tuple(wave_id_m, lane_id % mma.grpn_c, wave_id_n, lane_id / mma.grpn_c));
 
-    auto v_c_f16 = opus::cast<D_C>(v_c);
-    g_c.template store<T::VEC_C>(v_c_f16, u_gc);
+    auto v_c_f16 = opus::cast<D_C>(v_c[0][0]);
+    g_c.template store<T::VEC_C>(v_c_f16, u_gc, c_offset(0, 0));
+
+    v_c_f16 = opus::cast<D_C>(v_c[0][1]);
+    g_c.template store<T::VEC_C>(v_c_f16, u_gc, c_offset(0, 1));
+
+    v_c_f16 = opus::cast<D_C>(v_c[1][0]);
+    g_c.template store<T::VEC_C>(v_c_f16, u_gc, c_offset(1, 0));
+
+    v_c_f16 = opus::cast<D_C>(v_c[1][1]);
+    g_c.template store<T::VEC_C>(v_c_f16, u_gc, c_offset(1, 1));
 }
 
 // Fill 2D matrix with random values in specified range
@@ -460,7 +616,7 @@ bool valid_vector(const T* ref, const T* result, int n, float threshold = 1e-3f)
 }
 
 // CPU reference GEMM implementation for validation
-void gemm_ref(const fp16_t* a, const fp16_t* b, fp16_t* c, int m, int n, int k, int lda, int ldb, int ldc) {
+void gemm_ref(const bf16_t* a, const bf16_t* b, bf16_t* c, int m, int n, int k, int lda, int ldb, int ldc) {
     #pragma omp parallel for collapse(2)
     for(int i = 0; i < m; i++) {
         for(int j = 0; j < n; j++) {
@@ -468,7 +624,7 @@ void gemm_ref(const fp16_t* a, const fp16_t* b, fp16_t* c, int m, int n, int k, 
             for(int p = 0; p < k; p++) {
                 sum += static_cast<float>(a[i * lda + p]) * static_cast<float>(b[p * ldb + j]);
             }
-            c[i * ldc + j] = static_cast<fp16_t>(sum);
+            c[i * ldc + j] = static_cast<bf16_t>(sum);
         }
     }
 }
@@ -558,15 +714,15 @@ void shuffle_b(const DataType* b_input, DataType* b_output, int N, int K) {
 }
 
 int main(int argc, char** argv) {
-    constexpr int BLOCK_SIZE = 256;
-    constexpr int BLOCK_M = 128;
-    constexpr int BLOCK_N = 128;
+    constexpr int BLOCK_SIZE = 512;
+    constexpr int BLOCK_M = 256;
+    constexpr int BLOCK_N = 256;
     constexpr int BLOCK_K = 64;
 
     using Traits = opus_flatmm_traits<
         BLOCK_SIZE,
         opus::seq<BLOCK_M, BLOCK_N, BLOCK_K>,
-        opus::tuple<fp16_t, fp16_t, fp16_t, float, fp16_t>,
+        opus::tuple<bf16_t, bf16_t, bf16_t, float, bf16_t>,
         opus::seq<8, 8, 4>,
         false
     >;
@@ -597,11 +753,11 @@ int main(int argc, char** argv) {
     }
 
     // Allocate host memory
-    auto host_a = std::make_unique<fp16_t[]>(batch * M * K);
-    auto host_b = std::make_unique<fp16_t[]>(batch * N * K);
-    auto host_c = std::make_unique<fp16_t[]>(batch * M * N);
-    auto host_b_shuffled = std::make_unique<fp16_t[]>(batch * N * K);
-    auto host_c_out = std::make_unique<fp16_t[]>(batch * M * N);
+    auto host_a = std::make_unique<bf16_t[]>(batch * M * K);
+    auto host_b = std::make_unique<bf16_t[]>(batch * N * K);
+    auto host_c = std::make_unique<bf16_t[]>(batch * M * N);
+    auto host_b_shuffled = std::make_unique<bf16_t[]>(batch * N * K);
+    auto host_c_out = std::make_unique<bf16_t[]>(batch * M * N);
 
     // Initialize data
     for(int b = 0; b < batch; b++) {
@@ -612,21 +768,21 @@ int main(int argc, char** argv) {
     // Shuffle B matrix for optimized GPU memory access
     printf("Shuffling B matrix for FlatMM layout (batch=%d)...\n", batch);
     for(int b = 0; b < batch; b++) {
-        shuffle_b<fp16_t, Traits>(
+        shuffle_b<bf16_t, Traits>(
             host_b.get() + b * N * K,
             host_b_shuffled.get() + b * N * K,
             N, K);
     }
 
     // Allocate device memory
-    fp16_t *dev_a, *dev_b, *dev_c;
-    CHECK_HIP(hipMalloc(&dev_a, batch * M * K * sizeof(fp16_t)));
-    CHECK_HIP(hipMalloc(&dev_b, batch * N * K * sizeof(fp16_t)));
-    CHECK_HIP(hipMalloc(&dev_c, batch * M * N * sizeof(fp16_t)));
+    bf16_t *dev_a, *dev_b, *dev_c;
+    CHECK_HIP(hipMalloc(&dev_a, batch * M * K * sizeof(bf16_t)));
+    CHECK_HIP(hipMalloc(&dev_b, batch * N * K * sizeof(bf16_t)));
+    CHECK_HIP(hipMalloc(&dev_c, batch * M * N * sizeof(bf16_t)));
 
     // Copy to device (use shuffled B matrix)
-    CHECK_HIP(hipMemcpy(dev_a, host_a.get(), batch * M * K * sizeof(fp16_t), hipMemcpyHostToDevice));
-    CHECK_HIP(hipMemcpy(dev_b, host_b_shuffled.get(), batch * N * K * sizeof(fp16_t), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(dev_a, host_a.get(), batch * M * K * sizeof(bf16_t), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(dev_b, host_b_shuffled.get(), batch * N * K * sizeof(bf16_t), hipMemcpyHostToDevice));
 
     // Setup kernel arguments
     opus_fmm_kargs kargs{};
@@ -659,7 +815,7 @@ int main(int argc, char** argv) {
     CHECK_HIP_KERNEL_LAUNCH();
 
     // Copy results back to host for validation
-    CHECK_HIP(hipMemcpy(host_c_out.get(), dev_c, batch * M * N * sizeof(fp16_t), hipMemcpyDeviceToHost));
+    CHECK_HIP(hipMemcpy(host_c_out.get(), dev_c, batch * M * N * sizeof(bf16_t), hipMemcpyDeviceToHost));
 
     // Verify each batch against CPU reference implementation
     bool all_valid = true;
