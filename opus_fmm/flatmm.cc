@@ -279,7 +279,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_
 
     // Calculate global workgroup and tile indices
     int wgid = (blockIdx.y * gridDim.x) + blockIdx.x;
-#if 0
+#if 1
     const int num_tiles_m = ceil_div(kargs.m, T::B_M);
     int row = (wgid % num_tiles_m) * T::B_M;
     int col = (wgid / num_tiles_m) * T::B_N;
@@ -397,10 +397,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_
     opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + 2 * T::b_buffer_load_insts>{});
     __builtin_amdgcn_s_barrier();
 
+    v_b[0] = s_b[tic][0].template load<T::VEC_B>(u_rb);
+    __builtin_amdgcn_s_barrier();
+
     // Main loop
     for(int tile = 0; tile < loops - 2; tile += 2) {
         // First tile
-        v_b[0] = s_b[tic][0].template load<T::VEC_B>(u_rb);
         v_a = s_a[tic][0].template load<T::VEC_A>(u_ra);
         g_a.template async_load<T::VEC_A>(s_a[toc][1].ptr, u_ga, u_sa, a_offset(1, tile + 1));
         opus::s_waitcnt_lgkmcnt(opus::number<T::a_ds_read_insts>{});
@@ -478,6 +480,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
+        v_b[0] = s_b[tic][0].template load<T::VEC_B>(u_rb);
         g_b.template async_load<T::VEC_B>(s_b[toc][1].ptr, u_gb, u_sb, b_offset(1, tile + 3));
         opus::s_waitcnt_vmcnt(opus::number<T::a_buffer_load_insts + 2 * T::b_buffer_load_insts>{});
         __builtin_amdgcn_s_barrier();
@@ -492,7 +495,6 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_
     {
         int tile = loops - 2;
 
-        v_b[0] = s_b[tic][0].template load<T::VEC_B>(u_rb);
         v_a = s_a[tic][0].template load<T::VEC_A>(u_ra);
         g_a.template async_load<T::VEC_A>(s_a[toc][1].ptr, u_ga, u_sa, a_offset(1, tile + 1));
         __builtin_amdgcn_s_barrier();
