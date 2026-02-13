@@ -5,12 +5,18 @@ performs `C[i] = A[i] + B[i]` on float32 arrays, using the
 **`buffer_load_dword ... offen lds`** instruction to load data directly from
 global memory into LDS, bypassing VGPRs entirely.
 
-The kernel demonstrates two key GPU programming techniques:
+The kernel demonstrates several GPU programming techniques:
 - **Persistent kernel**: grid size = number of CUs (detected at runtime); each
   workgroup processes multiple chunks via a grid-stride loop.
-- **Double LDS buffering**: two LDS buffers are used in ping-pong fashion so
-  that the next iteration's data is prefetched while the current iteration is
-  being computed.
+- **Double LDS buffering** with deep pipeline fill: both buffers are loaded in
+  the prologue; each loop half reads one buffer while prefetching it for 2
+  iterations ahead.
+- **OOB-based control flow**: SRDs use `num_records = N * 4` so that
+  out-of-bounds buffer loads return 0 and stores are silently dropped,
+  eliminating all exec mask manipulation.
+- **`vmcnt(3)` accounting**: carefully chosen wait count that drains exactly the
+  previous half-iteration's 2 prefetch loads + 1 store, keeping the current
+  half's operations fully in flight.
 
 ## Files
 
@@ -49,7 +55,7 @@ Build steps performed by `build.sh`:
 ```
 Global Memory (A,B)
         |
-        |  buffer_load_dword ... offen lds   (VGPR bypassed)
+        |  buffer_load_dword ... offen lds   (VGPR bypassed, OOB → 0)
         v
        LDS
         |
@@ -61,45 +67,48 @@ Global Memory (A,B)
         v
       VGPRs
         |
-        |  global_store_dword
+        |  buffer_store_dword ... offen      (OOB → silently dropped)
         v
 Global Memory (C)
 ```
 
-## Double LDS Buffer Pipeline (steady state)
+## Deep-Pipeline Double LDS Buffer (steady state)
 
 ```
-Time ─────────────────────────────────────────────────────────►
+PROLOGUE (fill both buffers):
+    buffer_load A[iter0] -> buf0         vmcnt = 1
+    buffer_load B[iter0] -> buf0         vmcnt = 2
+    buffer_load A[iter1] -> buf1         vmcnt = 3
+    buffer_load B[iter1] -> buf1         vmcnt = 4
+    s_waitcnt vmcnt(2)                   buf0 ready, buf1 in flight
 
-Iteration i                          Iteration i+1
-├───────────────────────────────────┤├──────────────────────────────────────┤
+MAIN LOOP (each half-iteration, steady state entry vmcnt = 3):
 
-  ┌─ prefetch A[i+1],B[i+1] ─────────┐
-  │  into ALTERNATE LDS buffer        │  (buffer_load...lds, async)
-  │                                   │
-  │  ┌─ compute from CURRENT buffer ──┤
-  │  │  ds_read A[i], B[i]           │
-  │  │  v_add_f32                    │
-  │  │  global_store C[i]            │
-  │  └───────────────────────────────┘
-  │                                   │
-  └── s_waitcnt vmcnt(0) ────────────┘
-                                       swap buffers (buf0 ↔ buf1)
-                                       ┌─ prefetch A[i+2],B[i+2] ──────────┐
-                                       │  into ALTERNATE LDS buffer         │
-                                       │                                    │
-                                       │  ┌─ compute from CURRENT buffer ───┤
-                                       │  │  ds_read A[i+1], B[i+1]        │
-                                       │  │  v_add_f32                      │
-                                       │  │  global_store C[i+1]           │
-                                       │  └────────────────────────────────┘
-                                       └── s_waitcnt vmcnt(0) ─────────────┘
+    ┌── ds_read A, B from current buffer
+    │   s_waitcnt lgkmcnt(0)
+    │
+    │   buffer_load A[idx+2*stride] ──┐   prefetch into SAME buffer
+    │   buffer_load B[idx+2*stride] ──┘   (we already read it above)
+    │
+    │   v_add_f32 A, B
+    │   buffer_store C[idx]               (OOB → dropped)
+    │
+    │   idx += stride
+    │   s_cbranch_vccz L_done             (exit when all lanes done)
+    └── s_waitcnt vmcnt(3)                drain prev half's loads + store
+
+    swap to other buffer, repeat
 ```
 
-The key insight: the `buffer_load ... lds` for iteration i+1 is issued
-**before** the `ds_read` for iteration i. Since the buffer load goes to a
-different LDS region than the one being read, the two operations run in parallel,
-hiding global memory latency behind useful compute.
+Key design points:
+- **Prologue fills both buffers** so the loop body never stalls on the first
+  read.  `vmcnt(2)` after 4 loads drains the oldest 2 (buf0), leaving buf1 in
+  flight.
+- **Prefetch goes into the same buffer** just read (not the alternate), loading
+  data for `idx + 2*stride` (2 half-iterations ahead).
+- **`vmcnt(3)`** in the loop drains exactly the previous half's 2 prefetch
+  loads + 1 store, keeping the current half's 2 prefetches + store in flight.
+  See section 13 for the detailed FIFO trace.
 
 ---
 
@@ -181,13 +190,16 @@ Buffer instructions require a 128-bit SRD in 4 consecutive SGPRs:
 |------|-------|---------|
 | 0 | `base_address[31:0]` | Low 32 bits of pointer |
 | 1 | `base_address[47:32]` | High 16 bits; upper bits zero for stride=0 |
-| 2 | `0xFFFFFFFF` | `num_records` = max (no bounds check) |
-| 3 | `0x00020000` | gfx942 config: `DATA_FORMAT=32` |
+| 2 | `N * 4` | `num_records` in bytes (enables OOB for idx >= N) |
+| 3 | `0x00020000` | gfx942 config: `DATA_FORMAT=32`, `TYPE=0` (raw) |
+
+Setting `num_records = N * sizeof(float)` rather than `0xFFFFFFFF` enables the
+OOB (out-of-bounds) behavior used for branchless control flow (see section 12).
 
 Word 3 value `0x00020000` matches the
-[opus library](https://github.com/ROCm/aiter)`s `buffer_default_config()` for
-gfx942/gfx90a.  For `buffer_load_dword` (unformatted), only `DATA_FORMAT`
-matters; `DST_SEL` and `NUM_FORMAT` are ignored.
+[opus library](https://github.com/ROCm/aiter)'s `buffer_default_config()` for
+gfx942/gfx90a.  `TYPE=0` (raw buffer) means OOB loads return 0 and OOB stores
+are silently dropped.
 
 Word 1 must mask off bits [31:16] to zero the stride and swizzle fields:
 ```asm
@@ -259,10 +271,10 @@ Two independent wait counters control memory ordering:
 
 | Counter | Tracks | Wait instruction |
 |---------|--------|------------------|
-| `vmcnt` | Global/buffer memory ops (loads, stores, **buffer_load...lds**) | `s_waitcnt vmcnt(0)` |
+| `vmcnt` | Global/buffer memory ops (loads, stores, **buffer_load...lds**, **buffer_store**) | `s_waitcnt vmcnt(N)` |
 | `lgkmcnt` | LDS and scalar memory (kernarg loads, `ds_read`, `ds_write`) | `s_waitcnt lgkmcnt(0)` |
 
-For the async-to-LDS pattern, the sequence is:
+For the async-to-LDS pattern, the basic sequence is:
 
 ```asm
 buffer_load_dword ... lds       ; global -> LDS  (increments vmcnt)
@@ -273,6 +285,11 @@ s_waitcnt lgkmcnt(0)            ; ensure VGPRs are ready
 ```
 
 No `s_barrier` is needed because each wave only reads its own LDS region.
+
+**Important**: `vmcnt` is a FIFO -- `s_waitcnt vmcnt(N)` means "wait until at
+most N operations remain outstanding."  Both `buffer_load ... lds` and
+`buffer_store` push onto the same FIFO, so stores must be accounted for when
+choosing the wait value.  See section 13 for the detailed `vmcnt(3)` analysis.
 
 ### 11. Persistent kernel -- grid = number of CUs
 
@@ -303,11 +320,41 @@ int gdx = num_cu;                        // persistent: 1 workgroup per CU
 uint32_t stride = gdx * bdx;
 ```
 
-### 12. Double LDS buffering -- overlapping load with compute
+### 12. OOB-based control flow -- no exec mask needed
 
-The kernel uses **two LDS buffers** in a ping-pong arrangement so that the
-async `buffer_load ... lds` for the **next** iteration overlaps with
-the `ds_read` + `v_add_f32` + `global_store` of the **current** iteration.
+Traditional GPU kernels use exec mask manipulation (`s_and_saveexec_b64`,
+`s_cbranch_execz`, etc.) to prevent out-of-bounds memory accesses.  This kernel
+takes a simpler approach by exploiting the **hardware OOB behavior** of buffer
+instructions:
+
+| Buffer operation | OOB behavior (`TYPE=0`, raw) |
+|-----------------|-------------------------------|
+| `buffer_load ... offen lds` | Returns **0** to LDS (harmless) |
+| `buffer_store ... offen` | **Silently dropped** (no side effects) |
+
+By setting `num_records = N * 4` in every SRD (A, B, and C), any lane whose
+byte offset `>= N * 4` automatically gets this safe behavior.  The kernel
+**never touches the exec mask** -- all 64 lanes always execute every
+instruction.
+
+```asm
+; SRD construction -- the key line
+s_lshl_b32 s[s_res_a+2], s[s_n], 2    ; num_records = N * sizeof(float)
+```
+
+Loop termination uses a simple scalar comparison:
+```asm
+v_cmp_gt_u32 vcc, s[s_n], v[v_idx]    ; any lane still in-bounds?
+s_cbranch_vccz L_done                  ; if none → exit
+```
+
+This eliminates all `s_and_b64 exec`, `s_or_b64 exec`, `s_mov_b64 exec` and
+`s_cbranch_execz` instructions, producing cleaner and shorter code.
+
+### 13. Double LDS buffering with deep pipeline fill
+
+The kernel uses **two LDS buffers** in a ping-pong arrangement with a deep
+prologue that fills **both** buffers before the loop begins.
 
 #### LDS layout (4096 bytes total)
 
@@ -320,14 +367,7 @@ Byte offset    Contents
 [3072, 4096)   Buffer 1 -- B values
 ```
 
-Each buffer holds one workgroup's worth of A and B values (256 floats each =
-1024 bytes).
-
 #### Four M0 values (pre-computed, loop-invariant)
-
-The `buffer_load ... lds` instruction writes to LDS at address
-`M0 + lane_id * 4`.  Since there are 4 distinct LDS regions, four M0 values
-are pre-computed once in SGPRs before the loop:
 
 ```asm
 s_m0_buf0_a = wave_lds_base + 0       ; buffer 0, A region
@@ -336,42 +376,77 @@ s_m0_buf1_a = wave_lds_base + 2048    ; buffer 1, A region
 s_m0_buf1_b = wave_lds_base + 3072    ; buffer 1, B region
 ```
 
-Where `wave_lds_base = first_lane_threadIdx * 4`.
+#### Prologue -- fill both buffers
 
-#### Unrolled ping-pong loop structure
+```asm
+; iter 0 → buf0
+buffer_load A[idx]     -> buf0     ; vmcnt 1
+buffer_load B[idx]     -> buf0     ; vmcnt 2
+; iter 1 → buf1
+buffer_load A[idx+s]   -> buf1     ; vmcnt 3
+buffer_load B[idx+s]   -> buf1     ; vmcnt 4
+s_waitcnt vmcnt(2)                 ; drain oldest 2 → buf0 is ready
+```
 
-The main loop is **unrolled by 2**: `L_process_buf0` and `L_process_buf1`.
-Each half reads from one buffer and prefetches into the other, using fixed
-`ds_read` offsets and `m0` values -- no dynamic buffer swapping needed:
+#### Unrolled loop with prefetch-to-same-buffer
+
+Each half reads from its buffer, then prefetches **into that same buffer**
+for 2 half-iterations ahead (`idx + 2*stride`):
 
 ```
-PROLOGUE:
-    load first batch -> buf0
-    wait
-
 L_process_buf0:                         L_process_buf1:
-    prefetch next -> buf1                   prefetch next -> buf0
-    ds_read from buf0 (offset 0, 1024)      ds_read from buf1 (offset 2048, 3072)
-    v_add_f32 + global_store                v_add_f32 + global_store
+    ds_read A, B from buf0                  ds_read A, B from buf1
+    lgkmcnt(0)                              lgkmcnt(0)
+    prefetch A[idx+2s] -> buf0              prefetch A[idx+2s] -> buf1
+    prefetch B[idx+2s] -> buf0              prefetch B[idx+2s] -> buf1
+    v_add_f32                               v_add_f32
+    buffer_store C[idx]                     buffer_store C[idx]
     advance idx                             advance idx
-    if done → exit                          if done → exit
-    wait for buf1 prefetch                  wait for buf0 prefetch
+    if no lanes valid → L_done              if no lanes valid → L_done
+    s_waitcnt vmcnt(3)                      s_waitcnt vmcnt(3)
     ──► L_process_buf1                      ──► L_process_buf0
 ```
 
-#### Exec mask management for partial-wave prefetch
+### 14. `vmcnt(3)` -- the critical synchronization accounting
 
-Within each half-iteration, some lanes may have valid `next_idx` while others
-do not (they've exhausted their elements).  The kernel handles this by:
+Choosing the right `vmcnt(N)` value is arguably the most subtle part of a
+double-buffered GPU kernel.  Getting it wrong either causes correctness bugs
+(too loose) or kills performance (too tight).
 
-1. **Saving** the current exec mask: `s_mov_b64 s[s_cur_exec], exec`
-2. **Narrowing** exec to only lanes where `next_idx < N` for the prefetch
-3. **Skipping** the prefetch entirely if all lanes are done (`s_cbranch_execz`)
-4. **Restoring** exec from the saved mask for the compute/store phase
+#### Why `vmcnt(3)` and not `vmcnt(0)` or `vmcnt(2)`?
 
-This ensures that:
-- Only lanes with valid next data issue `buffer_load ... lds` (no out-of-bounds
-  reads).
-- All lanes with valid *current* data participate in the compute and store.
-- After the advance (`v_mov idx = next_idx`), a final bounds check determines
-  whether to continue or exit the loop.
+The `vmcnt` FIFO tracks all outstanding `buffer_load` and `buffer_store`
+operations.  `s_waitcnt vmcnt(N)` means "wait until at most N entries remain
+in the FIFO."
+
+Consider the steady-state at the top of `L_process_buf0`, just after the
+`vmcnt(3)` at the end of `L_process_buf1`:
+
+```
+vmcnt FIFO (oldest → newest):
+  [already drained by vmcnt(3)]          ← previous buf0's 2 loads + 1 store
+  entry 3: prefetch A -> buf1 (from L_process_buf1 we just left)
+  entry 2: prefetch B -> buf1 (from L_process_buf1 we just left)
+  entry 1: buffer_store C     (from L_process_buf1 we just left)
+  ─── vmcnt = 3, exactly what we specified ───
+```
+
+At this point buf0's data was loaded **2 half-iterations ago** -- it is
+guaranteed ready because `vmcnt(3)` drained everything older than the 3
+entries from the half-iteration we just completed.
+
+If we used:
+- **`vmcnt(0)`**: Everything drained -- safe but **kills pipelining**.  No
+  overlap between memory ops and compute.
+- **`vmcnt(2)`**: Would only keep 2 entries (the 2 prefetches), meaning the
+  store is also drained.  This is slightly tighter than needed.
+- **`vmcnt(3)`**: Keeps all 3 entries from the *previous* half in flight while
+  guaranteeing the *current* buffer is ready.  **Optimal overlap.**
+
+#### Special cases
+
+| Location | Wait value | Reason |
+|----------|-----------|--------|
+| After prologue | `vmcnt(2)` | 4 loads issued; drain oldest 2 (buf0 ready), buf1's 2 loads stay in flight |
+| Inside loop | `vmcnt(3)` | Drain prev half's 2 loads + 1 store; keep current half's 2 prefetches + 1 store |
+| `L_done` (epilogue) | `vmcnt(0)` | Drain everything before final stores complete |
