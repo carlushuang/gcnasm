@@ -5,6 +5,13 @@ performs `C[i] = A[i] + B[i]` on float32 arrays, using the
 **`buffer_load_dword ... offen lds`** instruction to load data directly from
 global memory into LDS, bypassing VGPRs entirely.
 
+The kernel demonstrates two key GPU programming techniques:
+- **Persistent kernel**: grid size = number of CUs (detected at runtime); each
+  workgroup processes multiple chunks via a grid-stride loop.
+- **Double LDS buffering**: two LDS buffers are used in ping-pong fashion so
+  that the next iteration's data is prefetched while the current iteration is
+  being computed.
+
 ## Files
 
 | File | Description |
@@ -37,7 +44,7 @@ Build steps performed by `build.sh`:
 2. **Compile** host code:
    `hipcc main.cpp -o vector_add_asm.exe`
 
-## Data Flow
+## Data Flow (single iteration)
 
 ```
 Global Memory (A,B)
@@ -58,6 +65,41 @@ Global Memory (A,B)
         v
 Global Memory (C)
 ```
+
+## Double LDS Buffer Pipeline (steady state)
+
+```
+Time ─────────────────────────────────────────────────────────►
+
+Iteration i                          Iteration i+1
+├───────────────────────────────────┤├──────────────────────────────────────┤
+
+  ┌─ prefetch A[i+1],B[i+1] ─────────┐
+  │  into ALTERNATE LDS buffer        │  (buffer_load...lds, async)
+  │                                   │
+  │  ┌─ compute from CURRENT buffer ──┤
+  │  │  ds_read A[i], B[i]           │
+  │  │  v_add_f32                    │
+  │  │  global_store C[i]            │
+  │  └───────────────────────────────┘
+  │                                   │
+  └── s_waitcnt vmcnt(0) ────────────┘
+                                       swap buffers (buf0 ↔ buf1)
+                                       ┌─ prefetch A[i+2],B[i+2] ──────────┐
+                                       │  into ALTERNATE LDS buffer         │
+                                       │                                    │
+                                       │  ┌─ compute from CURRENT buffer ───┤
+                                       │  │  ds_read A[i+1], B[i+1]        │
+                                       │  │  v_add_f32                      │
+                                       │  │  global_store C[i+1]           │
+                                       │  └────────────────────────────────┘
+                                       └── s_waitcnt vmcnt(0) ─────────────┘
+```
+
+The key insight: the `buffer_load ... lds` for iteration i+1 is issued
+**before** the `ds_read` for iteration i. Since the buffer load goes to a
+different LDS region than the one being read, the two operations run in parallel,
+hiding global memory latency behind useful compute.
 
 ---
 
@@ -191,8 +233,8 @@ struct __attribute__((packed)) {
     float*   A;        // offset 0
     float*   B;        // offset 8
     float*   C;        // offset 16
-    uint32_t N;        // offset 24
-    uint32_t __pad0;   // offset 28  (pad to 32 bytes)
+    uint32_t N;        // offset 24  -- number of elements
+    uint32_t stride;   // offset 28  -- num_CUs * 256 (grid-stride step)
 } args;
 ```
 
@@ -231,3 +273,105 @@ s_waitcnt lgkmcnt(0)            ; ensure VGPRs are ready
 ```
 
 No `s_barrier` is needed because each wave only reads its own LDS region.
+
+### 11. Persistent kernel -- grid = number of CUs
+
+Instead of launching one workgroup per chunk of 256 elements, the host launches
+exactly **`num_CUs`** workgroups (one per Compute Unit, detected at runtime via
+`hipGetDeviceProperties`).  Each workgroup then processes all its elements via a
+**grid-stride loop**:
+
+```
+idx = global_id                        // initial element index
+stride = num_CUs * 256                 // passed as kernel arg
+for (; idx < N; idx += stride) {
+    C[idx] = A[idx] + B[idx]
+}
+```
+
+Benefits:
+- Avoids kernel launch overhead for large N (one launch covers everything).
+- Every CU is occupied for the entire kernel duration, maximizing utilization.
+- Works correctly for any N, including N < total threads (extra lanes are masked).
+
+On the host side this is straightforward:
+
+```cpp
+int num_cu = props.multiProcessorCount;  // e.g. 304 on MI300X
+int bdx = 256;
+int gdx = num_cu;                        // persistent: 1 workgroup per CU
+uint32_t stride = gdx * bdx;
+```
+
+### 12. Double LDS buffering -- overlapping load with compute
+
+The kernel uses **two LDS buffers** in a ping-pong arrangement so that the
+async `buffer_load ... lds` for the **next** iteration overlaps with
+the `ds_read` + `v_add_f32` + `global_store` of the **current** iteration.
+
+#### LDS layout (4096 bytes total)
+
+```
+Byte offset    Contents
+──────────────────────────────────────
+[   0, 1024)   Buffer 0 -- A values   (256 threads x 4 bytes)
+[1024, 2048)   Buffer 0 -- B values
+[2048, 3072)   Buffer 1 -- A values
+[3072, 4096)   Buffer 1 -- B values
+```
+
+Each buffer holds one workgroup's worth of A and B values (256 floats each =
+1024 bytes).
+
+#### Four M0 values (pre-computed, loop-invariant)
+
+The `buffer_load ... lds` instruction writes to LDS at address
+`M0 + lane_id * 4`.  Since there are 4 distinct LDS regions, four M0 values
+are pre-computed once in SGPRs before the loop:
+
+```asm
+s_m0_buf0_a = wave_lds_base + 0       ; buffer 0, A region
+s_m0_buf0_b = wave_lds_base + 1024    ; buffer 0, B region
+s_m0_buf1_a = wave_lds_base + 2048    ; buffer 1, A region
+s_m0_buf1_b = wave_lds_base + 3072    ; buffer 1, B region
+```
+
+Where `wave_lds_base = first_lane_threadIdx * 4`.
+
+#### Unrolled ping-pong loop structure
+
+The main loop is **unrolled by 2**: `L_process_buf0` and `L_process_buf1`.
+Each half reads from one buffer and prefetches into the other, using fixed
+`ds_read` offsets and `m0` values -- no dynamic buffer swapping needed:
+
+```
+PROLOGUE:
+    load first batch -> buf0
+    wait
+
+L_process_buf0:                         L_process_buf1:
+    prefetch next -> buf1                   prefetch next -> buf0
+    ds_read from buf0 (offset 0, 1024)      ds_read from buf1 (offset 2048, 3072)
+    v_add_f32 + global_store                v_add_f32 + global_store
+    advance idx                             advance idx
+    if done → exit                          if done → exit
+    wait for buf1 prefetch                  wait for buf0 prefetch
+    ──► L_process_buf1                      ──► L_process_buf0
+```
+
+#### Exec mask management for partial-wave prefetch
+
+Within each half-iteration, some lanes may have valid `next_idx` while others
+do not (they've exhausted their elements).  The kernel handles this by:
+
+1. **Saving** the current exec mask: `s_mov_b64 s[s_cur_exec], exec`
+2. **Narrowing** exec to only lanes where `next_idx < N` for the prefetch
+3. **Skipping** the prefetch entirely if all lanes are done (`s_cbranch_execz`)
+4. **Restoring** exec from the saved mask for the compute/store phase
+
+This ensures that:
+- Only lanes with valid next data issue `buffer_load ... lds` (no out-of-bounds
+  reads).
+- All lanes with valid *current* data participate in the compute and store.
+- After the advance (`v_mov idx = next_idx`), a final bounds check determines
+  whether to continue or exit the loop.
