@@ -51,3 +51,24 @@ will have output like:
 ```
 
 this example rely on [ck](https://github.com/ROCm/composable_kernel/), please modify `CK_DIR` inside `rebuild.sh` before build
+
+## python bindings
+
+There are two ways to call this kernel from python:
+
+### 1. `py/` — pybind11 + torch extension (original)
+Uses `CUDAExtension` from PyTorch with pybind11 to bind the kernel.
+Requires PyTorch at build time and runtime. See [`py/README.md`](py/README.md).
+
+```bash
+cd py && python3 setup.py develop
+```
+
+### 2. `tvmffi/` — TVM FFI binding
+Uses [apache-tvm-ffi](https://github.com/apache/tvm-ffi) (`pip install apache-tvm-ffi`) to bind the kernel via the DLPack protocol. The C++ side uses `TVM_FFI_DLL_EXPORT_TYPED_FUNC` — no pybind11, no torch `BuildExtension`. See [`tvmffi/README.md`](tvmffi/README.md).
+
+```bash
+pip install apache-tvm-ffi
+cd tvmffi && make
+python test/test.py
+```
