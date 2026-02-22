@@ -168,6 +168,10 @@ mfma_kernel_test2(const void* __restrict__ ptr_a,
                                     lane_id % BKGldLane,
                                     opus::_);
     auto block_gmem_b = opus::make_layout<BKGldPack>(block_shape_b, block_stride_b, block_coord_b); // 2 offsets
+
+    int gmem_a_os[2] = {static_cast<int>((block_gmem_a.offsets[0] + wg_offset_a)* sizeof(fp16_t)), static_cast<int>((block_gmem_a.offsets[1] + wg_offset_a)* sizeof(fp16_t))};
+    int gmem_b_os[2] = {static_cast<int>((block_gmem_b.offsets[0] + wg_offset_b)* sizeof(fp16_t)), static_cast<int>((block_gmem_b.offsets[1] + wg_offset_b)* sizeof(fp16_t))};
+
     
     //smem store A/B
     //base offset： A 0 B=smemA
@@ -287,180 +291,191 @@ mfma_kernel_test2(const void* __restrict__ ptr_a,
     auto block_gmem_gst_layout_c = opus::make_layout<CGstNPack>(block_gmem_gst_shape_c, block_gmem_gst_stride_c, block_gmem_gst_coord_c);
 
 
-
-
-
-    //Pipeline Part
-    // gmem load a
-    // Note: if different buffer insts have same base but different offsets and offset can be immed.
-    // You don't need to make it in cached_layout. Cached_layout is used for variable offset, and immed offset
-    // can be set mannually.
-    //VGPR store A/B
-    opus::array<fp16x8_t, 2> gmem_a_reg;
-    opus::array<fp16x8_t, 2> gmem_b_reg;
-    asm volatile(
-        "buffer_load_dwordx4 %[v_gmem_a0], %[v_gmem_a_os0], %[res_a], 0 offen\n\t"
-        "buffer_load_dwordx4 %[v_gmem_a1], %[v_gmem_a_os1], %[res_a], 0 offen\n\t"
-        :[v_gmem_a0]"+v"(gmem_a_reg[0]),
-         [v_gmem_a1]"+v"(gmem_a_reg[1])
-        :[v_gmem_a_os0]"v"(static_cast<int>((block_gmem_a.offsets[0] + wg_offset_a) * sizeof(fp16_t))),
-         [v_gmem_a_os1]"v"(static_cast<int>((block_gmem_a.offsets[1] + wg_offset_a) * sizeof(fp16_t))),
-         [res_a]"s"(res_a)
-        :"memory"
-    );
-    // __builtin_amdgcn_sched_barrier(0);
-    // asm volatile("" 
-    //             : 
-    //             :"v"(static_cast<int>((block_gmem_a.offsets[0] + wg_offset_a) * sizeof(fp16_t))),
-    //              "v"(static_cast<int>((block_gmem_a.offsets[1] + wg_offset_a) * sizeof(fp16_t))),
-    //              "v"(static_cast<int>((block_gmem_a.offsets[2] + wg_offset_a) * sizeof(fp16_t))),
-    //              "v"(static_cast<int>((block_gmem_a.offsets[3] + wg_offset_a) * sizeof(fp16_t)))
-    //             : "memory");
-    asm volatile("s_waitcnt vmcnt(0)");
-
-    // gmem load b
-    //use + to avoid reuse dst reg
-    asm volatile(
-        "buffer_load_dwordx4 %[v_gmem_b0], %[v_gmem_b_os0], %[res_b], 0 offen\n\t"
-        "buffer_load_dwordx4 %[v_gmem_b1], %[v_gmem_b_os1], %[res_b], 0 offen\n\t"
-        :[v_gmem_b0]"+v"(gmem_b_reg[0]),
-         [v_gmem_b1]"+v"(gmem_b_reg[1])
-        :[v_gmem_b_os0]"v"(static_cast<int>((block_gmem_b.offsets[0] + wg_offset_b) * sizeof(fp16_t))),
-         [res_b]"s"(res_b),
-         [v_gmem_b_os1]"v"(static_cast<int>((block_gmem_b.offsets[1] + wg_offset_b) * sizeof(fp16_t)))
-        :"memory"
-    );
-    asm volatile("s_waitcnt vmcnt(0)");
-
-    //smem store
-    //store a
-    asm volatile(
-        "ds_write_b128 %[v_sst_a], %[v_gmem_a0] offset:0 \n\t"
-        "ds_write_b128 %[v_sst_a], %[v_gmem_a1] offset:%[single_issue_offset0]\n\t"
-        "s_waitcnt lgkmcnt(0)\n\t"
-        "s_barrier\n\t"
-        : 
-        : [v_sst_a]"v"(static_cast<int>(sst_a_os + smembase)),
-          [v_gmem_a0]"v"(gmem_a_reg[0]),
-          [v_gmem_a1]"v"(gmem_a_reg[1]),
-          [single_issue_offset0]"n"(single_issue_offset)
-        : "memory"
-    );
-        // __builtin_amdgcn_sched_barrier(0);
-    // asm volatile("" 
-    //             : 
-    //             :"v"(static_cast<int>(sst_a_os + smembase))
-    //             : "memory");
-
-    //store b
-    asm volatile(
-        "ds_write_b128 %[v_sst_b], %[v_gmem_b0] offset:%[single_issue_offset0]\n\t"
-        "ds_write_b128 %[v_sst_b], %[v_gmem_b1] offset:%[single_issue_offset1]\n\t"
-        :
-        :[v_sst_b]"v"(static_cast<int>(sst_b_os + GetSmemSizeA())),
-         [v_gmem_b0]"v"(gmem_b_reg[0]),
-         [sst_b_base]"n"(sld_b_base),
-         [single_issue_offset0]"n"(0 * single_issue_offset),
-         [v_gmem_b1]"v"(gmem_b_reg[1]),
-         [single_issue_offset1]"n"(1 * single_issue_offset)
-        :"memory"
-    );
-
-    asm volatile(
-        "s_waitcnt lgkmcnt(0)\n\t"
-        "s_barrier\n\t"
-    );
-    // __builtin_amdgcn_sched_barrier(0);
-
-    //smem load A/B 
-    //Note use fp16x8_t to load (with ds_read_B128) but bit_cast to fp16x4_t for mfma usage
-    //First, reuse the gmem vgpr for sld. Just for register allocation test. You can allocate another part registers for sld.
-    opus::array<fp16x8_t, 2> sld_a_reg;
-    asm volatile(
-        "ds_read_b128 %[v_sld_a0], %[v_sld_a_os] offset:0   \n\t"
-        "ds_read_b128 %[v_sld_a1], %[v_sld_a_os] offset:4096 \n\t"
-        :[v_sld_a0]"=v"(sld_a_reg[0]),
-         [v_sld_a1]"=v"(sld_a_reg[1])
-        :[v_sld_a_os]"v"(a_sld_os)
-        :"memory"
-    );
-    asm volatile(
-        "s_waitcnt lgkmcnt(0)\n"
-        "s_barrier"
-    );
-    // __builtin_amdgcn_sched_barrier(0);
-    opus::array<fp16x8_t, 8> sld_b_reg;
-    asm volatile(
-        "ds_read_b128 %[v_sld_b0], %[v_sld_b_os] offset:%[sld_b_base] + 0\n\t"
-        "ds_read_b128 %[v_sld_b1], %[v_sld_b_os] offset:%[sld_b_base] + 1024\n\t"
-        "ds_read_b128 %[v_sld_b2], %[v_sld_b_os] offset:%[sld_b_base] + 2048\n\t"
-        "ds_read_b128 %[v_sld_b3], %[v_sld_b_os] offset:%[sld_b_base] + 3072\n\t"
-        "ds_read_b128 %[v_sld_b4], %[v_sld_b_os] offset:%[sld_b_base] + 4096\n\t"
-        "ds_read_b128 %[v_sld_b5], %[v_sld_b_os] offset:%[sld_b_base] + 5120\n\t"
-        "ds_read_b128 %[v_sld_b6], %[v_sld_b_os] offset:%[sld_b_base] + 6144\n\t"
-        "ds_read_b128 %[v_sld_b7], %[v_sld_b_os] offset:%[sld_b_base] + 7168\n\t"
-        :[v_sld_b0]"=v"(sld_b_reg[0]),
-         [v_sld_b1]"=v"(sld_b_reg[1]),
-         [v_sld_b2]"=v"(sld_b_reg[2]),
-         [v_sld_b3]"=v"(sld_b_reg[3]),
-         [v_sld_b4]"=v"(sld_b_reg[4]),
-         [v_sld_b5]"=v"(sld_b_reg[5]),
-         [v_sld_b6]"=v"(sld_b_reg[6]),
-         [v_sld_b7]"=v"(sld_b_reg[7])
-        :[v_sld_b_os]"v"(static_cast<int>(b_sld_os)),
-         [sld_b_base]"n"(sld_b_base)
-        :"memory"
-    );
-    // 虚拟使用，告诉编译器 b_sld_os 在 asm 后还会被使用 否则b_sld_os 会在上面的内嵌汇编中被覆盖
-    asm volatile("" : : "v"(b_sld_os) : "memory");
-        // __builtin_amdgcn_sched_barrier(0);
-
-    asm volatile(
-        "s_waitcnt lgkmcnt(0)\n\t"
-        "s_barrier\n\t"
-    );
-    // __builtin_amdgcn_sched_barrier(0);
-
-    //repack register
-    opus::array<fp16x4_t, 4> sld_a;
-    for (int i = 0; i < 2; i++) {
-        half8Packer converter;
-        converter.vec8 = sld_a_reg[i];
-        sld_a[i * 2] = converter.vec4[0];
-        sld_a[i * 2 + 1] = converter.vec4[1];
-    }
-
-    opus::array<fp16x4_t, 16> sld_b;
-    for (int i = 0; i < 8; i++) {
-        half8Packer converter;
-        converter.vec8 = sld_b_reg[i];
-        sld_b[i * 2] = converter.vec4[0];
-        sld_b[i * 2 + 1] = converter.vec4[1];
-    }
-
-    
-    //MMA Matrix C reg
+    int K_LOOP = stride_a / Block_K;
     opus::array<fp32x4_t, 16> v_c;
     v_c.fill({0.0, 0.0, 0.0, 0.0});
-    // __builtin_amdgcn_sched_barrier(0);
-    //MMA Part
-    #pragma unroll
-    for(int m=0; m < AMSldRepeat; m++){
-        #pragma unroll
-        for(int n=0; n < BSldNRepeat; n++){
-            asm volatile(
-                "v_mfma_f32_16x16x16_f16 %[v_c], %[v_sld_b0], %[v_sld_a0], %[v_c]\n\t"
-                "v_mfma_f32_16x16x16_f16 %[v_c], %[v_sld_b1], %[v_sld_a1], %[v_c]\n\t"
-                :[v_c]"+v"(v_c[m * 8 + n])
-                :[v_sld_a0]"v"(sld_a[m * 2]),
-                [v_sld_a1]"v"(sld_a[m * 2 + 1]),
-                [v_sld_b0]"v"(sld_b[n * 2]),
-                [v_sld_b1]"v"(sld_b[n * 2 + 1])
-            );
+    for (int loop=0; loop < K_LOOP; loop++){
+        // gmem load a
+        // Note: if different buffer insts have same base but different offsets and offset can be immed.
+        // You don't need to make it in cached_layout. Cached_layout is used for variable offset, and immed offset
+        // can be set mannually.
+        //VGPR store A/B
+        opus::array<fp16x8_t, 2> gmem_a_reg;
+        opus::array<fp16x8_t, 2> gmem_b_reg;
+        asm volatile(
+            "buffer_load_dwordx4 %[v_gmem_a0], %[v_gmem_a_os0], %[res_a], 0 offen\n\t"
+            "buffer_load_dwordx4 %[v_gmem_a1], %[v_gmem_a_os1], %[res_a], 0 offen\n\t"
+            :[v_gmem_a0]"+v"(gmem_a_reg[0]),
+            [v_gmem_a1]"+v"(gmem_a_reg[1])
+            :[v_gmem_a_os0]"v"(gmem_a_os[0]),
+            [v_gmem_a_os1]"v"(gmem_a_os[1]),
+            [res_a]"s"(res_a)
+            :"memory"
+        );
+        //move window
+        asm volatile(
+            "v_add_u32 %[v_gmem_a_os0], %[v_gmem_a_os0], 64\n\t"
+            "v_add_u32 %[v_gmem_a_os1], %[v_gmem_a_os1], 64\n\t"
+            :[v_gmem_a_os0]"+v"(gmem_a_os[0]),
+            [v_gmem_a_os1]"+v"(gmem_a_os[1])
+        );
+        // __builtin_amdgcn_sched_barrier(0);
+        // asm volatile("" 
+        //             : 
+        //             :"v"(static_cast<int>((block_gmem_a.offsets[0] + wg_offset_a) * sizeof(fp16_t))),
+        //              "v"(static_cast<int>((block_gmem_a.offsets[1] + wg_offset_a) * sizeof(fp16_t))),
+        //              "v"(static_cast<int>((block_gmem_a.offsets[2] + wg_offset_a) * sizeof(fp16_t))),
+        //              "v"(static_cast<int>((block_gmem_a.offsets[3] + wg_offset_a) * sizeof(fp16_t)))
+        //             : "memory");
+        asm volatile("s_waitcnt vmcnt(0)");
+
+        // gmem load b
+        //use + to avoid reuse dst reg
+        asm volatile(
+            "buffer_load_dwordx4 %[v_gmem_b0], %[v_gmem_b_os0], %[res_b], 0 offen\n\t"
+            "buffer_load_dwordx4 %[v_gmem_b1], %[v_gmem_b_os1], %[res_b], 0 offen\n\t"
+            :[v_gmem_b0]"+v"(gmem_b_reg[0]),
+            [v_gmem_b1]"+v"(gmem_b_reg[1])
+            :[v_gmem_b_os0]"v"(gmem_b_os[0]),
+            [res_b]"s"(res_b),
+            [v_gmem_b_os1]"v"(gmem_b_os[1])
+            :"memory"
+        );
+        asm volatile(
+            "v_add_u32 %[v_gmem_b_os0], %[v_gmem_b_os0], 64\n\t"
+            "v_add_u32 %[v_gmem_b_os1], %[v_gmem_b_os1], 64\n\t"
+            :[v_gmem_b_os0]"+v"(gmem_b_os[0]),
+            [v_gmem_b_os1]"+v"(gmem_b_os[1])
+        );
+        asm volatile("s_waitcnt vmcnt(0)");
+
+        //smem store
+        //store a
+        asm volatile(
+            "ds_write_b128 %[v_sst_a], %[v_gmem_a0] offset:0 \n\t"
+            "ds_write_b128 %[v_sst_a], %[v_gmem_a1] offset:%[single_issue_offset0]\n\t"
+            "s_waitcnt lgkmcnt(0)\n\t"
+            "s_barrier\n\t"
+            : 
+            : [v_sst_a]"v"(static_cast<int>(sst_a_os + smembase)),
+            [v_gmem_a0]"v"(gmem_a_reg[0]),
+            [v_gmem_a1]"v"(gmem_a_reg[1]),
+            [single_issue_offset0]"n"(single_issue_offset)
+            : "memory"
+        );
+            // __builtin_amdgcn_sched_barrier(0);
+        // asm volatile("" 
+        //             : 
+        //             :"v"(static_cast<int>(sst_a_os + smembase))
+        //             : "memory");
+
+        //store b
+        asm volatile(
+            "ds_write_b128 %[v_sst_b], %[v_gmem_b0] offset:%[single_issue_offset0]\n\t"
+            "ds_write_b128 %[v_sst_b], %[v_gmem_b1] offset:%[single_issue_offset1]\n\t"
+            :
+            :[v_sst_b]"v"(static_cast<int>(sst_b_os + GetSmemSizeA())),
+            [v_gmem_b0]"v"(gmem_b_reg[0]),
+            [sst_b_base]"n"(sld_b_base),
+            [single_issue_offset0]"n"(0 * single_issue_offset),
+            [v_gmem_b1]"v"(gmem_b_reg[1]),
+            [single_issue_offset1]"n"(1 * single_issue_offset)
+            :"memory"
+        );
+
+        asm volatile(
+            "s_waitcnt lgkmcnt(0)\n\t"
+            "s_barrier\n\t"
+        );
+        // __builtin_amdgcn_sched_barrier(0);
+
+        //smem load A/B 
+        //Note use fp16x8_t to load (with ds_read_B128) but bit_cast to fp16x4_t for mfma usage
+        //First, reuse the gmem vgpr for sld. Just for register allocation test. You can allocate another part registers for sld.
+        opus::array<fp16x8_t, 2> sld_a_reg;
+        asm volatile(
+            "ds_read_b128 %[v_sld_a0], %[v_sld_a_os] offset:0   \n\t"
+            "ds_read_b128 %[v_sld_a1], %[v_sld_a_os] offset:4096 \n\t"
+            :[v_sld_a0]"=v"(sld_a_reg[0]),
+            [v_sld_a1]"=v"(sld_a_reg[1])
+            :[v_sld_a_os]"v"(a_sld_os)
+            :"memory"
+        );
+        asm volatile(
+            "s_waitcnt lgkmcnt(0)\n"
+            "s_barrier"
+        );
+        // __builtin_amdgcn_sched_barrier(0);
+        opus::array<fp16x8_t, 8> sld_b_reg;
+        asm volatile(
+            "ds_read_b128 %[v_sld_b0], %[v_sld_b_os] offset:%[sld_b_base] + 0\n\t"
+            "ds_read_b128 %[v_sld_b1], %[v_sld_b_os] offset:%[sld_b_base] + 1024\n\t"
+            "ds_read_b128 %[v_sld_b2], %[v_sld_b_os] offset:%[sld_b_base] + 2048\n\t"
+            "ds_read_b128 %[v_sld_b3], %[v_sld_b_os] offset:%[sld_b_base] + 3072\n\t"
+            "ds_read_b128 %[v_sld_b4], %[v_sld_b_os] offset:%[sld_b_base] + 4096\n\t"
+            "ds_read_b128 %[v_sld_b5], %[v_sld_b_os] offset:%[sld_b_base] + 5120\n\t"
+            "ds_read_b128 %[v_sld_b6], %[v_sld_b_os] offset:%[sld_b_base] + 6144\n\t"
+            "ds_read_b128 %[v_sld_b7], %[v_sld_b_os] offset:%[sld_b_base] + 7168\n\t"
+            :[v_sld_b0]"=v"(sld_b_reg[0]),
+            [v_sld_b1]"=v"(sld_b_reg[1]),
+            [v_sld_b2]"=v"(sld_b_reg[2]),
+            [v_sld_b3]"=v"(sld_b_reg[3]),
+            [v_sld_b4]"=v"(sld_b_reg[4]),
+            [v_sld_b5]"=v"(sld_b_reg[5]),
+            [v_sld_b6]"=v"(sld_b_reg[6]),
+            [v_sld_b7]"=v"(sld_b_reg[7])
+            :[v_sld_b_os]"v"(static_cast<int>(b_sld_os)),
+            [sld_b_base]"n"(sld_b_base)
+            :"memory"
+        );
+        // 虚拟使用，告诉编译器 b_sld_os 在 asm 后还会被使用 否则b_sld_os 会在上面的内嵌汇编中被覆盖
+        asm volatile("" : : "v"(b_sld_os) : "memory");
+            // __builtin_amdgcn_sched_barrier(0);
+
+        asm volatile(
+            "s_waitcnt lgkmcnt(0)\n\t"
+            "s_barrier\n\t"
+        );
+        // __builtin_amdgcn_sched_barrier(0);
+
+        //repack register
+        opus::array<fp16x4_t, 4> sld_a;
+        for (int i = 0; i < 2; i++) {
+            half8Packer converter;
+            converter.vec8 = sld_a_reg[i];
+            sld_a[i * 2] = converter.vec4[0];
+            sld_a[i * 2 + 1] = converter.vec4[1];
         }
+
+        opus::array<fp16x4_t, 16> sld_b;
+        for (int i = 0; i < 8; i++) {
+            half8Packer converter;
+            converter.vec8 = sld_b_reg[i];
+            sld_b[i * 2] = converter.vec4[0];
+            sld_b[i * 2 + 1] = converter.vec4[1];
+        }
+
+        
+        //MMA Matrix C reg
+        // __builtin_amdgcn_sched_barrier(0);
+        //MMA Part
+        #pragma unroll
+        for(int m=0; m < AMSldRepeat; m++){
+            #pragma unroll
+            for(int n=0; n < BSldNRepeat; n++){
+                asm volatile(
+                    "v_mfma_f32_16x16x16_f16 %[v_c], %[v_sld_b0], %[v_sld_a0], %[v_c]\n\t"
+                    "v_mfma_f32_16x16x16_f16 %[v_c], %[v_sld_b1], %[v_sld_a1], %[v_c]\n\t"
+                    :[v_c]"+v"(v_c[m * 8 + n])
+                    :[v_sld_a0]"v"(sld_a[m * 2]),
+                    [v_sld_a1]"v"(sld_a[m * 2 + 1]),
+                    [v_sld_b0]"v"(sld_b[n * 2]),
+                    [v_sld_b1]"v"(sld_b[n * 2 + 1])
+                );
+            }
+        }
+
     }
-
-
     //cvt to fp16
     
     opus::array<fp16x2_t, 32> v_c_out;
@@ -609,9 +624,9 @@ void gemm_rcr(
 
 int main(int argc, char ** argv)
 {
-    int m = 128;
-    int n = 128;
-    int k = 32;
+    int m = 8192;
+    int n = 8192;
+    int k = 1024;
 
     int lda = k;
     int ldb = k;
@@ -657,7 +672,7 @@ int main(int argc, char ** argv)
             <<<dim3(wg_num_m,wg_num_n,1),dim3(256,1,1),0,0>>>(dev_a, dev_b, dev_c, m, n, k, lda, ldb, ldc);
             HIP_CALL(hipMemcpy(fp16_c, dev_c, ldc*m*sizeof(float16), hipMemcpyDeviceToHost));
         bool res = valid_vector( host_c, fp16_c, m*n, 1e-3);
-        printf("[128x128x32, standard], %s",res?"valid":"fail");fflush(stdout);
+        printf("[256x128x128, standard], %s",res?"valid":"fail");fflush(stdout);
         printf("\n"); fflush(stdout);
     }
 
