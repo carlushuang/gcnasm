@@ -54,21 +54,84 @@ this example rely on [ck](https://github.com/ROCm/composable_kernel/), please mo
 
 ## python bindings
 
-There are two ways to call this kernel from python:
+There are three ways to call this kernel from python:
 
-### 1. `py/` — pybind11 + torch extension (original)
+### 1. `torch/` — torch extension + pybind11
 Uses `CUDAExtension` from PyTorch with pybind11 to bind the kernel.
-Requires PyTorch at build time and runtime. See [`py/README.md`](py/README.md).
+Requires PyTorch at build time and runtime. See [`torch/README.md`](torch/README.md).
 
 ```bash
-cd py && python3 setup.py develop
+cd torch && python3 setup.py develop
 ```
 
-### 2. `tvmffi/` — TVM FFI binding
+### 2. `pybind/` — pure pybind11 + Ninja JIT
+Uses [pybind11](https://github.com/pybind/pybind11) directly with a custom Ninja JIT build.
+No torch `BuildExtension` — only pybind11 headers, hipcc, and g++.
+See [`pybind/README.md`](pybind/README.md).
+
+```bash
+pip install pybind11
+cd pybind && python test/test.py
+```
+
+### 3. `tvmffi/` — TVM FFI binding
 Uses [apache-tvm-ffi](https://github.com/apache/tvm-ffi) (`pip install apache-tvm-ffi`) to bind the kernel via the DLPack protocol. The C++ side uses `TVM_FFI_DLL_EXPORT_TYPED_FUNC` — no pybind11, no torch `BuildExtension`. See [`tvmffi/README.md`](tvmffi/README.md).
 
 ```bash
 pip install apache-tvm-ffi
-cd tvmffi && make
-python test/test.py
+cd tvmffi && python test/test.py
 ```
+
+## Compile-Time Benchmark: torch/ vs pybind/ vs tvmffi/
+
+Benchmarked on ROCm 7.1.1 (hipcc 7.1, AMD clang 20.0), PyTorch 2.9.1+rocm7.1.1, pybind11, apache-tvm-ffi, Docker image `rocm/atom:nightly_202601190317`. All three approaches compile the **identical** `.hip` kernel source; only the binding layer and build system differ.
+
+### End-to-End Results (averaged over 3 runs)
+
+| Approach | Compile Time | Speedup vs torch |
+|----------|-------------|-----------------|
+| **torch/** (`setup.py build_ext`) | **10.94s** | 1.0x |
+| **pybind/** (pybind11 + Ninja JIT) | **2.15s** | **5.1x faster** |
+| **tvmffi/** (TVM FFI + Ninja JIT) | **1.19s** | **9.2x faster** |
+
+### Per-Component Breakdown
+
+| Component | torch/ | pybind/ | tvmffi/ |
+|-----------|--------|---------|---------|
+| `hipcc` .hip (GPU kernel) | 1.15s | 1.15s | 1.15s |
+| C++ binding compile | 4.39s (hipcc) | 2.12s (g++) | 0.54s (g++) |
+| Python/framework overhead | ~5.4s | ~0s | ~0s |
+| **END-TO-END TOTAL** | **10.94s** | **2.15s** | **1.19s** |
+
+### Analysis
+
+**1. GPU kernel compilation (1.15s) — identical for all three.**
+All approaches compile the exact same `warp_bitonic_sort.hip` with `hipcc --offload-arch=native -O3`. This step is irreducible.
+
+**2. C++ binding compile: torch=4.39s vs pybind=2.12s vs tvmffi=0.54s**
+- **torch/** (4.39s): `torch_api.cpp` includes heavy headers (`<pybind11/pybind11.h>`, `<torch/python.h>`, `<torch/nn/functional.h>`, `<ATen/cuda/CUDAContext.h>`, `<c10/cuda/CUDAGuard.h>`). Compiled through `hipcc`, which parses these massive header trees through the HIP compiler frontend — significantly slower than `g++`.
+- **pybind/** (2.12s): `pybind_api.cpp` includes only `<pybind11/pybind11.h>` and the kernel header. Compiled with `g++` — no torch/ATen overhead, but pybind11 headers are still non-trivial (~2s of template-heavy C++).
+- **tvmffi/** (0.54s): `tvm_api.cc` includes only `<tvm/ffi/tvm_ffi.h>` and the kernel header. Compiled with `g++` — the most minimal header set of all three.
+
+**3. Python/setuptools overhead: ~5.4s for torch/ vs ~0s for pybind/ and tvmffi/**
+The torch `setup.py build_ext` spends ~5.4s before any compiler runs:
+- **Hipification pass**: scans and transforms CUDA API calls to HIP equivalents
+- **setuptools/distutils machinery**: build planning, dependency resolution
+- **Ninja build file generation**: torch's `BuildExtension` generates its own ninja files
+- **Architecture detection**: determines GPU arch, compiler flags
+
+Both pybind/ and tvmffi/ use a custom `jit.py` that generates a ninja build file directly (~0.01s) and invokes `ninja` as a subprocess — essentially zero Python overhead.
+
+**4. Ninja parallelism.**
+pybind/ and tvmffi/ Ninja builds run `hipcc` and `g++` in parallel, so the end-to-end wall time is approximately `max(hipcc, binding) + link`:
+- pybind/: `max(1.15, 2.12)` ≈ 2.15s (binding-limited)
+- tvmffi/: `max(1.15, 0.54)` ≈ 1.19s (kernel-limited)
+
+### Key Takeaways
+
+- The actual GPU kernel compilation (`hipcc .hip`) is identical and takes ~1.15s for all three — this is the irreducible floor.
+- **torch/ is slow** due to two compounding overheads:
+  1. **Setuptools/hipification** (~5.4s) — the Python build machinery is extremely heavyweight.
+  2. **Heavy header parsing** (~4.4s for torch_api.cpp) — torch/pybind11/ATen headers compiled through hipcc.
+- **pybind/ is 5.1x faster** — eliminates setuptools overhead and uses `g++` instead of `hipcc` for the binding, but pybind11 headers still cost ~2.1s (becomes the bottleneck over the kernel).
+- **tvmffi/ is 9.2x faster** — the lightest binding (0.54s), making the GPU kernel compile the bottleneck. This represents the practical speed floor for this codebase.
