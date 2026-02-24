@@ -22,7 +22,7 @@ The build system uses Python-driven Ninja JIT compilation with caching (no Makef
 - **apache-tvm-ffi**: `pip install apache-tvm-ffi`
 - **ROCm** (hipcc)
 - **ninja**: `pip install ninja` or system package
-- **composable_kernel** headers
+- **opus** headers (from [aiter](https://github.com/ROCm/aiter/))
 - **PyTorch** (for GPU memory allocation)
 
 ## Usage
@@ -52,7 +52,7 @@ y = warp_bitonic_sort.warp_bitonic_sort(x, is_descending=True)
 | Variable | Default | Description |
 |---|---|---|
 | `ROCM_PATH` | `/opt/rocm` | ROCm installation path |
-| `CK_DIR` | `/raid0/carhuang/repo/composable_kernel` | composable_kernel headers |
+| `OPUS_DIR` | `/raid0/carhuang/repo/aiter/csrc/include` | opus headers |
 | `GPU_ARCH` | `native` | Target GPU architecture |
 | `WARP_SORT_CACHE_DIR` | `~/.cache/warp_bitonic_sort` | JIT cache directory |
 | `WARP_SORT_JIT_VERBOSE` | `0` | Set to `1` for verbose build output |

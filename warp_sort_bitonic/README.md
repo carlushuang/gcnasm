@@ -50,7 +50,7 @@ will have output like:
 
 ```
 
-this example rely on [ck](https://github.com/ROCm/composable_kernel/), please modify `CK_DIR` inside `rebuild.sh` before build
+this example rely on [opus](https://github.com/ROCm/aiter/) (`opus.hpp`), please modify `OPUS_DIR` inside `rebuild.sh` before build
 
 ## python bindings
 

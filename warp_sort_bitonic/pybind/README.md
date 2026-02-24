@@ -15,10 +15,10 @@ pip install pybind11 torch  # pybind11 for headers, torch for tensor allocation 
 ## Build & Run
 
 Compilation happens automatically on first import (JIT via Ninja).
-Set `CK_DIR` if composable_kernel headers are not at the default path.
+Set `OPUS_DIR` if opus headers are not at the default path.
 
 ```bash
-export CK_DIR=/opt/rocm  # or wherever ck_tile headers live
+export OPUS_DIR=/raid0/carhuang/repo/aiter/csrc/include  # or wherever opus headers live
 cd pybind
 python test/test.py
 ```

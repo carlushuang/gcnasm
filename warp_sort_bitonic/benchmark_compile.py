@@ -14,7 +14,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TORCH_DIR = os.path.join(SCRIPT_DIR, "torch")
 PYBIND_DIR = os.path.join(SCRIPT_DIR, "pybind")
 TVMFFI_DIR = os.path.join(SCRIPT_DIR, "tvmffi")
-CK_DIR = os.environ.get("CK_DIR", "/opt/rocm-7.1.1")
+OPUS_DIR = os.environ.get("OPUS_DIR", "/raid0/carhuang/repo/aiter/csrc/include")
 ROCM_PATH = os.environ.get("ROCM_PATH", "/opt/rocm")
 
 NUM_RUNS = 3
@@ -52,7 +52,7 @@ def bench_torch_e2e():
     setup_py = os.path.join(TORCH_DIR, "setup.py")
     with open(setup_py) as f:
         code = f.read()
-    code = code.replace("/raid0/carhuang/repo/composable_kernel", CK_DIR)
+    code = code.replace("/raid0/carhuang/repo/aiter/csrc/include", OPUS_DIR)
     patched = os.path.join(TORCH_DIR, "_setup_patched.py")
     with open(patched, "w") as f:
         f.write(code)
@@ -76,7 +76,7 @@ def clean_pybind():
 
 def bench_pybind_e2e():
     clean_pybind()
-    os.environ["CK_DIR"] = CK_DIR
+    os.environ["OPUS_DIR"] = OPUS_DIR
 
     for mod_name in list(sys.modules):
         if "warp_bitonic_sort" in mod_name:
@@ -104,7 +104,7 @@ def clean_tvmffi():
 
 def bench_tvmffi_e2e():
     clean_tvmffi()
-    os.environ["CK_DIR"] = CK_DIR
+    os.environ["OPUS_DIR"] = OPUS_DIR
 
     for mod_name in list(sys.modules):
         if "warp_bitonic_sort" in mod_name:
@@ -131,7 +131,7 @@ def bench_hipcc_kernel():
     with tempfile.TemporaryDirectory() as td:
         elapsed, _, _ = time_cmd(
             f"{ROCM_PATH}/bin/hipcc --offload-arch=native -O3 -fPIC "
-            f"-I{ROCM_PATH}/include -I{CK_DIR}/include "
+            f"-I{ROCM_PATH}/include -I{OPUS_DIR} "
             f"-I{TORCH_DIR}/csrc "
             f"-c {hip_src} -o {td}/k.o"
         )
@@ -153,7 +153,7 @@ def bench_torch_binding():
     with tempfile.TemporaryDirectory() as td:
         elapsed, rc, _ = time_cmd(
             f"{ROCM_PATH}/bin/hipcc --offload-arch=native -O2 -fPIC -std=c++17 "
-            f"-I{CK_DIR}/include "
+            f"-I{OPUS_DIR} "
             f"-I{torch_inc} -I{torch_inc}/torch/csrc/api/include "
             f"-I{torch_inc}/THH -I{ROCM_PATH}/include -I{python_inc} "
             "-D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 "

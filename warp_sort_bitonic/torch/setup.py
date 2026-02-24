@@ -14,8 +14,7 @@ __version__ = "0.1.0"
 
 __ARCH__="native"
 
-# this example dependes on CK headers, hence add it to include dir
-__CK_DIR__="/raid0/carhuang/repo/composable_kernel"
+__OPUS_DIR__="/raid0/carhuang/repo/aiter/csrc/include"
 
 
 ext_modules = [
@@ -24,7 +23,7 @@ ext_modules = [
     CUDAExtension(
         name = "warp_bitonic_sort_cpp",     # this is cpp->python module name
         sources = sorted(glob("csrc/*.cpp") + glob("csrc/*.hip")),
-        include_dirs = [f'{__CK_DIR__}/include'],
+        include_dirs = [f'{__OPUS_DIR__}'],
         extra_compile_args = {
             # NOTE: offload-arch is important to prevent torch extension
             # to compiler on multi gfx arch

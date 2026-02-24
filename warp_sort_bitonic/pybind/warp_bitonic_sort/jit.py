@@ -30,7 +30,7 @@ CACHE_DIR = Path(
 JIT_DIR = CACHE_DIR / "jit"
 
 ROCM_PATH = Path(os.getenv("ROCM_PATH", "/opt/rocm"))
-CK_DIR = Path(os.getenv("CK_DIR", "/raid0/carhuang/repo/composable_kernel"))
+OPUS_DIR = Path(os.getenv("OPUS_DIR", "/raid0/carhuang/repo/aiter/csrc/include"))
 GPU_ARCH = os.getenv("GPU_ARCH", "native")
 
 # pybind11 / Python include paths
@@ -80,7 +80,7 @@ def _generate_ninja_build(
         "-O3",
         "-fPIC",
         f"-I{ROCM_PATH / 'include'}",
-        f"-I{CK_DIR / 'include'}",
+        f"-I{OPUS_DIR}",
     ] + common_includes
     if extra_hipcc_flags:
         hip_flags += extra_hipcc_flags
