@@ -29,39 +29,6 @@ __host__ __device__ inline int ceil_div(int a, int b) {
     return (a + b - 1) / b;
 }
 
-/**
- * @brief Transform a workgroup ID to a new workgroup ID based on the chunk size and number of XCDs.
- * @param workgroup_id The original workgroup ID.
- * @param num_workgroups The total number of workgroups.
- * @param num_xcds The number of XCDs.
- * @param chunk_size The chunk size.
- * @return The new workgroup ID.
- */
-__host__ __device__ inline int chiplet_transform_chunked(
-    int workgroup_id, 
-    int num_workgroups,
-    int num_xcds,
-    int chunk_size 
-) {
-    // Current XCD
-    int xcd = workgroup_id % num_xcds;
-
-    // Largest full (NUM_XCDS*CHUNK_SIZE)-aligned block
-    int block = num_xcds * chunk_size;
-    int limit = (num_workgroups / block) * block;
-
-    // If pid beyond the last full block, leave unchanged
-    if (workgroup_id > limit) return workgroup_id;
-
-    // Local PID (within round-robin assignment)
-    int local_pid    = workgroup_id / num_xcds;
-    int chunk_idx    = local_pid / chunk_size;
-    int pos_in_chunk = local_pid % chunk_size;
-
-    // New PID
-    return chunk_idx * block + xcd * chunk_size + pos_in_chunk;
-}
-
 // Configuration traits for FlatMM kernel: defines tile sizes, data types, and MFMA layout
 template<int BLOCK_SIZE_,   // workgroup size
         typename BLOCK_,    // opus::seq<m, n, k>, block_tile m/n/k
@@ -281,34 +248,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void flatmm_kernel(opus_fmm_
 
     // Calculate global workgroup and tile indices
     int wgid = (blockIdx.y * gridDim.x) + blockIdx.x;
-#if 1
     const int num_tiles_m = ceil_div(kargs.m, T::B_M);
     int row = (wgid % num_tiles_m) * T::B_M;
     int col = (wgid / num_tiles_m) * T::B_N;
     int flat_col = col / T::W_N;
-#else
-    const int NUM_WGS = gridDim.x * gridDim.y;
-    const int NUM_XCDS = 8;  // Number of XCDs (chiplets)
-    const int WGM = 8;       // Workgroup tile size for M dimension grouping
-    
-    // Swizzle chiplet so that wgids are in the same XCD
-    wgid = chiplet_transform_chunked(wgid, NUM_WGS, NUM_XCDS, 64);
-    
-    // Swizzle for better L2 within the same XCD
-    const int num_tiles_m = ceil_div(kargs.m, T::B_M);
-    const int num_tiles_n = ceil_div(kargs.n, T::B_N);
-    const int num_wgid_in_group = WGM * num_tiles_n;
-    int group_id = wgid / num_wgid_in_group;
-    int first_pid_m = group_id * WGM;
-    int group_size_m = min(num_tiles_m - first_pid_m, WGM);
-    int pid_m = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-    int pid_n = (wgid % num_wgid_in_group) / group_size_m;
-    
-    // Assign the tile's row/column based on the pid_m and pid_n
-    int row = pid_m * T::B_M;
-    int col = pid_n * T::B_N;
-    int flat_col = col / T::W_N;
-#endif
 
     int batch_id = blockIdx.z;
     int wave_id = __builtin_amdgcn_readfirstlane(threadIdx.x / get_warp_size());

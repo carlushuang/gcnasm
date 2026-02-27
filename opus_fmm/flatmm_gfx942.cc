@@ -91,12 +91,6 @@ struct opus_flatmm_traits {
     static constexpr int smem_m_sub = smem_linear_wave / B_K;
     static constexpr int smem_m_rep = B_M / smem_m_sub;
     static constexpr int smem_padding = 16 / sizeof(D_A);
-
-    // number of assembly instructions
-    static constexpr int a_buffer_load_insts = B_M * B_K / (BLOCK_SIZE * VEC_A);
-    static constexpr int b_buffer_load_insts = flat_n_per_block * flat_k_per_block / (BLOCK_SIZE * VEC_B);
-    static constexpr int a_ds_read_insts = (E_M * E_K * W_M * W_K) / (opus::get_warp_size() * VEC_A);
-    static constexpr int b_ds_read_insts = (E_N * E_K * W_N * W_K) / (opus::get_warp_size() * VEC_B);
 };
 
 // Kernel arguments structure for FlatMM operation
