@@ -1,5 +1,5 @@
 // pyhip_v2: Zero <<<>>> in C++. Kernel launch done entirely from Python via
-// hipLaunchKernel in libamdhip64.so. hip_minimal.h provides only __shfl.
+// hipLaunchKernel in libamdhip64.so. opus::shfl() replaces __shfl.
 // All other HIP primitives replaced with compiler builtins:
 //   threadIdx.x   → __builtin_amdgcn_workitem_id_x()
 //   __syncthreads → __builtin_amdgcn_s_barrier()
@@ -51,9 +51,9 @@ __device__ __inline__ auto warp_swap_(const T& x, int lane_idx, opus::number<lan
 #pragma clang diagnostic pop
         return r;
     } else if constexpr(lanegroup_size == 32) {
-        return __shfl(x, lane_idx ^ 16);    // consume LDS
+        return opus::shfl(x, lane_idx ^ 16);    // consume LDS
     } else if constexpr(lanegroup_size == 64) {
-        return __shfl(x, lane_idx ^ 32);    // consume LDS
+        return opus::shfl(x, lane_idx ^ 32);    // consume LDS
     }
 }
 

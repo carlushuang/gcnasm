@@ -1,13 +1,16 @@
 // pyhip_v3: Device-only compilation (--genco). Zero host code.
-// hip_minimal.h provides only __shfl. No dim3, no hipLaunchKernel.
+// opus::shfl() replaces __shfl. No dim3, no hipLaunchKernel.
 // Kernel launch done from Python via hipModuleLaunchKernel (driver API).
 //
 // Builtins used directly:
 //   threadIdx.x   → __builtin_amdgcn_workitem_id_x()
 //   __syncthreads → __builtin_amdgcn_s_barrier()
 //   warpSize      → __builtin_amdgcn_wavefrontsize()
-#include "hip_minimal.h"
 #include "opus/opus.hpp"
+
+#ifndef INFINITY
+#define INFINITY __builtin_huge_valf()
+#endif
 
 #ifndef FMT_LIMIT
 #define FMT_LIMIT 1
@@ -50,9 +53,9 @@ __device__ __inline__ auto warp_swap_(const T& x, int lane_idx, opus::number<lan
 #pragma clang diagnostic pop
         return r;
     } else if constexpr(lanegroup_size == 32) {
-        return __shfl(x, lane_idx ^ 16);    // consume LDS
+        return opus::shfl(x, lane_idx ^ 16);    // consume LDS
     } else if constexpr(lanegroup_size == 64) {
-        return __shfl(x, lane_idx ^ 32);    // consume LDS
+        return opus::shfl(x, lane_idx ^ 32);    // consume LDS
     }
 }
 

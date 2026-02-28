@@ -5,8 +5,7 @@
 // which reference dim3/hipLaunchKernel. We declare them here for the compiler
 // but our C++ code never uses <<<>>> or dim3 directly.
 //
-// Device-side:
-//   __shfl — cross-lane data exchange (uses ds_bpermute builtin)
+// Device-side: opus::shfl() from opus.hpp replaces __shfl.
 // Builtins used directly in kernel:
 //   threadIdx.x   → __builtin_amdgcn_workitem_id_x()
 //   __syncthreads → __builtin_amdgcn_s_barrier()
@@ -38,24 +37,3 @@ extern "C" hipError_t hipLaunchKernel(
     const void* function_address, dim3 numBlocks, dim3 dimBlocks,
     void** args, size_t sharedMemBytes = 0, hipStream_t stream = 0);
 
-// ─── __shfl (cross-lane shuffle via ds_bpermute) ─────────────────────────────
-__device__ static inline unsigned int __lane_id() {
-    if (__builtin_amdgcn_wavefrontsize() == 32)
-        return __builtin_amdgcn_mbcnt_lo(-1, 0);
-    return __builtin_amdgcn_mbcnt_hi(-1, __builtin_amdgcn_mbcnt_lo(-1, 0));
-}
-
-__device__ inline int __shfl(int var, int src_lane,
-                             int width = __builtin_amdgcn_wavefrontsize()) {
-    int self = __lane_id();
-    int index = (src_lane & (width - 1)) + (self & ~(width - 1));
-    return __builtin_amdgcn_ds_bpermute(index << 2, var);
-}
-
-__device__ inline float __shfl(float var, int src_lane,
-                               int width = __builtin_amdgcn_wavefrontsize()) {
-    union { int i; float f; } tmp;
-    tmp.f = var;
-    tmp.i = __shfl(tmp.i, src_lane, width);
-    return tmp.f;
-}
