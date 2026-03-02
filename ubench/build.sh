@@ -48,5 +48,13 @@ cp common/nop_loop.hsaco cacheline_stride/
 $CXX cacheline_stride/cacheline_stride.cpp -o cacheline_stride/cacheline_stride.exe
 echo "  cacheline_stride.exe"
 
+# --- lds_throughput ---
+echo ""
+echo "[lds_throughput]"
+$ASM lds_throughput/lds_throughput.s -o lds_throughput/lds_throughput.hsaco
+echo "  lds_throughput.hsaco"
+$CXX lds_throughput/lds_throughput.cpp -o lds_throughput/lds_throughput.exe
+echo "  lds_throughput.exe"
+
 echo ""
 echo "Build complete!"
