@@ -50,4 +50,159 @@ will have output like:
 
 ```
 
-this example rely on [ck](https://github.com/ROCm/composable_kernel/), please modify `CK_DIR` inside `rebuild.sh` before build
+this example rely on [opus](https://github.com/ROCm/aiter/) (`opus.hpp`), please modify `OPUS_DIR` inside `rebuild.sh` before build
+
+## python bindings
+
+There are three ways to call this kernel from python:
+
+### 1. `torch/` — torch extension + pybind11
+Uses `CUDAExtension` from PyTorch with pybind11 to bind the kernel.
+Requires PyTorch at build time and runtime. See [`torch/README.md`](torch/README.md).
+
+```bash
+cd torch && python3 setup.py develop
+```
+
+### 2. `pybind/` — pure pybind11 + Ninja JIT
+Uses [pybind11](https://github.com/pybind/pybind11) directly with a custom Ninja JIT build.
+No torch `BuildExtension` — only pybind11 headers, hipcc, and g++.
+See [`pybind/README.md`](pybind/README.md).
+
+```bash
+pip install pybind11
+cd pybind && python test/test.py
+```
+
+### 3. `tvmffi/` — TVM FFI binding
+Uses [apache-tvm-ffi](https://github.com/apache/tvm-ffi) (`pip install apache-tvm-ffi`) to bind the kernel via the DLPack protocol. The C++ side uses `TVM_FFI_DLL_EXPORT_TYPED_FUNC` — no pybind11, no torch `BuildExtension`. See [`tvmffi/README.md`](tvmffi/README.md).
+
+```bash
+pip install apache-tvm-ffi
+cd tvmffi && python test/test.py
+```
+
+### 4. `pyhip/` — ctypes, no C++ binding at all
+Uses Python's built-in `ctypes.CDLL` to load the `.hip` kernel compiled into a plain `.so`. **No C++ binding file** — no pybind11, no torch extension, no TVM. The `extern "C"` host launcher is called directly from Python.
+
+```bash
+cd pyhip && python test/test.py
+```
+
+### 5. `pyhip_v2/` — Python-side `hipLaunchKernel`, no `<<<>>>` in C++
+Same as pyhip but the C++ code has **zero `<<<>>>`** syntax. The `.so` exports a function-pointer table; Python reads it and calls `hipLaunchKernel` from `libamdhip64.so` directly via ctypes.
+
+```bash
+cd pyhip_v2 && python test/test.py
+```
+
+### 6. `pyhip_v3/` — `--genco` device-only, `hipModuleLaunchKernel`
+Compiled with `hipcc --genco` to produce a `.hsaco` code object (device binary only — zero host code generated). Python loads it with `hipModuleLoad` and launches kernels with `hipModuleLaunchKernel` (HIP driver API). The `hip_minimal.h` has **zero host declarations** — no `dim3`, no `hipLaunchKernel`. `extern "C" __global__` wrappers give kernels predictable symbol names.
+
+```bash
+cd pyhip_v3 && python test/test.py
+```
+
+## Compile-Time Benchmark
+
+Benchmarked on ROCm 7.1.1 (hipcc 7.1, AMD clang 20.0), PyTorch 2.9.1+rocm7.1.1, pybind11, apache-tvm-ffi, Docker image `rocm/atom:nightly_202601190317`. 3 runs each, clean builds.
+
+### End-to-End Results
+
+| Approach | Compile Time | Speedup vs torch |
+|---|---|---|
+| **torch/** (`setup.py build_ext`) | **21.1s** | 1.0x |
+| **pybind/** (pybind11 + Ninja JIT) | **4.2s** | 5.0x |
+| **tvmffi/** (TVM FFI + Ninja JIT) | **3.5s** | 6.0x |
+| **pyhip/** (hipcc -shared, `<<<>>>` in C++) | **420ms** | 50.3x |
+| **pyhip_v2/** (hipcc -shared, Python `hipLaunchKernel`) | **410ms** | 51.6x |
+| **pyhip_v3/** (hipcc --genco, `hipModuleLaunchKernel`) | **346ms** | **61.1x** |
+
+### Kernel-Only Compile Breakdown
+
+| Kernel variant | Compile | Preprocessed lines |
+|---|---|---|
+| torch/pybind/tvmffi (`hip_runtime.h`, all original headers) | 1,729ms | 190,582 |
+| pyhip (`hip_minimal.h` + compiler builtins) | 406ms | 11,480 |
+| pyhip_v2 (`hip_minimal.h`, no `<<<>>>`) | 381ms | 11,467 |
+| pyhip_v3 (`--genco`, device-only) | 347ms | 17,431 |
+
+## Deep Dive: How pyhip → pyhip_v3 Achieves 61x Faster Compile
+
+This section documents the systematic journey from a 21s torch build to a 346ms device-only compile — a 61x improvement — by progressively eliminating every layer of unnecessary overhead.
+
+### Step 1: Eliminate the C++ binding layer (torch → pyhip)
+
+The first three approaches (torch, pybind, tvmffi) all require a **separate C++ binding file** compiled alongside the kernel. This binding file pulls in heavy framework headers:
+
+| Binding | Compiler | Headers | Binding compile time |
+|---|---|---|---|
+| torch (`torch_api.cpp`) | hipcc | torch, pybind11, ATen, c10 | ~8.2s |
+| pybind (`pybind_api.cpp`) | g++ | pybind11 | ~4.0s |
+| tvmffi (`tvm_api.cc`) | g++ | tvm_ffi | ~1.1s |
+| pyhip (none) | — | — | **0s** |
+
+**pyhip eliminates binding compilation entirely** by marking the host launcher `extern "C"` and calling it via `ctypes.CDLL`. No pybind11, no torch extension, no TVM — just `hipcc -shared` and Python's built-in FFI.
+
+### Step 2: Replace `hip_runtime.h` with minimal declarations + compiler builtins
+
+The standard `<hip/hip_runtime.h>` pulls in massive header trees. pyhip replaces it with a ~60-line `hip_minimal.h` and direct AMDGCN compiler builtins:
+
+| Symbol | Standard HIP | pyhip replacement |
+|---|---|---|
+| `threadIdx.x` | `<hip/hip_runtime.h>` | `__builtin_amdgcn_workitem_id_x()` |
+| `__syncthreads()` | `<hip/hip_runtime.h>` | `__builtin_amdgcn_s_barrier()` |
+| `warpSize` | `<hip/hip_runtime.h>` | `__builtin_amdgcn_wavefrontsize()` |
+| `__shfl()` | `<hip/hip_runtime.h>` | Custom impl via `__builtin_amdgcn_ds_bpermute()` |
+| `dim3`, `<<<>>>` | `<hip/hip_runtime.h>` | Minimal struct + 3 function declarations |
+
+This reduces preprocessed lines from **190K → 11K** (17x) and kernel compile time from **1.7s → 0.4s**.
+
+### Step 3: Suppress implicit heavy includes with `-D__HIPCC_RTC__`
+
+Even with `hip_minimal.h`, hipcc's implicit `__clang_hip_runtime_wrapper.h` pulls in C++ standard library headers (`<cmath>`, `<cstdlib>`, etc.). The `-D__HIPCC_RTC__` flag tells this wrapper to skip those includes (it's the flag used by HIP's runtime compilation path). This requires providing `#define INFINITY __builtin_huge_valf()` since `<cmath>` is no longer included.
+
+### Step 4: Guard device code with `__HIP_DEVICE_COMPILE__`
+
+hipcc compiles `.hip` files in **two passes** — once for the host (x86_64) and once for the device (AMDGPU). The heavy `opus.hpp` template library is only needed on the device side. Wrapping it in `#ifdef __HIP_DEVICE_COMPILE__` with an empty kernel stub for the host pass avoids parsing it twice.
+
+### Step 5: Move kernel launch from C++ to Python (pyhip_v2)
+
+pyhip still uses `<<<>>>` in C++ to launch kernels. pyhip_v2 eliminates this:
+
+- C++ exports a table of kernel function pointers (one per template instantiation)
+- Python reads the table via ctypes and calls `hipLaunchKernel()` from `libamdhip64.so` directly
+
+**Caveat**: hipcc still generates host stubs for `__global__` functions internally, so `dim3`/`hipLaunchKernel` declarations are still needed in `hip_minimal.h` — even though user code never writes `<<<>>>`.
+
+### Step 6: Device-only compilation with `--genco` (pyhip_v3)
+
+pyhip_v3 eliminates the host pass entirely:
+
+- `hipcc --genco` compiles **only device code** into a `.hsaco` code object — no host stubs, no linker, no `.so`
+- `extern "C" __global__` wrapper functions give each template instantiation a predictable symbol name
+- Python loads the `.hsaco` with `hipModuleLoad` and launches with `hipModuleLaunchKernel` (HIP driver API)
+- `hip_minimal.h` is truly minimal (35 lines) — **zero host declarations** (no `dim3`, no `hipLaunchKernel`, no `__hipPushCallConfiguration`)
+
+### Summary: progressive optimization
+
+| Step | Change | Compile time | Speedup |
+|---|---|---|---|
+| torch | baseline (setup.py + hipcc + ninja) | 21.1s | 1.0x |
+| pybind | replace torch binding with pybind11 | 4.2s | 5.0x |
+| tvmffi | replace pybind11 with tvm_ffi | 3.5s | 6.0x |
+| pyhip | eliminate binding entirely (ctypes) + `hip_minimal.h` + builtins + `__HIPCC_RTC__` + device guard | 420ms | 50.3x |
+| pyhip_v2 | move `<<<>>>` to Python (`hipLaunchKernel`) | 410ms | 51.6x |
+| pyhip_v3 | `--genco` device-only compile (`hipModuleLaunchKernel`) | **346ms** | **61.1x** |
+
+### Key Takeaways
+
+1. **The C++ binding layer is the biggest cost**. Replacing torch's `CUDAExtension` with direct ctypes eliminates both binding compilation and Python/setuptools overhead — a 50x improvement over torch.
+
+2. **Header bloat dominates kernel compile time**. Standard `<hip/hip_runtime.h>` expands to 190K preprocessed lines. A 60-line `hip_minimal.h` with compiler builtins achieves the same functionality at 11K lines — cutting kernel compile from 1.7s to 0.4s.
+
+3. **`-D__HIPCC_RTC__` is a critical flag**. It prevents `__clang_hip_runtime_wrapper.h` from pulling in heavy C++ standard library headers that the kernel never uses.
+
+4. **`--genco` eliminates the host pass**. For kernels launched from Python, there's no need for host stubs at all. Device-only compilation saves ~60ms (347ms vs 406ms) and removes the need for any host-side HIP declarations in C++.
+
+5. **The irreducible floor is device codegen**. At 346ms, the remaining time is spent on AMDGPU backend code generation for 16 kernel instantiations and `opus.hpp` template expansion. This is the true minimum for this kernel's complexity.

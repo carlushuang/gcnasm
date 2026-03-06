@@ -50,6 +50,9 @@ __global__ void addVectors_async(const float* a, const float* b, float* result, 
     }
 }
 #endif
+OPUS_USING_COMMON_TYPES_ALL
+
+// template<typename... T> __host__ __device__ tup(T&&...) -> opus::tuple<opus::remove_cvref_t<T>...>;
 
 template<int BLOCK_SIZE>
 __global__ void addVectors_async(const float* a, const float* b, float* result, int n) {
@@ -69,8 +72,8 @@ __global__ void addVectors_async(const float* a, const float* b, float* result, 
     // otherwise the compiler may not generate proper dependency (vmcnt)
     __shared__ float smem_1_[n_waves * 65];
     __shared__ float smem_2_[n_waves * 65];
-    float* smem_1 = smem_1_ + wave_id * 65 + lane_id;
-    float* smem_2 = smem_2_ + wave_id * 65 + lane_id;
+    float* smem_1 = smem_1_ + wave_id * 65; // NOTE: per-wave smem pointer passed to async_load API
+    float* smem_2 = smem_2_ + wave_id * 65; // NOTE: per-wave smem pointer passed to async_load API
 
     auto g_a = opus::make_gmem(a);
     auto g_b = opus::make_gmem(b);
@@ -78,17 +81,17 @@ __global__ void addVectors_async(const float* a, const float* b, float* result, 
 
     int num_loops = (n + stride - 1) / stride;
 
-    g_a.async_load(smem_1 + 0, idx);
+    g_a.async_load(smem_1, idx);
 
     int i = 0;
     for ( ; i < num_loops / 2 - 1; i++) {
         auto y0 = g_b.load(idx + (2 * i + 0) * stride);
         __builtin_amdgcn_sched_group_barrier(0x0020, 1, 0); // 1x VMEM read
-        g_a.async_load(smem_2 + 0, idx + (2 * i + 1) * stride);
+        g_a.async_load(smem_2, idx + (2 * i + 1) * stride);
         __builtin_amdgcn_sched_group_barrier(0x0020, 1, 0); // 1x VMEM read
 
         opus::s_waitcnt_vmcnt(2_I);
-        auto x0 = smem_1[0];
+        auto x0 = smem_1[lane_id];
 
         opus::s_waitcnt_vmcnt(1_I);
         g_r.store(x0 + y0[0], idx + (2 * i + 0) * stride);
@@ -96,25 +99,25 @@ __global__ void addVectors_async(const float* a, const float* b, float* result, 
 
         auto y1 = g_b.load(idx + (2 * i + 1) * stride);
         __builtin_amdgcn_sched_group_barrier(0x0020, 1, 0); // 1x VMEM read
-        g_a.async_load(smem_1 + 0, idx + (2 * i + 2) * stride);
+        g_a.async_load(smem_1, idx + (2 * i + 2) * stride);
         __builtin_amdgcn_sched_group_barrier(0x0020, 1, 0); // 1x VMEM read
 
         opus::s_waitcnt_vmcnt(2_I);  // consume the write vmcnt
-        auto x1 = smem_2[0];
+        auto x1 = smem_2[lane_id];
 
         opus::s_waitcnt_vmcnt(1_I);
         g_r.store(x1 + y1[0], idx + (2 * i + 1) * stride);
         __builtin_amdgcn_sched_group_barrier(0x0040, 1, 0); // 1x VMEM write
     }
 
-    g_a.async_load(smem_2 + 0, idx + (2 * i + 1) * stride);
+    g_a.async_load(smem_2, idx + (2 * i + 1) * stride);
     auto y0 = g_b.load(idx + (2 * i + 0) * stride);
-    auto x0 = smem_1[0];
-    
+    auto x0 = smem_1[lane_id];
+
     result[idx + (2 * i + 0) * stride] = x0 + y0[0];
     auto y1 = g_b.load(idx + (2 * i + 1) * stride);
-    auto x1 = smem_2[0];
-    
+    auto x1 = smem_2[lane_id];
+
     result[idx + (2 * i + 1) * stride] = x1 + y1[0];
 }
 

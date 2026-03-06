@@ -1,22 +1,16 @@
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-#include <algorithm>
-#include <random>
-#include <iostream>
-#include <stdlib.h>
-#include <math.h>
-#include <stdio.h>
-#include <numeric>
-#include <list>
+// pyhip_v3: Device-only compilation (--genco). Zero host code.
+// opus::shfl() replaces __shfl. No dim3, no hipLaunchKernel.
+// Kernel launch done from Python via hipModuleLaunchKernel (driver API).
+//
+// Builtins used directly:
+//   threadIdx.x   → __builtin_amdgcn_workitem_id_x()
+//   __syncthreads → __builtin_amdgcn_s_barrier()
+//   warpSize      → __builtin_amdgcn_wavefrontsize()
 #include "opus/opus.hpp"
 
-#define HIP_CALL(call) do{  \
-    hipError_t err = call;  \
-    if(err != hipSuccess){  \
-        printf("[hiperror](%d) fail to call %s",(int)err,#call);    \
-        exit(0);            \
-    }                       \
-} while(0)
+#ifndef INFINITY
+#define INFINITY __builtin_huge_valf()
+#endif
 
 #ifndef FMT_LIMIT
 #define FMT_LIMIT 1
@@ -59,9 +53,9 @@ __device__ __inline__ auto warp_swap_(const T& x, int lane_idx, opus::number<lan
 #pragma clang diagnostic pop
         return r;
     } else if constexpr(lanegroup_size == 32) {
-        return __shfl(x, lane_idx ^ 16);    // consume LDS
+        return opus::shfl(x, lane_idx ^ 16);    // consume LDS
     } else if constexpr(lanegroup_size == 64) {
-        return __shfl(x, lane_idx ^ 32);    // consume LDS
+        return opus::shfl(x, lane_idx ^ 32);    // consume LDS
     }
 }
 
@@ -330,10 +324,10 @@ template <typename T, int lanegroup_size = opus::get_warp_size(), int is_descend
 __device__ __inline__ auto warp_bitonic_merge_sort_to_reg(const T& x, opus::number<lanegroup_size> = {}, opus::number<is_descending> = {})
 {
     static_assert(lanegroup_size <= opus::get_warp_size());
-    int lane_idx = threadIdx.x;
+    int lane_idx = __builtin_amdgcn_workitem_id_x();
     T c = warp_bitonic_merge_sort_build(x, lane_idx, opus::number<lanegroup_size>{}, opus::number<is_descending>{});
     T r = warp_swap_(c, lane_idx, opus::number<lanegroup_size>{});
-    // if(threadIdx.x < lanegroup_size) printf("[%2d] c:%f, r:%f\n", threadIdx.x, c, r);
+    // if(__builtin_amdgcn_workitem_id_x() < lanegroup_size) printf("[%2d] c:%f, r:%f\n", __builtin_amdgcn_workitem_id_x(), c, r);
     T o = warp_bitonic_merge_sort_combine(c, r, lane_idx, 0, opus::number<lanegroup_size>{}, opus::number<is_descending>{});
     return o;
 }
@@ -345,12 +339,12 @@ __device__ __inline__ auto block_bitonic_merge_sort_to_reg(void* smem, const T& 
     // need guarantee smem usage, will not if...else... write smem inside this kernel
     // smem require sizeof(T) * lanegroup_size
     static_assert(lanegroup_size > opus::get_warp_size());
-    int lane_idx = threadIdx.x;
+    int lane_idx = __builtin_amdgcn_workitem_id_x();
     if constexpr (lanegroup_size == 128) {
         T c = warp_bitonic_merge_sort_build(x, lane_idx, opus::number<128>{}, opus::number<is_descending>{});
     
         reinterpret_cast<T*>(smem)[lane_idx] = c;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         T r = reinterpret_cast<T*>(smem)[lane_idx ^ 64];
 
         T o = warp_bitonic_merge_sort_combine(c, r, lane_idx, 0, opus::number<128>{}, opus::number<is_descending>{});
@@ -360,22 +354,22 @@ __device__ __inline__ auto block_bitonic_merge_sort_to_reg(void* smem, const T& 
         T c = warp_bitonic_merge_sort_build(x, lane_idx, opus::number<128>{}, opus::number<is_descending>{});
 
         reinterpret_cast<T*>(smem)[lane_idx] = c;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         T r = reinterpret_cast<T*>(smem)[lane_idx ^ 64];
 
         // using combine to simulate build stage
         T o  = warp_bitonic_merge_sort_combine(c, r, lane_idx, (lane_idx / 128) & 1, opus::number<128>{}, opus::number<is_descending>{});
 
         // start to combine
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         reinterpret_cast<T*>(smem)[lane_idx] = o;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         r   = reinterpret_cast<T*>(smem)[lane_idx ^ 128];
         c   = warp_bitonic_merge_sort_step_(o, r, lane_idx, 0, opus::number<256>{}, opus::number<is_descending>{});
 
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         reinterpret_cast<T*>(smem)[lane_idx] = c;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         r   = reinterpret_cast<T*>(smem)[lane_idx ^ 64];
         o   = warp_bitonic_merge_sort_combine(c, r, lane_idx, 0, opus::number<128>{}, opus::number<is_descending>{});
 
@@ -387,41 +381,41 @@ __device__ __inline__ auto block_bitonic_merge_sort_to_reg(void* smem, const T& 
         T c = warp_bitonic_merge_sort_build(x, lane_idx, opus::number<128>{}, opus::number<is_descending>{});
 
         reinterpret_cast<T*>(smem)[lane_idx] = c;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         T r = reinterpret_cast<T*>(smem)[lane_idx ^ 64];
 
         // using combine to simulate build stage
         T o  = warp_bitonic_merge_sort_combine(c, r, lane_idx, (lane_idx / 128) & 1, opus::number<128>{}, opus::number<is_descending>{});
 
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         reinterpret_cast<T*>(smem)[lane_idx] = o;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         r   = reinterpret_cast<T*>(smem)[lane_idx ^ 128];
 
         c   = warp_bitonic_merge_sort_step_(o, r, lane_idx, (lane_idx / 256) & 1, opus::number<256>{}, opus::number<is_descending>{});
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         reinterpret_cast<T*>(smem)[lane_idx] = o;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         r   = reinterpret_cast<T*>(smem)[lane_idx ^ 64];
         o  = warp_bitonic_merge_sort_combine(c, r, lane_idx, (lane_idx / 128) & 1, opus::number<128>{}, opus::number<is_descending>{});
 
         // using combine to simulate build stage
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         reinterpret_cast<T*>(smem)[lane_idx] = o;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         r   = reinterpret_cast<T*>(smem)[lane_idx ^ 256];
 
         // start to combine
         c   = warp_bitonic_merge_sort_step_(o, r, lane_idx, 0, opus::number<512>{}, opus::number<is_descending>{});
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         reinterpret_cast<T*>(smem)[lane_idx] = c;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         r   = reinterpret_cast<T*>(smem)[lane_idx ^ 128];
 
         c   = warp_bitonic_merge_sort_step_(o, r, lane_idx, 0, opus::number<256>{}, opus::number<is_descending>{});
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
         reinterpret_cast<T*>(smem)[lane_idx] = c;
-        __syncthreads();
+        __builtin_amdgcn_s_barrier();
 
         r   = reinterpret_cast<T*>(smem)[lane_idx ^ 64];
         o   = warp_bitonic_merge_sort_combine(c, r, lane_idx, 0, opus::number<128>{}, opus::number<is_descending>{});
@@ -431,13 +425,14 @@ __device__ __inline__ auto block_bitonic_merge_sort_to_reg(void* smem, const T& 
     }
 }
 
+// __device__ implementation — called by extern "C" __global__ wrappers below
 template<typename T, int block_size = 64, int lanegroup_size = 64, int is_descending = 1>
-__global__ void bitonic_merge_sort_kernel(T* i_ptr, T* o_ptr)
+__device__ void bitonic_merge_sort_impl(T* i_ptr, T* o_ptr)
 {
-    __shared__ T smem[block_size];  // smem will only be used for block sort
+    __shared__ T smem[block_size];
     T data = -INFINITY;
-    if(threadIdx.x < lanegroup_size) {
-        data = i_ptr[threadIdx.x];
+    if(__builtin_amdgcn_workitem_id_x() < lanegroup_size) {
+        data = i_ptr[__builtin_amdgcn_workitem_id_x()];
     }
 
     auto res = [&](){
@@ -445,148 +440,34 @@ __global__ void bitonic_merge_sort_kernel(T* i_ptr, T* o_ptr)
             return warp_bitonic_merge_sort_to_reg(data, opus::number<lanegroup_size>{}, opus::number<is_descending>{});
         else
             return block_bitonic_merge_sort_to_reg(smem, data, opus::number<lanegroup_size>{}, opus::number<is_descending>{});
-    }(); 
-    if(threadIdx.x  < lanegroup_size) {
-        o_ptr[threadIdx.x] = res;
+    }();
+    if(__builtin_amdgcn_workitem_id_x() < lanegroup_size) {
+        o_ptr[__builtin_amdgcn_workitem_id_x()] = res;
     }
 }
 
-static inline float get_rand(){
-    static int inited = 0;
-    float v;
-    if(!inited){ srand(time(NULL)); inited = 1; }
-    v = rand() % 600 + 1;
-    return v / 70.0f;
-}
-
-static inline void rand_vector(float* vec, int len) {
-    for(int i =0; i < len; i++) {
-        vec[i] = get_rand();
-    }
-}
-
-template<int is_descending = 1>
-static inline bool check_ordered(float* vec, int len) {
-    bool rtn = true;
-    for(int i = 0; i < len - 1; i++) {
-        if constexpr(is_descending)
-            rtn &= vec[i] >= vec[i+1];
-        else
-            rtn &= vec[i] <= vec[i+1];
-    }
-    return rtn;
-}
-
-template<typename T, typename V, int block_size = 64, int lanegroup_size = 64, int is_descending = 1>
-void run()
-{
-    T * input = reinterpret_cast<T*>(malloc(sizeof(T) * lanegroup_size));
-    T * output = reinterpret_cast<T*>(malloc(sizeof(T) * lanegroup_size));
-    V * ai     = reinterpret_cast<V*>(malloc(sizeof(V) * lanegroup_size));
-    V * ao    = reinterpret_cast<V*>(malloc(sizeof(V) * lanegroup_size));
-
-    T *dev_i, *dev_o;
-    V * dev_ai, *dev_ao;
-
-    HIP_CALL(hipMalloc(&dev_i, sizeof(T) * lanegroup_size));
-    HIP_CALL(hipMalloc(&dev_o, sizeof(T) * lanegroup_size));
-    HIP_CALL(hipMalloc(&dev_ai, sizeof(V) * lanegroup_size));
-    HIP_CALL(hipMalloc(&dev_ao, sizeof(V) * lanegroup_size));
-
-    rand_vector(input, lanegroup_size);
-    for(int i = 0; i < lanegroup_size; i++) {
-        ai[i] = static_cast<V>(i);
+// ── extern "C" __global__ wrappers with predictable names ────────────────────
+// No <<<>>>, no dim3, no host dispatch. Python loads the .hsaco and calls
+// hipModuleLaunchKernel with these symbol names directly.
+#define WRAP(NAME, BS, LS, D) \
+    extern "C" __global__ void NAME(float* i_ptr, float* o_ptr) { \
+        bitonic_merge_sort_impl<float, BS, LS, D>(i_ptr, o_ptr); \
     }
 
-    //if(lanegroup_size == 4) {
-    //    input[3] = input[1];
-    //}
-
-    HIP_CALL(hipMemcpy(dev_i, input, sizeof(T) * lanegroup_size, hipMemcpyHostToDevice));
-    HIP_CALL(hipMemcpy(dev_ai, ai, sizeof(V) * lanegroup_size, hipMemcpyHostToDevice));
-
-    auto gx = dim3(1);
-    auto bx = dim3(block_size);
-
-    bitonic_merge_sort_kernel<T, block_size, lanegroup_size, is_descending><<<gx, bx>>>(dev_i, dev_o);
-
-
-    HIP_CALL(hipMemcpy(output, dev_o, sizeof(T) * lanegroup_size, hipMemcpyDeviceToHost));
-
-    printf("[origin-%d]", lanegroup_size);
-    for(int i = 0; i < lanegroup_size; i++) {
-#if FMT_LIMIT
-        if(i >= FMT_LIMIT_MAX) {
-            printf("... ");
-            break;
-        }
-        else
-#endif
-            printf("%.3f ", input[i]);
-    }
-    printf("\n");
-    printf("[sorted-%d]", lanegroup_size);
-    for(int i = 0; i < lanegroup_size; i++) {
-#if FMT_LIMIT
-        if(i >= FMT_LIMIT_MAX) {
-            printf("... ");
-            break;
-        }
-        else
-#endif
-            printf("%.3f ", output[i]);
-    }
-    printf("\n");
-
-    bool allright = true;
-    {
-        std::vector<T> input_v;
-        for(auto i = 0; i < lanegroup_size; i++) input_v.push_back(input[i]);
-        auto comp = [&](auto a, auto b){
-            if constexpr(is_descending)
-                return a > b;
-            else
-                return a < b;};
-        std::sort(input_v.begin(), input_v.end(), comp);
-        for(auto i = 0; i < lanegroup_size; i++) {
-            if(input_v[i] != output[i])
-                allright = false;
-        }
-
-    }
-    bool is_ordered = check_ordered<is_descending>(output, lanegroup_size);
-    printf("--------------------------------------------------------------- %s[%s][%s]\n",
-            is_ordered?"ordered":"non-order", is_descending? ">" : "<", allright ? "y" : "n");
-
-    free(input);
-    free(output);
-    free(ai);
-    free(ao);
-
-    HIP_CALL(hipFree(dev_i));
-    HIP_CALL(hipFree(dev_o));
-    HIP_CALL(hipFree(dev_ai));
-    HIP_CALL(hipFree(dev_ao));
-}
-
-int main(int argc, char ** argv)
-{
-    printf("[WARP SORT BITONIC]____________________________________________\n");
-    run<float, int, 64, 2>();
-    run<float, int, 64, 4>();
-    run<float, int, 64, 8>();
-    run<float, int, 64, 16>();
-    run<float, int, 64, 32>();
-    run<float, int, 64, 64>();
-    run<float, int, 128, 128>();
-    run<float, int, 256, 256>();
-    run<float, int, 64, 2, 0>();
-    run<float, int, 64, 4, 0>();
-    run<float, int, 64, 8, 0>();
-    run<float, int, 64, 16, 0>();
-    run<float, int, 64, 32, 0>();
-    run<float, int, 64, 64, 0>();
-    run<float, int, 128, 128, 0>();
-    run<float, int, 256, 256, 0>();
-    return 0;
-}
+WRAP(sort_f32_64_2_desc,     64,   2, 1)
+WRAP(sort_f32_64_2_asc,      64,   2, 0)
+WRAP(sort_f32_64_4_desc,     64,   4, 1)
+WRAP(sort_f32_64_4_asc,      64,   4, 0)
+WRAP(sort_f32_64_8_desc,     64,   8, 1)
+WRAP(sort_f32_64_8_asc,      64,   8, 0)
+WRAP(sort_f32_64_16_desc,    64,  16, 1)
+WRAP(sort_f32_64_16_asc,     64,  16, 0)
+WRAP(sort_f32_64_32_desc,    64,  32, 1)
+WRAP(sort_f32_64_32_asc,     64,  32, 0)
+WRAP(sort_f32_64_64_desc,    64,  64, 1)
+WRAP(sort_f32_64_64_asc,     64,  64, 0)
+WRAP(sort_f32_128_128_desc, 128, 128, 1)
+WRAP(sort_f32_128_128_asc,  128, 128, 0)
+WRAP(sort_f32_256_256_desc, 256, 256, 1)
+WRAP(sort_f32_256_256_asc,  256, 256, 0)
+#undef WRAP
