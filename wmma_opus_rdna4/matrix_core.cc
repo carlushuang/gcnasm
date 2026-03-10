@@ -11,6 +11,7 @@
 #include "half.hpp"
 
 #include "opus/opus.hpp"
+#include "reg_access_uitls.h"
 
 #define CHECK_HIP(call)                                                                                   \
     do {                                                                                                  \
@@ -48,10 +49,6 @@ __device__ int32x4_t make_buffer_resource(const void * ptr, uint32_t size = 0xff
 }
 
 
-union VectorConverter {
-    fp16x8_t vec8;
-    fp16x4_t vec4[2];
-};
 __global__ void 
 wmma_kernel_standard(const void* __restrict__ ptr_a,
                    const void* __restrict__ ptr_b,
@@ -60,21 +57,29 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
                    int stride_b,
                    int stride_c)
 {
-    // 16x16x16 gemm, assume only launced 1 wave
-    int offset_a1 = (threadIdx.x / 16 * 4) + (threadIdx.x % 16 * stride_a);
-    int offset_a2 = (threadIdx.x / 16 * 4) + (threadIdx.x % 16 * stride_a) + 8;
-    int offset_b1 = (threadIdx.x / 16 * 4) + (threadIdx.x % 16 * stride_a);
-    int offset_b2 = (threadIdx.x / 16 * 4) + (threadIdx.x % 16 * stride_a) + 8;
+    // 16x16x32 gemm, assume only launched 1 wave
+    // A: 16 rows x 32 cols (row-major), each thread holds 16 fp16 elements
+    // thread lane = threadIdx.x % 16 → selects the row
+    // threadIdx.x / 16 ∈ {0,1} → selects the first or second group of 8 K-elements
+    int row_a = threadIdx.x % 16;
+    int grp_a = threadIdx.x / 16;  // 0 or 1, each group covers 8 K elements
+    int offset_a1 = row_a * stride_a + grp_a * 8;        // first 8 of this thread's K slice
+    int offset_a2 = row_a * stride_a + grp_a * 8 + 16;   // second 8 (next 16 fp16 offset)
 
-    VectorConverter convertA;
-    convertA.vec4[0] = *reinterpret_cast<const fp16x4_t*>(reinterpret_cast<const fp16_t*>(ptr_a) + offset_a1);
-    convertA.vec4[1] = *reinterpret_cast<const fp16x4_t*>(reinterpret_cast<const fp16_t*>(ptr_a) + offset_a2);
-    VectorConverter convertB;
-    convertB.vec4[0] = *reinterpret_cast<const fp16x4_t*>(reinterpret_cast<const fp16_t*>(ptr_b) + offset_b1);
-    convertB.vec4[1] = *reinterpret_cast<const fp16x4_t*>(reinterpret_cast<const fp16_t*>(ptr_b) + offset_b2);
+    int row_b = threadIdx.x % 16;
+    int grp_b = threadIdx.x / 16;
+    int offset_b1 = row_b * stride_b + grp_b * 8;
+    int offset_b2 = row_b * stride_b + grp_b * 8 + 16;
+
+    reg_utils::Fp16x16Packer convertA;
+    __builtin_memcpy(&convertA.vec8[0], reinterpret_cast<const fp16_t*>(ptr_a) + offset_a1, sizeof(convertA.vec8[0]));
+    __builtin_memcpy(&convertA.vec8[1], reinterpret_cast<const fp16_t*>(ptr_a) + offset_a2, sizeof(convertA.vec8[1]));
+    reg_utils::Fp16x16Packer convertB;
+    __builtin_memcpy(&convertB.vec8[0], reinterpret_cast<const fp16_t*>(ptr_b) + offset_b1, sizeof(convertB.vec8[0]));
+    __builtin_memcpy(&convertB.vec8[1], reinterpret_cast<const fp16_t*>(ptr_b) + offset_b2, sizeof(convertB.vec8[1]));
     fp16x8_t v_c = {.0f};  // clear
 
-    v_c = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32_gfx12( convertB.vec8, convertA.vec8,  v_c);
+    v_c = __builtin_amdgcn_wmma_f16_16x16x32_f16(0, convertB.vec16, 0, convertA.vec16, 0, v_c, false, false);
 
     int col_id_c = threadIdx.x / 16;
     int row_id_c = threadIdx.x % 16;
@@ -167,7 +172,7 @@ void benchmark_kernel(float16* dev_a, float16* dev_b, float16* dev_c,
 int main(int argc, char** argv) {
     int m = 16;
     int n = 16;
-    int k = 16;
+    int k = 32;
 
     // Parse command line arguments: -m -n -k
     for(int i = 1; i < argc; ++i) {
@@ -228,7 +233,7 @@ int main(int argc, char** argv) {
     // Copy results back and validate
     CHECK_HIP(hipMemcpy(fp16_c.get(), dev_c, ldc * m * sizeof(float16), hipMemcpyDeviceToHost));
     bool valid = valid_vector(host_c.get(), fp16_c.get(), m * n, 1e-3f);
-    printf("[16x16x16, standard] %s\n", valid ? "✓ VALID" : "✗ FAIL");
+    printf("[16x16x32, standard] %s\n", valid ? "✓ VALID" : "✗ FAIL");
 
     // Benchmark
     printf("\n");
