@@ -73,7 +73,8 @@ struct TdmDataSize {
 //
 //   Rarely-changed fixed fields (with defaults):
 //     Count         — G0 bit[0:1],    default 1
-//     GatherMode    — G0 bit[30:2],   default 0
+//     GatherIndexSize — G0 bit[30:1], default 0
+//     GatherMode    — G0 bit[31:1],   default 0
 //     TypeLo        — G0 bit[126:1],  default 0  ┐ 0b10 = "image"
 //     TypeHi        — G0 bit[127:1],  default 1  ┘
 //     AtomicBarrierEn — G1 bit[18:1], default 0
@@ -95,10 +96,11 @@ template<
     uint64_t TileDim3        = 0,
     uint64_t TileDim4        = 0,
     // ── Rarely changed ───────────────────────────────────────
-    uint64_t Count           = 1,
-    uint64_t GatherMode      = 0,
-    uint64_t TypeLo          = 0,
-    uint64_t TypeHi          = 1,
+    uint64_t Count             = 1,
+    uint64_t GatherIndexSize   = 0,
+    uint64_t GatherMode        = 0,
+    uint64_t TypeLo            = 0,
+    uint64_t TypeHi            = 1,
     uint64_t AtomicBarrierEn = 0,
     uint64_t IterateEn       = 0,
     uint64_t McEarlyTimeout  = 0,
@@ -113,23 +115,25 @@ struct TdmDesc {
     static constexpr uint64_t kDataSize = TdmDataSize<DataType>::value;
 
     // ── Group 0: 128-bit ─────────────────────────────────────────────────────
-    // bit[0:1]   count          — compile-time
-    // bit[1:29]  cwsr_bits      — compile-time, fixed 0
-    // bit[30:2]  gather_mode    — compile-time
-    // bit[32:32] lds_addr       — runtime
-    // bit[64:57] global_addr    — runtime
-    // bit[121:5] RESERVED       — compile-time, fixed 0
-    // bit[126:1] type[0]        — compile-time
-    // bit[127:1] type[1]        — compile-time
+    // bit[0:1]   count              — compile-time
+    // bit[1:29]  cwsr_bits          — compile-time, fixed 0
+    // bit[30:1]  gather_index_size  — compile-time
+    // bit[31:1]  gather_mode        — compile-time
+    // bit[32:32] lds_addr           — runtime
+    // bit[64:57] global_addr        — runtime
+    // bit[121:5] RESERVED           — compile-time, fixed 0
+    // bit[126:1] type[0]            — compile-time
+    // bit[127:1] type[1]            — compile-time
     using Sg0Type = SgprBitField128<
-        BF<0,   1, Count>,        // 0: count
-        BF<1,  29, 0>,            // 1: cwsr_bits (always 0)
-        BF<30,  2, GatherMode>,   // 2: gather_mode
-        BF<32, 32>,               // 3: lds_addr       — runtime
-        BF<64, 57>,               // 4: global_addr    — runtime
-        BF<121, 5, 0>,            // 5: RESERVED
-        BF<126, 1, TypeLo>,       // 6: type[0]
-        BF<127, 1, TypeHi>        // 7: type[1]
+        BF<0,   1, Count>,              // 0: count
+        BF<1,  29, 0>,                  // 1: cwsr_bits (always 0)
+        BF<30,  1, GatherIndexSize>,    // 2: gather_index_size
+        BF<31,  1, GatherMode>,         // 3: gather_mode
+        BF<32, 32>,                     // 4: lds_addr       — runtime
+        BF<64, 57>,                     // 5: global_addr    — runtime
+        BF<121, 5, 0>,                  // 6: RESERVED
+        BF<126, 1, TypeLo>,             // 7: type[0]
+        BF<127, 1, TypeHi>              // 8: type[1]
     >;
 
     // ── Group 1: 256-bit ─────────────────────────────────────────────────────
@@ -198,8 +202,8 @@ struct TdmDesc {
     Sg3Type sg3;
 
     // ── Named setters for frequently updated runtime fields ───────────────────
-    OPUS_H_D void set_lds_addr(uintptr_t v)          { sg0.template set<3>(v); }
-    OPUS_H_D void set_global_addr(uintptr_t v)       { sg0.template set<4>(v); }
+    OPUS_H_D void set_lds_addr(uintptr_t v)          { sg0.template set<4>(v); }
+    OPUS_H_D void set_global_addr(uintptr_t v)       { sg0.template set<5>(v); }
     OPUS_H_D void set_tensor_dim0(uint32_t v)        { sg1.template set<9>(v); }
     OPUS_H_D void set_tensor_dim1(uint32_t v)        { sg1.template set<10>(v); }
     OPUS_H_D void set_tensor_dim0_stride(uint64_t v) { sg1.template set<14>(v); }
@@ -242,8 +246,8 @@ struct TdmDesc {
         uint32_t    tensor_dim4         = 0)
     {
         // Group 0
-        sg0.template set<3>(lds_addr);
-        sg0.template set<4>(reinterpret_cast<uintptr_t>(global_addr));
+        sg0.template set<4>(lds_addr);
+        sg0.template set<5>(reinterpret_cast<uintptr_t>(global_addr));
 
         // Group 1: required
         sg1.template set<9> (tensor_dim0);
