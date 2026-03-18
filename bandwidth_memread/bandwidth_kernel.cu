@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <chrono>
 
 #ifdef __NVCC__
 using fp32 =  float;
@@ -132,6 +133,42 @@ do {\
 #define WARMUP 25
 #define LOOP 100
 
+// ---------------------------------------------------------------------------
+// Timer classes
+// ---------------------------------------------------------------------------
+
+struct gpu_timer {
+    cudaEvent_t start_ev, stop_ev;
+    gpu_timer() {
+        CALL(cudaEventCreate(&start_ev));
+        CALL(cudaEventCreate(&stop_ev));
+    }
+    ~gpu_timer() {
+        (void)cudaEventDestroy(start_ev);
+        (void)cudaEventDestroy(stop_ev);
+    }
+    void start() { CALL(cudaEventRecord(start_ev, 0)); }
+    void stop()  { CALL(cudaEventRecord(stop_ev, 0)); CALL(cudaEventSynchronize(stop_ev)); }
+    float get()  { float ms; CALL(cudaEventElapsedTime(&ms, start_ev, stop_ev)); return ms; }
+};
+
+struct cpu_timer {
+    std::chrono::time_point<std::chrono::high_resolution_clock> t_start, t_stop;
+    void start() {
+        CALL(cudaDeviceSynchronize());
+        t_start = std::chrono::high_resolution_clock::now();
+    }
+    void stop() {
+        CALL(cudaDeviceSynchronize());
+        t_stop = std::chrono::high_resolution_clock::now();
+    }
+    float get() {
+        return std::chrono::duration<float, std::milli>(t_stop - t_start).count();
+    }
+};
+
+// ---------------------------------------------------------------------------
+
 static inline void b2s(size_t bytes, char * str){
 	if(bytes<1024){
 		sprintf(str, "%luB", bytes);
@@ -174,7 +211,7 @@ static inline int valid_vec(const float * vec_a, const float * vec_b, int num)
 }
 
 template<typename VEC, int OCCUPANCY, int UNROLL, int kernel_id = 0>
-float bench_kernel(void * B, void * A, int64_t dwords)
+float bench_kernel(void * B, void * A, int64_t dwords, bool use_cpu_timer = false)
 {
     // benchmark kernel
     int num_cu = [&](){
@@ -192,42 +229,42 @@ float bench_kernel(void * B, void * A, int64_t dwords)
     int issues_per_block = pixels / gx;
     int iters = issues_per_block / bx / UNROLL;
 
-    cudaEvent_t start_ev, stop_ev;
-    CALL(cudaEventCreate(&start_ev));
-    CALL(cudaEventCreate(&stop_ev));
+    auto run_kernels = [&](int count) {
+        if constexpr (kernel_id == 0) {
+            for(int i = 0; i < count; i++)
+                memread_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+        } else if constexpr (kernel_id == 1) {
+            for(int i = 0; i < count; i++)
+                memcpy_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
+        }
+    };
 
-    if constexpr ( kernel_id == 0) {
-        for(int i=0;i<WARMUP;i++)
-            memread_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
-    }
-    else if constexpr(kernel_id == 1) {
-        for(int i=0;i<WARMUP;i++)
-            memcpy_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
-    }
-
-    CALL(cudaEventRecord(start_ev, 0));
-    if constexpr ( kernel_id == 0) {
-        for(int i=0;i<LOOP;i++)
-            memread_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
-    }
-    else if constexpr(kernel_id == 1) {
-        for(int i=0;i<LOOP;i++)
-            memcpy_kernel<VEC, UNROLL><<<gx, bx>>>(reinterpret_cast<VEC*>(B), reinterpret_cast<VEC*>(A), issues_per_block, iters);
-    }
-    CALL(cudaEventRecord( stop_ev, 0 ));
-    CALL(cudaEventSynchronize(stop_ev));
+    run_kernels(WARMUP);
 
     float ms;
-    CALL(cudaEventElapsedTime(&ms,start_ev, stop_ev));
-    ms/=LOOP;
+    if (use_cpu_timer) {
+        cpu_timer timer;
+        timer.start();
+        run_kernels(LOOP);
+        timer.stop();
+        ms = timer.get();
+    } else {
+        gpu_timer timer;
+        timer.start();
+        run_kernels(LOOP);
+        timer.stop();
+        ms = timer.get();
+    }
+
+    ms /= LOOP;
     return ms;
 }
 
 template<int kernel_id = 0>
-int run(int64_t dwords)
+int run(int64_t dwords, bool use_cpu_timer)
 {
     unsigned char *A, *B;
-    
+
     float * h_A = (float*)malloc(dwords*sizeof(float));
     float * h_B = (float*)malloc(dwords*sizeof(float));
 	for (int i = 0; i < dwords; ++i)
@@ -237,7 +274,7 @@ int run(int64_t dwords)
     CALL(cudaMalloc(&B, dwords * sizeof(float)));
     CALL(cudaMemcpy(A, h_A, dwords * sizeof(float), cudaMemcpyHostToDevice));
 
-    float ms = bench_kernel<fp32x4, 1, 4, kernel_id>(B, A, dwords);
+    float ms = bench_kernel<fp32x4, 1, 4, kernel_id>(B, A, dwords, use_cpu_timer);
 
     auto get_gbps = [](int64_t dwords_, float ms_){
         return  ((double)dwords_*sizeof(float))/((double)ms_/1000)/1000000000.0;
@@ -256,9 +293,12 @@ int run(int64_t dwords)
 
 int main(int argc, char ** argv) {
     CALL(cudaSetDevice(0));
+
+    bool use_cpu_timer = env_get_int("USE_CPU_TIMER", 0) != 0;
+
     if(argc > 1){
         int64_t dwords = atoll(argv[1]);
-        run(dwords);
+        run(dwords, use_cpu_timer);
     } else {
         int btc = env_get_int("BANDWIDTH_TEST_CASE", 0);
         int list = env_get_int("BANDWIDTH_TEST_LIST", 0);
@@ -270,7 +310,9 @@ int main(int argc, char ** argv) {
             return dev_prop.multiProcessorCount;
         }();
 
-        printf("cu:%d, nt_load:%d, nt_store:%d (%d)\n", num_cu, USE_NT_LOAD, USE_NT_STORE, btc);
+        printf("cu:%d, nt_load:%d, nt_store:%d (%d) timer:%s\n",
+            num_cu, USE_NT_LOAD, USE_NT_STORE, btc,
+            use_cpu_timer ? "cpu" : "gpu");
         num_cu = btc == 0 ? num_cu : (btc == -1 ? 304 : btc);
 
         int64_t dwords_list_1[] = {
@@ -310,14 +352,14 @@ int main(int argc, char ** argv) {
         printf("---------------------------------------------\n");
         for(auto i = 0; i < iters; i++) {
             int64_t dwords = dwords_list[i];
-            run<0>(dwords);
+            run<0>(dwords, use_cpu_timer);
             usleep(200000);
         }
         printf("---------------------------------------------\n");
         usleep(200000 * 10);
         for(auto i = 0; i < iters; i++) {
             int64_t dwords = dwords_list[i];
-            run<1>(dwords);
+            run<1>(dwords, use_cpu_timer);
             usleep(200000);
         }
     }
