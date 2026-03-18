@@ -197,6 +197,20 @@ struct TdmDesc {
     Sg2Type sg2;
     Sg3Type sg3;
 
+    // ── Named setters for frequently updated runtime fields ───────────────────
+    OPUS_H_D void set_lds_addr(uintptr_t v)          { sg0.template set<3>(v); }
+    OPUS_H_D void set_global_addr(uintptr_t v)       { sg0.template set<4>(v); }
+    OPUS_H_D void set_tensor_dim0(uint32_t v)        { sg1.template set<9>(v); }
+    OPUS_H_D void set_tensor_dim1(uint32_t v)        { sg1.template set<10>(v); }
+    OPUS_H_D void set_tensor_dim0_stride(uint64_t v) { sg1.template set<14>(v); }
+    OPUS_H_D void set_tensor_dim1_stride(uint64_t v) { sg1.template set<15>(v); }
+    OPUS_H_D void set_lds_barrier_addr(uint16_t v)   { sg1.template set<8>(v); }
+    OPUS_H_D void set_tensor_dim2(uint32_t v)        { sg2.template set<0>(v); }
+    OPUS_H_D void set_tensor_dim3(uint32_t v)        { sg2.template set<1>(v); }
+    OPUS_H_D void set_tensor_dim2_stride(uint64_t v) { sg2.template set<2>(v); }
+    OPUS_H_D void set_tensor_dim3_stride(uint64_t v) { sg3.template set<0>(v); }
+    OPUS_H_D void set_tensor_dim4(uint32_t v)        { sg3.template set<1>(v); }
+
     // ── make(): fill all runtime fields ──────────────────────────────────────
     // Required:
     //   lds_addr            — LDS destination byte address (uintptr_t)
