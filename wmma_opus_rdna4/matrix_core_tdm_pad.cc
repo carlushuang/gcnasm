@@ -57,8 +57,16 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
                    int stride_b,
                    int stride_c)
 {
-    // 16x16x128: K=128 = 4 × WMMA(16x16x32), single wave
+    using opus::operator""_I;
+
+    // 16x16x128: K=128 = 4 × WMMA(16x16x32), single wave (32 lanes)
     constexpr int Block_K = 128;
+    constexpr int Block_M = 16;
+    constexpr int Block_N = 16;
+    constexpr int32_t warpNum = 1;
+    const int lane_id = threadIdx.x % opus::get_warp_size();
+    const int wave_id = threadIdx.x / opus::get_warp_size();
+
     __shared__ char Smem[16 * Block_K * 2 * sizeof(fp16_t) + 16 * 8 * sizeof(fp16_t)];
     uintptr_t smembase = reinterpret_cast<uintptr_t>(Smem);
 
@@ -71,13 +79,55 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     tdm_a.make(smembase, ptr_a, Block_K, 16, stride_a);
     tdm_b.make(smembase + 16 * Block_K * sizeof(fp16_t) + 16 * 8 * sizeof(fp16_t), ptr_b, Block_K, 16, stride_b);
 
-    const int row_a = threadIdx.x % 16;
-    const int grp_a = threadIdx.x / 16; // 0 or 1, 8 K elems per group
-    const int smem_stride_elems = Block_K;
+    // ── block_sld A/B: same construction as matrix_core_gfx942.cc (smem load windows)
+    // 32-lane wave: AKSldLane×AMSldLane = 2×16 (gfx942 uses 4×16 on 64-lane)
+    constexpr int32_t AKSldPack = 16 / static_cast<int32_t>(sizeof(fp16_t));
+    constexpr int32_t AKSldLane = 16 / AKSldPack;
+    constexpr int32_t AMSldLane = opus::get_warp_size() / AKSldLane;
+    constexpr int32_t AMSldRepeat = Block_M / (AMSldLane * warpNum);
+    constexpr int32_t AKSldRepeat = Block_K / (AKSldPack * AKSldLane);
+    static_assert(AKSldLane * AMSldLane == opus::get_warp_size(), "A sld lane product");
 
-    const int row_b = threadIdx.x % 16;
-    const int grp_b = threadIdx.x / 16;
-    constexpr int smem_b_base_bytes = 16 * Block_K * static_cast<int>(sizeof(fp16_t)) + 16 * 8 * static_cast<int>(sizeof(fp16_t));
+    // LDS row pitch (fp16 elements) = logical K + TDM pad per row; keep A/B sld strides consistent
+    constexpr int32_t SMemKPitch = Block_K + 8;
+
+    auto block_sld_shape_a = opus::make_tuple(opus::number<AMSldRepeat>{},
+                                                opus::number<warpNum>{},
+                                                opus::number<AKSldRepeat>{},
+                                                opus::number<AKSldLane>{},
+                                                opus::number<AMSldLane>{},
+                                                opus::number<AKSldPack>{});
+    auto block_sld_stride_a = opus::make_tuple(AMSldLane * SMemKPitch * warpNum,
+                                                AMSldLane * SMemKPitch,
+                                                AKSldPack * AKSldLane,
+                                                AKSldPack,
+                                                SMemKPitch,
+                                                1_I);
+    auto block_sld_win_a = opus::make_layout<0>(block_sld_shape_a, block_sld_stride_a);
+
+    constexpr int32_t BSldKPack = 16 / static_cast<int32_t>(sizeof(fp16_t));
+    constexpr int32_t BSldKLane = AKSldLane;
+    constexpr int32_t BSldNLane = AMSldLane;
+    constexpr int32_t BSldKRepeat = Block_K / (BSldKPack * BSldKLane);
+    constexpr int32_t BSldNRepeat = Block_N / BSldNLane;
+    static_assert(BSldKLane * BSldNLane == opus::get_warp_size(), "B sld lane product");
+    static_assert(BSldKPack * BSldKLane * BSldKRepeat == Block_K, "B K tile");
+    // static_assert(BSldNLane * BSldNRepeat == Block_N, "B N tile");
+
+    auto block_sld_shape_b = opus::make_tuple(opus::number<BSldNRepeat>{},
+                                                opus::number<BSldKRepeat>{},
+                                                opus::number<BSldKLane>{},
+                                                opus::number<BSldNLane>{},
+                                                opus::number<BSldKPack>{});
+    auto block_sld_stride_b = opus::make_tuple(SMemKPitch * BSldNLane,
+                                                BSldKPack * BSldKLane,
+                                                BSldKPack,
+                                                SMemKPitch,
+                                                1_I);
+    auto block_sld_win_b = opus::make_layout<0>(block_sld_shape_b, block_sld_stride_b);
+
+    constexpr int smem_b_base_bytes = 16 * Block_K * static_cast<int>(sizeof(fp16_t))
+                                      + 16 * 8 * static_cast<int>(sizeof(fp16_t));
 
     __builtin_amdgcn_tensor_load_to_lds(tdm_a.sg0.as<int32x4_t>(), tdm_a.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
     __builtin_amdgcn_tensor_load_to_lds(tdm_b.sg0.as<int32x4_t>(), tdm_b.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
@@ -94,11 +144,24 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
 
     #pragma unroll
     for (int kt = 0; kt < K_WmmaTiles; ++kt) {
-        const int k0 = kt * KtileElems;
-        const int a_sld_os0 = (row_a * smem_stride_elems + row_a * 8 + grp_a * 8 + k0) * static_cast<int>(sizeof(fp16_t));
-        const int a_sld_os1 = (row_a * smem_stride_elems + row_a * 8 + grp_a * 8 + k0 + 16) * static_cast<int>(sizeof(fp16_t));
-        const int b_sld_os0 = smem_b_base_bytes + (row_b * smem_stride_elems + row_b * 8 + grp_b * 8 + k0) * static_cast<int>(sizeof(fp16_t));
-        const int b_sld_os1 = smem_b_base_bytes + (row_b * smem_stride_elems + row_b * 8 + grp_b * 8 + k0 + 16) * static_cast<int>(sizeof(fp16_t));
+        // One WMMA K-slab = 32 fp16 = two KRepeat steps (16 fp16 each), same as gfx942 +0 / +32 B offsets pattern
+        const int32_t kr0 = 2 * kt;
+        const int32_t kr1 = kr0 + 1;
+
+        const int32_t a_sld_os0 =
+            block_sld_win_a(0_I, wave_id, kr0, lane_id / AMSldLane, lane_id % AMSldLane, 0_I)
+            * static_cast<int32_t>(sizeof(fp16_t));
+        const int32_t a_sld_os1 =
+            block_sld_win_a(0_I, wave_id, kr1, lane_id / AMSldLane, lane_id % AMSldLane, 0_I)
+            * static_cast<int32_t>(sizeof(fp16_t));
+        const int32_t b_sld_os0 =
+            smem_b_base_bytes
+            + block_sld_win_b(0_I, kr0, lane_id / BSldNLane, lane_id % BSldNLane, 0_I)
+                  * static_cast<int32_t>(sizeof(fp16_t));
+        const int32_t b_sld_os1 =
+            smem_b_base_bytes
+            + block_sld_win_b(0_I, kr1, lane_id / BSldNLane, lane_id % BSldNLane, 0_I)
+                  * static_cast<int32_t>(sizeof(fp16_t));
 
         fp16x8_t sld_a0, sld_a1, sld_b0, sld_b1;
         asm volatile(
