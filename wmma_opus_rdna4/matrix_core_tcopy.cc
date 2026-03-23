@@ -13,7 +13,7 @@
 
 #include "opus/opus.hpp"
 #include "reg_access_uitls.h"
-#include "tdm_desc_utils.h"
+#include "tcopy_desc_utils.h"
 
 #define CHECK_HIP(call)                                                                                   \
     do {                                                                                                  \
@@ -65,11 +65,11 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     uintptr_t smembase = reinterpret_cast<uintptr_t>(Smem);
 
     // TileDim0=32(K), TileDim1=16(M/N), data_size=1(fp16) — all compile-time
-    using Wmma16x16x32Tdm = TdmDesc<fp16_t, 32, 16>;
+    using Wmma16x16x32Tcopy = TcopyDesc<fp16_t, 32, 16>;
 
-    Wmma16x16x32Tdm tdm_a, tdm_b;
-    tdm_a.make(smembase,                          ptr_a, 32, 16, stride_a);
-    tdm_b.make(smembase + 16*32*sizeof(fp16_t),   ptr_b, 32, 16, stride_b);
+    Wmma16x16x32Tcopy tcopy_a, tcopy_b;
+    tcopy_a.make(smembase,                          ptr_a, 32, 16, stride_a);
+    tcopy_b.make(smembase + 16*32*sizeof(fp16_t),   ptr_b, 32, 16, stride_b);
 
 
 
@@ -92,8 +92,8 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     reg_utils::Fp16x16Packer convertA;
     reg_utils::Fp16x16Packer convertB;
 
-    __builtin_amdgcn_tensor_load_to_lds(tdm_a.sg0.as<int32x4_t>(), tdm_a.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
-    __builtin_amdgcn_tensor_load_to_lds(tdm_b.sg0.as<int32x4_t>(), tdm_b.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
+    __builtin_amdgcn_tensor_load_to_lds(tcopy_a.sg0.as<int32x4_t>(), tcopy_a.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
+    __builtin_amdgcn_tensor_load_to_lds(tcopy_b.sg0.as<int32x4_t>(), tcopy_b.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
 
     __builtin_amdgcn_s_wait_tensorcnt(0);
 

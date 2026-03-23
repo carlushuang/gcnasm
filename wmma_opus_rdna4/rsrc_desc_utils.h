@@ -8,7 +8,7 @@
 //
 // SgprBitField<NWords, BF...>
 //   NWords = 4  →  128-bit  (4x SGPR, e.g. buffer resource descriptor)
-//   NWords = 8  →  256-bit  (8x SGPR, e.g. TDM / image descriptor)
+//   NWords = 8  →  256-bit  (8x SGPR, e.g. Tensor Copy / image descriptor)
 //
 // 256-bit storage is implemented as two 128-bit halves via a union:
 //   union { uint32_t flat[8]; uint32_t half[2][4]; }
@@ -31,9 +31,9 @@
 //   const uint32_t* s = desc.sgpr();   // 4 SGPRs
 //
 // ──────────────────────────────────────────────────────────────
-// Example B — 256-bit TDM / image descriptor (8 SGPRs)
+// Example B — 256-bit Tensor Copy / image descriptor (8 SGPRs)
 //
-//   using TdmDesc = SgprBitField<8,
+//   using TcopyDesc = SgprBitField<8,
 //       BF<0,   48>,                  // 0: base_address   — runtime
 //       BF<48,  14>,                  // 1: stride         — runtime
 //       BF<62,   2, 0>,               // 2: swizzle        — default 0
@@ -44,7 +44,7 @@
 //       BF<224, 32>                   // 7: extra_flags    — runtime
 //   >;
 //
-//   TdmDesc desc;
+//   TcopyDesc desc;
 //   desc.set<0>(base_addr);
 //   desc.set<5>(meta_ptr);
 //   const uint32_t* s = desc.sgpr();   // 8 SGPRs

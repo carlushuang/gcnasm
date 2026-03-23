@@ -13,7 +13,7 @@
 
 #include "opus/opus.hpp"
 #include "reg_access_uitls.h"
-#include "tdm_desc_utils.h"
+#include "tcopy_desc_utils.h"
 
 #define CHECK_HIP(call)                                                                                   \
     do {                                                                                                  \
@@ -70,14 +70,14 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     __shared__ char Smem[16 * Block_K * 2 * sizeof(fp16_t) + 16 * 8 * sizeof(fp16_t)];
     uintptr_t smembase = reinterpret_cast<uintptr_t>(Smem);
 
-    // TileDim0=128(K), TileDim1=16(M/N); LdsPadEn=1, PadInterval=4, PadAmount=16
-    using Wmma16x16x128Tdm = TdmDesc<fp16_t, 128, 16, 0, 0, 0,
+    // TileDim0=128(K), TileDim1=16(M/N); LdsPadEn=1, PadInterval=5(256B), PadAmount=3(16B)
+    using Wmma16x16x128Tcopy = TcopyDesc<fp16_t, 128, 16, 0, 0, 0,
         1, 0, 0, 0, 1, 0, 0, 0, 0,
         1, 5, 3>;
 
-    Wmma16x16x128Tdm tdm_a, tdm_b;
-    tdm_a.make(smembase, ptr_a, Block_K, 16, stride_a);
-    tdm_b.make(smembase + 16 * Block_K * sizeof(fp16_t) + 16 * 8 * sizeof(fp16_t), ptr_b, Block_K, 16, stride_b);
+    Wmma16x16x128Tcopy tcopy_a, tcopy_b;
+    tcopy_a.make(smembase, ptr_a, Block_K, 16, stride_a);
+    tcopy_b.make(smembase + 16 * Block_K * sizeof(fp16_t) + 16 * 8 * sizeof(fp16_t), ptr_b, Block_K, 16, stride_b);
 
     // ── block_sld A/B: same construction as matrix_core_gfx942.cc (smem load windows)
     // 32-lane wave: AKSldLane×AMSldLane = 2×16 (gfx942 uses 4×16 on 64-lane)
@@ -88,7 +88,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     constexpr int32_t AKSldRepeat = Block_K / (AKSldPack * AKSldLane);
     static_assert(AKSldLane * AMSldLane == opus::get_warp_size(), "A sld lane product");
 
-    // LDS row pitch (fp16 elements) = logical K + TDM pad per row; keep A/B sld strides consistent
+    // LDS row pitch (fp16 elements) = logical K + Tensor Copy pad per row; keep A/B sld strides consistent
     constexpr int32_t SMemKPitch = Block_K + 8;
 
     auto block_sld_shape_a = opus::make_tuple(opus::number<AMSldRepeat>{},
@@ -129,8 +129,8 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     constexpr int smem_b_base_bytes = 16 * Block_K * static_cast<int>(sizeof(fp16_t))
                                       + 16 * 8 * static_cast<int>(sizeof(fp16_t));
 
-    __builtin_amdgcn_tensor_load_to_lds(tdm_a.sg0.as<int32x4_t>(), tdm_a.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
-    __builtin_amdgcn_tensor_load_to_lds(tdm_b.sg0.as<int32x4_t>(), tdm_b.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
+    __builtin_amdgcn_tensor_load_to_lds(tcopy_a.sg0.as<int32x4_t>(), tcopy_a.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
+    __builtin_amdgcn_tensor_load_to_lds(tcopy_b.sg0.as<int32x4_t>(), tcopy_b.sg1.as<int32x8_t>(), {0,0,0,0}, {0,0,0,0}, 27);
 
     __builtin_amdgcn_s_wait_tensorcnt(0);
 
@@ -343,7 +343,7 @@ int main(int argc, char** argv) {
     // Copy results back and validate
     CHECK_HIP(hipMemcpy(fp16_c.get(), dev_c, ldc * m * sizeof(float16), hipMemcpyDeviceToHost));
     bool valid = valid_vector(host_c.get(), fp16_c.get(), m * n, 1e-3f);
-    printf("[16x16x128, TDM] %s\n", valid ? "✓ VALID" : "✗ FAIL");
+    printf("[16x16x128, Tensor Copy] %s\n", valid ? "✓ VALID" : "✗ FAIL");
 
     // Benchmark
     printf("\n");
