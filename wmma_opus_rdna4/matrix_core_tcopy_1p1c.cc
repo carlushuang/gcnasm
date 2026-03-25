@@ -48,10 +48,10 @@ __device__ int32x4_t make_buffer_resource(const void * ptr, uint32_t size = 0xff
     return __builtin_bit_cast(int32x4_t, res);
 }
 
-__device__ __forceinline__ int waveid_in_workgroup() // [COMPILE_FIX #1] added: helper for workgroup-local wave id lookup
+__device__ __forceinline__ int waveid_in_workgroup()
 {
     int wave_id;
-    asm volatile("s_bfe_u32 %0, ttmp8, 0x50019" : "=s"(wave_id)); // [COMPILE_FIX #2] read waveid_in_group field directly from ttmp8 SGPR
+    asm volatile("s_bfe_u32 %0, ttmp8, 0x50019" : "=s"(wave_id));
     return wave_id;
 }
 
@@ -66,6 +66,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
                    int stride_c)
 {
     using opus::operator""_I;
+    asm volatile("s_setreg_imm32_b32 hwreg(HW_REG_WAVE_SCHED_MODE), 2" ::: "memory");
 
     constexpr int Block_K = 128;
     constexpr int Block_M = 32;
@@ -73,7 +74,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     constexpr int32_t producerSubWarpNum = 2;
     constexpr int32_t consumerSubWarpNum = 4;
     DECLARE_NAMED_BARRIERS();
-    const int wave_id = waveid_in_workgroup(); // [COMPILE_FIX #3] replace direct llvm.amdgcn.wave.id expression with helper call
+    const int wave_id = waveid_in_workgroup();
     const int sub_consumer_wave_id = wave_id % 4;
     __shared__ char Smem[Block_M * Block_K * 2 * sizeof(fp16_t) + Block_M * 8 * 4 * sizeof(fp16_t)];
     uintptr_t smembase = reinterpret_cast<uintptr_t>(Smem);
@@ -184,6 +185,13 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
 
         constexpr int smem_b_base_bytes = Block_M * Block_K * static_cast<int>(sizeof(fp16_t))
                                         + Block_M * 8 * static_cast<int>(sizeof(fp16_t));
+        const int32_t sub_consumer_wave_m = sub_consumer_wave_id / 2;
+        const int32_t sub_consumer_wave_n = sub_consumer_wave_id % 2;
+        const int32_t lane_id = opus::lane_id();
+        const int32_t a_lane_m = lane_id / AMSldLane;
+        const int32_t a_lane_n = lane_id % AMSldLane;
+        const int32_t b_lane_m = lane_id / BSldNLane;
+        const int32_t b_lane_n = lane_id % BSldNLane;
 
         fp16x8_t v_c = {.0f};
 
@@ -200,22 +208,23 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
             const int32_t kr1 = kr0 + 1;
 
             const int32_t a_sld_os0 =
-                block_sld_win_a(0_I, sub_consumer_wave_id / 2, kr0, opus::lane_id() / AMSldLane, opus::lane_id() % AMSldLane, 0_I)
+                block_sld_win_a(0_I, sub_consumer_wave_m, kr0, a_lane_m, a_lane_n, 0_I)
                 * static_cast<int32_t>(sizeof(fp16_t));
             const int32_t a_sld_os1 =
-                block_sld_win_a(0_I, sub_consumer_wave_id / 2, kr1, opus::lane_id() / AMSldLane, opus::lane_id() % AMSldLane, 0_I)
+                block_sld_win_a(0_I, sub_consumer_wave_m, kr1, a_lane_m, a_lane_n, 0_I)
                 * static_cast<int32_t>(sizeof(fp16_t));
             const int32_t b_sld_os0 =
                 smem_b_base_bytes
-                + block_sld_win_b(0_I, sub_consumer_wave_id % 2, kr0, opus::lane_id() / BSldNLane, opus::lane_id() % BSldNLane, 0_I)
+                + block_sld_win_b(0_I, sub_consumer_wave_n, kr0, b_lane_m, b_lane_n, 0_I)
                 * static_cast<int32_t>(sizeof(fp16_t));
             const int32_t b_sld_os1 =
                 smem_b_base_bytes
-                + block_sld_win_b(0_I, sub_consumer_wave_id % 2, kr1, opus::lane_id() / BSldNLane, opus::lane_id() % BSldNLane, 0_I)
+                + block_sld_win_b(0_I, sub_consumer_wave_n, kr1, b_lane_m, b_lane_n, 0_I)
                 * static_cast<int32_t>(sizeof(fp16_t));
 
             fp16x8_t sld_a0, sld_a1, sld_b0, sld_b1;
             asm volatile(
+                "s_wait_alu depctr_va_vdst(0)\n\t"
                 "ds_read_b128 %[a0], %[a_os0]\n\t"
                 "ds_read_b128 %[a1], %[a_os1]\n\t"
                 "ds_read_b128 %[b0], %[b_os0]\n\t"
@@ -271,12 +280,13 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
         auto block_gmem_gst_win_c = opus::make_layout<0>(block_gmem_gst_shape_c, block_gmem_gst_stride_c);
 
         int32_t c_offset_elem = block_gmem_gst_win_c(
-            sub_consumer_wave_id / 2,
-            sub_consumer_wave_id % 2,
-            opus::lane_id() / 16,
-            opus::lane_id() % 16,
+            sub_consumer_wave_m,
+            sub_consumer_wave_n,
+            lane_id / 16,
+            lane_id % 16,
             0_I);
 
+        asm volatile("s_wait_alu depctr_va_vdst(0)" ::: "memory");
         *(reinterpret_cast<fp16x8_t*>(reinterpret_cast<fp16_t*>(ptr_c) + c_offset_elem)) = v_c;
         asm volatile(";CONSUMER DONE\n\t");
     }
