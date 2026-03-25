@@ -48,6 +48,13 @@ __device__ int32x4_t make_buffer_resource(const void * ptr, uint32_t size = 0xff
     return __builtin_bit_cast(int32x4_t, res);
 }
 
+__device__ __forceinline__ int waveid_in_workgroup() // [COMPILE_FIX #1] added: helper for workgroup-local wave id lookup
+{
+    int wave_id;
+    asm volatile("s_bfe_u32 %0, ttmp8, 0x50019" : "=s"(wave_id)); // [COMPILE_FIX #2] read waveid_in_group field directly from ttmp8 SGPR
+    return wave_id;
+}
+
 
 
 __global__ __launch_bounds__(256, 2) void 
@@ -66,7 +73,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     constexpr int32_t producerSubWarpNum = 2;
     constexpr int32_t consumerSubWarpNum = 4;
     DECLARE_NAMED_BARRIERS();
-    const int wave_id = threadIdx.x / opus::get_warp_size();
+    const int wave_id = waveid_in_workgroup(); // [COMPILE_FIX #3] replace direct llvm.amdgcn.wave.id expression with helper call
     const int sub_consumer_wave_id = wave_id % 4;
     __shared__ char Smem[Block_M * Block_K * 2 * sizeof(fp16_t) + Block_M * 8 * 4 * sizeof(fp16_t)];
     uintptr_t smembase = reinterpret_cast<uintptr_t>(Smem);
