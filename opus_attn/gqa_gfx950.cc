@@ -84,7 +84,8 @@ struct opus_gqa_traits {
     // Vector lengths for global load/store
     static constexpr int VEC_Q  = 8;
     static constexpr int VEC_KV = 8;
-    static constexpr int VEC_O  = 8;
+    static constexpr int VEC_TR_V  = 4;
+    static constexpr int VEC_O  = 4;
 
     static constexpr size_t smem_size_bytes() {
         return 2 * (size_t)KV_TILE_SIZE * D_TILE_SIZE * sizeof(D_ATTN);
@@ -176,9 +177,43 @@ inline __device__ auto make_layout_s_kv(int thread_id, int stride) {
         opus::unfold_p_coord(k_block_dim, opus::tuple{thread_id / threads_d, thread_id % threads_d}));
 }
 
+template<class T>
+inline __device__ auto make_layout_r_v(int lane_id) {
+    constexpr int lane_per_grp = 16;
+    constexpr int lane_lo = 4;
+    constexpr int lane_hi = lane_per_grp / lane_lo;
+
+    constexpr int num_grps = T::WARP_SIZE / lane_per_grp;
+    constexpr int grp_n = T::W_N / (lane_lo * T::VEC_TR_V);
+    constexpr int grp_k = num_grps / grp_n;
+
+    constexpr auto rv_block_shape = opus::make_tuple(
+        opus::number<T::GEMM1_E_N>{},
+        opus::number<T::GEMM1_E_K>{},
+        opus::number<grp_k>{},
+        opus::number<T::W_K / (lane_hi * grp_k)>{},
+        opus::number<lane_hi>{},
+        opus::number<grp_n>{},
+        opus::number<lane_lo>{},
+        opus::number<T::VEC_TR_V>{});
+
+    constexpr auto rv_block_dim = opus::make_tuple(
+        opus::make_tuple(opus::y_dim{}),
+        opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::y_dim{}, opus::p_dim{}),
+        opus::make_tuple(opus::p_dim{}, opus::p_dim{}, opus::y_dim{})); 
+
+    int grp_id = lane_id / lane_per_grp;
+    int lane_in_grp = lane_id % lane_per_grp;
+
+    return opus::make_layout<T::VEC_TR_V>(
+        rv_block_shape,
+        opus::unfold_x_stride(rv_block_dim, rv_block_shape, opus::tuple{grp_n * lane_lo * T::VEC_TR_V, T::D_TILE_SIZE, 1_I}),
+        opus::unfold_p_coord(rv_block_dim, opus::tuple{grp_id / grp_n, lane_in_grp / lane_lo, grp_id % grp_n, lane_in_grp % lane_lo}));
+}
+
 // ─── GQA kernel: template on traits; K/V in shared, Q in registers, Flash Attention online softmax ───
 template<class Traits>
-__global__ __launch_bounds__(Traits::BLOCK_SIZE, 1) void gqa_kernel(opus_gqa_kargs kargs) {
+__global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kargs kargs) {
     using namespace opus;
     using T = opus::remove_cvref_t<Traits>;
     using D_ATTN = typename T::D_ATTN;
@@ -187,7 +222,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 1) void gqa_kernel(opus_gqa_kar
     const int GROUP_SIZE = kargs.H / kargs.H_KV;
     const float scale = 1.0f / sqrtf(static_cast<float>(kargs.D));
 
-    const int h = blockIdx.x;
+    const int h = (blockIdx.x % kargs.H_KV) * GROUP_SIZE + (blockIdx.x / kargs.H_KV);
     const int block_tile_idx = blockIdx.y;
     const int b = blockIdx.z;
     const int h_kv = h / GROUP_SIZE;
@@ -226,7 +261,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 1) void gqa_kernel(opus_gqa_kar
         seq<T::GEMM1_E_M, T::GEMM1_E_N, T::GEMM1_E_K>{},
         seq<T::T_M, T::T_N, T::T_K>{},
         seq<T::W_M, T::W_N, T::W_K>{},
-        mfma_adaptor_swap_ab_swizzle_b{});
+        mfma_adaptor_swap_ab{});
 
     // ──── Partition layouts ────
     auto u_q = make_layout_q<T>(warp_id, lane_id, stride_q_n);
@@ -236,23 +271,28 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 1) void gqa_kernel(opus_gqa_kar
     auto u_r_k = opus::partition_layout_b<T::VEC_KV>(
         mma0, opus::make_tuple(T::D_TILE_SIZE, 1_I),
         opus::make_tuple(0_I, row_id / 16, (row_id / 4) % 2, (row_id / 8) % 2, row_id % 4, 0_I, lane_id / mma0.grpn_b));
-    row_id = lane_id % mma1.grpn_b;
-    auto u_r_v = opus::partition_layout_b(
-        mma1, opus::make_tuple(1_I, T::D_TILE_SIZE),
-        opus::make_tuple(0_I, row_id / 16, (row_id / 4) % 2, (row_id / 8) % 2, row_id % 4, 0_I, lane_id / mma1.grpn_b));
-    auto u_o = partition_layout_c(
+    auto u_r_v = make_layout_r_v<T>(lane_id);
+    auto u_o = partition_layout_c<T::VEC_O>(
         mma1, opus::make_tuple(stride_q_n, 1_I),
         opus::make_tuple(warp_id, lane_id % mma1.grpn_c, 0_I, lane_id / mma1.grpn_c));
     // auto u_o = make_layout_o<T>(warp_id, lane_id, stride_q_n);
 
-    // ──── Load Q tile from gmem ────
-    auto v_q = load<T::VEC_Q>(g_q, u_q);
-
-    // O accumulator and flash attention state
+    // ──── Vector registers ────
+    typename decltype(mma0)::vtype_a v_q;
+    typename decltype(mma0)::vtype_b v_k;
+    typename decltype(mma0)::vtype_c v_s;
+    typename decltype(mma1)::vtype_a v_p;
+    typename decltype(mma1)::vtype_b v_v;
     typename decltype(mma1)::vtype_c v_o;
-    opus::clear(v_o);
+
+    constexpr index_t s_len = vector_traits<typename decltype(mma0)::vtype_c>::size();
+    constexpr index_t o_len = vector_traits<typename decltype(mma1)::vtype_c>::size();
+
     D_ACC m_row = -1e30f;
     D_ACC l_row = 0.0f;
+
+    v_q = load<T::VEC_Q>(g_q, u_q);
+    opus::clear(v_o);
 
     const int num_kv_tiles = ceil_div(kargs.N, T::KV_TILE_SIZE);
 
@@ -266,34 +306,27 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 1) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_s_barrier();
 
         // ──── GEMM0: S = Q @ K^T via MFMA ────
-        auto v_k = load<T::VEC_KV>(s_k, u_r_k);
-        typename decltype(mma0)::vtype_c v_s;
-        opus::clear(v_s);
-        v_s = mma0(v_q, v_k, v_s);
+        v_k = load<T::VEC_KV>(s_k, u_r_k);
+        v_s = mma0(v_q, v_k);
 
         // Scale by 1/sqrt(D)
-        constexpr int s_len = opus::vector_traits<typename decltype(mma0)::vtype_c>::size();
-        for (int i = 0; i < s_len; i++)
-            v_s[i] *= scale;
+        static_for<s_len>([&](auto i) { v_s[i.value] *= scale; });
 
         D_ACC row_max = -1e30f;
-        for (int i = 0; i < s_len; i++)
-            row_max = opus::max(row_max, v_s[i]);
-        row_max = opus::max(row_max, __shfl_xor(row_max, 32));
+        static_for<s_len>([&](auto i) { row_max = max(row_max, v_s[i.value]); });
+        row_max = max(row_max, __shfl_xor(row_max, 32));
 
         D_ACC scale_old = expf(m_row - row_max);
 
         // Rescale running O accumulator
-        constexpr int o_len = opus::vector_traits<typename decltype(mma1)::vtype_c>::size();
-        for (int i = 0; i < o_len; i++)
-            v_o[i] *= scale_old;
+        static_for<o_len>([&](auto i) { v_o[i.value] *= scale_old; });
 
         // P = exp(S - row_max), accumulate row sum
         D_ACC row_sum = 0.0f;
-        for (int i = 0; i < s_len; i++) {
-            v_s[i] = expf(v_s[i] - row_max);
-            row_sum += v_s[i];
-        }
+        static_for<s_len>([&](auto i) {
+            v_s[i.value] = expf(v_s[i.value] - row_max);
+            row_sum += v_s[i.value];
+        });
         row_sum += __shfl_xor(row_sum, 32);
 
         D_ACC l_new = scale_old * l_row + row_sum;
@@ -301,22 +334,20 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 1) void gqa_kernel(opus_gqa_kar
         l_row = l_new;
 
         // Convert P to bf16 for GEMM1
-        auto v_p = opus::cast<D_ATTN>(v_s);
+        v_p = opus::cast<D_ATTN>(v_s);
 
         async_load<T::VEC_KV>(g_v, s_v.ptr, u_g_kv, u_s_kv, kv_offset(tile));
         opus::s_waitcnt_vmcnt(0_I);
         __builtin_amdgcn_s_barrier();
         
         // ──── GEMM1: O += P @ V via MFMA ────
-        auto v_v = load(s_v, u_r_v);
+        v_v = tr_load<T::VEC_TR_V>(s_v, u_r_v);
         v_o = mma1(v_p, v_v, v_o);
     }
 
     // ──── Normalize O and store to gmem ────
     D_ACC l_inv = (l_row > D_ACC(0.0f)) ? (D_ACC(1.0f) / l_row) : D_ACC(0.0f);
-    constexpr int o_len = opus::vector_traits<typename decltype(mma1)::vtype_c>::size();
-    for (int i = 0; i < o_len; i++)
-        v_o[i] *= l_inv;
+    static_for<o_len>([&](auto i) { v_o[i.value] *= l_inv; });
 
     auto v_o_bf16 = opus::cast<D_ATTN>(v_o);
     store<T::VEC_O>(g_o, v_o_bf16, u_o);
@@ -499,7 +530,6 @@ void gqa_attention_ref(
 // ─── main ───────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
-    // Default GQA dimensions (matching kernel_hipkittens.cpp defaults)
     int B    = 16;    // batch size
     int H    = 64;    // query heads
     int H_KV = 8;     // key/value heads
@@ -581,7 +611,7 @@ int main(int argc, char** argv) {
     kargs.D = D;
     
     // Launch configuration via traits
-    using GqaTraits = opus_gqa_traits<32, 64, 128, 4>;
+    using GqaTraits = opus_gqa_traits<32, 64, 128, 8>;
     if (D != GqaTraits::D_TILE_SIZE) {
         std::cerr << "This kernel only supports head dimension D=" << GqaTraits::D_TILE_SIZE << ", got D=" << D << "\n";
         return 1;
