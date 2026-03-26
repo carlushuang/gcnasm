@@ -71,9 +71,10 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     uintptr_t smembase = reinterpret_cast<uintptr_t>(Smem);
 
     // TileDim0=128(K), TileDim1=16(M/N); LdsPadEn=1, PadInterval=5(256B), PadAmount=3(16B)
+    using NoSelectedWgs = opus::seq<>;
     using Wmma16x16x128Tcopy = TcopyDesc<fp16_t, 128, 16, 0, 0, 0,
-        1, 0, 0, 0, 1, 0, 0, 0, 0,
-        1, 5, 3>;
+    1, 0, 0, 0, 1, 0, 0, 0,
+    0, 1, 5, 3, NoSelectedWgs>;
 
     Wmma16x16x128Tcopy tcopy_a, tcopy_b;
     tcopy_a.make(smembase, ptr_a, Block_K, 16, stride_a);

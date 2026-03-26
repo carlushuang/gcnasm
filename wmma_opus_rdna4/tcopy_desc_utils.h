@@ -2,6 +2,38 @@
 
 #include "rsrc_desc_utils.h"
 
+namespace tcopy_desc_detail {
+
+template<opus::index_t SelectedWorkgroupCount, typename SelectedWorkgroups>
+struct WgMaskFromSelectedWorkgroups;
+
+template<opus::index_t SelectedWorkgroupCount, opus::index_t... WgIndices>
+struct WgMaskFromSelectedWorkgroups<SelectedWorkgroupCount, opus::seq<WgIndices...>> {
+    static_assert(SelectedWorkgroupCount >= 0,
+                  "TcopyDesc: selected workgroup count must be >= 0");
+    static_assert(SelectedWorkgroupCount == 0 ||
+                      static_cast<opus::index_t>(sizeof...(WgIndices)) == SelectedWorkgroupCount,
+                  "TcopyDesc: opus::seq element count must match selected workgroup count");
+    static_assert(SelectedWorkgroupCount == 0 || (((WgIndices >= 0) && ...) &&
+                  ((WgIndices < 16) && ...)),
+                  "TcopyDesc: selected workgroup index must be in [0, 15]");
+
+    static constexpr uint16_t value = [] {
+        if constexpr (SelectedWorkgroupCount == 0) {
+            return uint16_t{0};
+        } else {
+            return (uint16_t{0} | ... |
+                    static_cast<uint16_t>(uint16_t{1} << WgIndices));
+        }
+    }();
+};
+
+template<opus::index_t SelectedWorkgroupCount, typename SelectedWorkgroups>
+inline constexpr uint16_t kWgMaskFromSelectedWorkgroups =
+    WgMaskFromSelectedWorkgroups<SelectedWorkgroupCount, SelectedWorkgroups>::value;
+
+} // namespace tcopy_desc_detail
+
 template<typename T>
 struct TcopyDataSize {
     static_assert(sizeof(T) == 1 || sizeof(T) == 2 ||
@@ -28,14 +60,19 @@ template<
     uint64_t AtomicBarrierEn = 0,
     uint64_t IterateEn       = 0,
     uint64_t McEarlyTimeout  = 0,
-    uint64_t WgMask          = 0,
+    opus::index_t SelectedWorkgroupCount = 0,
     uint64_t LdsPadEn        = 0,
     uint64_t PadInterval     = 0,
-    uint64_t PadAmount       = 0
+    uint64_t PadAmount       = 0,
+    typename SelectedWorkgroups = opus::seq<>
 >
 struct TcopyDesc {
 
     static constexpr uint64_t kDataSize = TcopyDataSize<DataType>::value;
+    static constexpr uint64_t kWgMask =
+        static_cast<uint64_t>(
+            tcopy_desc_detail::kWgMaskFromSelectedWorkgroups<
+                SelectedWorkgroupCount, SelectedWorkgroups>);
 
     using Sg0Type = SgprBitField128<
         BF<0,   1, Count>,
@@ -50,7 +87,7 @@ struct TcopyDesc {
     >;
 
     using Sg1Type = SgprBitField256<
-        BF<0,   16, WgMask>,
+        BF<0,   16, kWgMask>,
         BF<16,   2, kDataSize>,
         BF<18,   1, AtomicBarrierEn>,
         BF<19,   1, IterateEn>,

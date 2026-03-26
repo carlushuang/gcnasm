@@ -57,7 +57,7 @@ __device__ __forceinline__ int waveid_in_workgroup()
 
 
 
-__global__ __launch_bounds__(256, 2) void 
+__global__ __launch_bounds__(256, 2) __cluster_dims__(2, 1, 1) void 
 wmma_kernel_standard(const void* __restrict__ ptr_a,
                    const void* __restrict__ ptr_b,
                    void* __restrict__ ptr_c,
@@ -76,6 +76,9 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     DECLARE_NAMED_BARRIERS();
     const int wave_id = waveid_in_workgroup();
     const int sub_consumer_wave_id = wave_id % 4;
+    const uint32_t cluster_workgroup_id_x = __builtin_amdgcn_cluster_workgroup_id_x();
+    const int32_t b_cluster_offset_elems = static_cast<int32_t>(cluster_workgroup_id_x) * Block_N * stride_b;
+    const int32_t c_cluster_offset_elems = static_cast<int32_t>(cluster_workgroup_id_x) * Block_N;
     __shared__ char Smem[Block_M * Block_K * 2 * sizeof(fp16_t) + Block_M * 8 * 4 * sizeof(fp16_t)];
     uintptr_t smembase = reinterpret_cast<uintptr_t>(Smem);
 
@@ -83,6 +86,10 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
     using Wmma16x16x128Tcopy = TcopyDesc<fp16_t, 128, 16, 0, 0, 0,
     1, 0, 0, 0, 1, 0, 0, 0,
     0, 1, 5, 3, NoSelectedWgs>;
+    using SelectedWgs = opus::seq<0, 1>;
+    using Wmma16x16x128TcopySelected = TcopyDesc<fp16_t, 128, 16, 0, 0, 0,
+    1, 0, 0, 0, 1, 0, 0, 0,
+    2, 1, 5, 3, SelectedWgs>;
 
     //prducer
     if(wave_id < 4) {
@@ -91,7 +98,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
             asm volatile(";LOAD A START\n\t");
             __builtin_amdgcn_s_barrier_signal(-1);
             __builtin_amdgcn_s_barrier_wait(-1);
-            Wmma16x16x128Tcopy tcopy_a;
+            Wmma16x16x128TcopySelected tcopy_a;
             tcopy_a.make(smembase + wave_id * 16 * Block_K * sizeof(fp16_t) + wave_id * 16 * 8 * sizeof(fp16_t), 
                          static_cast<const char*>(ptr_a) + wave_id * 16 * Block_K * sizeof(fp16_t),
                          Block_K, 
@@ -114,7 +121,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
             __builtin_amdgcn_s_barrier_wait(-1);
             Wmma16x16x128Tcopy tcopy_b;
             tcopy_b.make(smembase + wave_id * 16 * Block_K * sizeof(fp16_t) + wave_id * 16 * 8 * sizeof(fp16_t), 
-                         static_cast<const char*>(ptr_b) + (wave_id - 2) * 16 * Block_K * sizeof(fp16_t),
+                         static_cast<const char*>(ptr_b) + (b_cluster_offset_elems + (wave_id - 2) * 16 * Block_K) * static_cast<int32_t>(sizeof(fp16_t)),
                          Block_K, 
                          Block_N - (wave_id - 2) * 16, 
                          stride_b);
@@ -285,7 +292,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
             sub_consumer_wave_n,
             lane_id / 16,
             lane_id % 16,
-            0_I);
+            0_I) + c_cluster_offset_elems;
 
         asm volatile("s_wait_alu depctr_va_vdst(0)" ::: "memory");
         *(reinterpret_cast<fp16x8_t*>(reinterpret_cast<fp16_t*>(ptr_c) + c_offset_elem)) = v_c;
@@ -347,7 +354,7 @@ void benchmark_kernel(float16* dev_a, float16* dev_b, float16* dev_c,
                       int lda, int ldb, int ldc, int m, int n, int k,
                       int warmup = 5, int iterations = 20) {
     for(int i = 0; i < warmup; ++i) {
-        wmma_kernel_standard<<<1, 256>>>(dev_a, dev_b, dev_c, lda, ldb, ldc);
+        wmma_kernel_standard<<<dim3(2, 1, 1), 256>>>(dev_a, dev_b, dev_c, lda, ldb, ldc);
         CHECK_HIP_KERNEL_LAUNCH();
     }
 
@@ -359,7 +366,7 @@ void benchmark_kernel(float16* dev_a, float16* dev_b, float16* dev_c,
     CHECK_HIP(hipEventRecord(start));
 
     for(int i = 0; i < iterations; ++i) {
-        wmma_kernel_standard<<<1, 256>>>(dev_a, dev_b, dev_c, lda, ldb, ldc);
+        wmma_kernel_standard<<<dim3(2, 1, 1), 256>>>(dev_a, dev_b, dev_c, lda, ldb, ldc);
         CHECK_HIP_KERNEL_LAUNCH();
     }
 
@@ -378,7 +385,7 @@ void benchmark_kernel(float16* dev_a, float16* dev_b, float16* dev_c,
 
 int main(int argc, char** argv) {
     int m = 32;
-    int n = 32;
+    int n = 64;
     int k = 128;
 
     // Parse command line arguments: -m -n -k
@@ -395,6 +402,10 @@ int main(int argc, char** argv) {
 
     if(m <= 0 || n <= 0 || k <= 0) {
         fprintf(stderr, "Invalid problem size: m, n, k must be positive.\n");
+        return 1;
+    }
+    if(m != 32 || n != 64 || k != 128) {
+        fprintf(stderr, "This kernel is specialized for m=32, n=64, k=128.\n");
         return 1;
     }
 
@@ -434,13 +445,13 @@ int main(int argc, char** argv) {
     gemm_ref(host_a.get(), host_b.get(), host_c.get(), m, n, k, lda, ldb, ldc);
 
     // Launch kernel
-    wmma_kernel_standard<<<1, 256>>>(dev_a, dev_b, dev_c, lda, ldb, ldc);
+    wmma_kernel_standard<<<dim3(2, 1, 1), 256>>>(dev_a, dev_b, dev_c, lda, ldb, ldc);
     CHECK_HIP_KERNEL_LAUNCH();
 
     // Copy results back and validate
     CHECK_HIP(hipMemcpy(fp16_c.get(), dev_c, ldc * m * sizeof(float16), hipMemcpyDeviceToHost));
     bool valid = valid_vector(host_c.get(), fp16_c.get(), m * n, 2e-3f);
-    printf("[32x32x128, Tensor Copy] %s\n", valid ? "✓ VALID" : "✗ FAIL");
+    printf("[32x64x128, Tensor Copy, 2WG Cluster] %s\n", valid ? "✓ VALID" : "✗ FAIL");
 
     // Benchmark
     printf("\n");
