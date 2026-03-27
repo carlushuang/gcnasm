@@ -94,10 +94,11 @@ struct opus_gqa_traits {
     static constexpr int smem_n_sub = smem_linear_wave / D_128B_SIZE;
     static constexpr int smem_n_rpt = KV_TILE_SIZE / smem_n_sub;
     static constexpr int smem_d_rpt = D_TILE_SIZE / D_128B_SIZE;
-    static constexpr int smem_padding = 16 / sizeof(D_ATTN);
+    static constexpr int smem_padding_16B = 16 / sizeof(D_ATTN);
+    static constexpr int smem_padding_64B = 64 / sizeof(D_ATTN);
 
     static constexpr size_t smem_size_bytes() {
-        return (smem_n_rpt * smem_d_rpt * (smem_linear_wave + smem_padding) + KV_TILE_SIZE * D_TILE_SIZE) * sizeof(D_ATTN);
+        return (smem_n_rpt * smem_d_rpt * (2 * smem_linear_wave + smem_padding_16B + smem_padding_64B)) * sizeof(D_ATTN);
     }
 };
 
@@ -146,7 +147,7 @@ inline __device__ auto make_layout_o(int warp_id, int lane_id, int stride_o_n) {
 
 // Create layout for loading K matrix from global memory
 template<typename T>
-inline __device__ auto make_layout_gk(int warp_id, int lane_id, int stride_kv_n) {
+inline __device__ auto make_layout_gk_gv(int warp_id, int lane_id, int stride_kv_n) {
     constexpr int threads_d = T::D_128B_SIZE / T::VEC_KV;
     constexpr int threads_n_per_block = T::BLOCK_SIZE / threads_d;
     constexpr int threads_n_per_wave = opus::get_warp_size() / threads_d;
@@ -172,7 +173,7 @@ inline __device__ auto make_layout_gk(int warp_id, int lane_id, int stride_kv_n)
 
 // Create layout for storing K matrix to shared memory
 template<typename T>
-inline __device__ auto make_layout_sk(int warp_id, int lane_id) {
+inline __device__ auto make_layout_sk_sv(int warp_id, int lane_id, int smem_padding) {
     constexpr auto sk_block_shape = opus::make_tuple(
         opus::number<T::smem_d_rpt>{},
         opus::number<T::smem_n_rpt / T::NUM_WARPS>{},
@@ -186,7 +187,7 @@ inline __device__ auto make_layout_sk(int warp_id, int lane_id) {
 
     return opus::make_layout<T::VEC_KV>(
         sk_block_shape,
-        opus::unfold_x_stride(sk_block_dim, sk_block_shape, opus::tuple{T::smem_linear_wave + T::smem_padding, 1_I}),
+        opus::unfold_x_stride(sk_block_dim, sk_block_shape, opus::tuple{T::smem_linear_wave + smem_padding, 1_I}),
         opus::unfold_p_coord(sk_block_dim, opus::tuple{warp_id, lane_id}));
 }
 
@@ -216,29 +217,8 @@ inline __device__ auto make_layout_rk(int lane_id) {
 
     return opus::make_layout<T::VEC_KV>(
         rk_block_shape,
-        opus::unfold_x_stride(rk_block_dim, rk_block_shape, opus::tuple{T::smem_linear_wave + T::smem_padding, T::D_128B_SIZE, T::smem_n_rpt * (T::smem_linear_wave + T::smem_padding), 1_I}),
+        opus::unfold_x_stride(rk_block_dim, rk_block_shape, opus::tuple{T::smem_linear_wave + T::smem_padding_16B, T::D_128B_SIZE, T::smem_n_rpt * (T::smem_linear_wave + T::smem_padding_16B), 1_I}),
         opus::unfold_p_coord(rk_block_dim, opus::tuple{lane_id_n % T::NUM_WARPS, lane_id_n / T::NUM_WARPS, lane_id / T::W_N}));
-}
-
-template<class T>
-inline __device__ auto make_layout_gv_sv(int thread_id, int stride) {
-    constexpr int threads_d = T::D_TILE_SIZE / T::VEC_KV;
-    constexpr int threads_n = T::BLOCK_SIZE / threads_d;
-
-    constexpr auto v_block_shape = opus::make_tuple(
-        opus::number<T::KV_TILE_SIZE / threads_n>{},
-        opus::number<threads_n>{},
-        opus::number<threads_d>{},
-        opus::number<T::VEC_KV>{});
-    
-    constexpr auto v_block_dim = opus::make_tuple(
-        opus::make_tuple(opus::y_dim{}, opus::p_dim{}),
-        opus::make_tuple(opus::p_dim{}, opus::y_dim{}));
-    
-    return opus::make_layout<T::VEC_KV>(
-        v_block_shape,
-        opus::unfold_x_stride(v_block_dim, v_block_shape, opus::tuple{stride, 1_I}),
-        opus::unfold_p_coord(v_block_dim, opus::tuple{thread_id / threads_d, thread_id % threads_d}));
 }
 
 template<class T>
@@ -252,26 +232,29 @@ inline __device__ auto make_layout_rv(int lane_id) {
     constexpr int grp_k = num_grps / grp_n;
 
     constexpr auto rv_block_shape = opus::make_tuple(
-        opus::number<T::GEMM1_E_N>{},
-        opus::number<T::GEMM1_E_K>{},
-        opus::number<T::W_K / (lane_hi * grp_k)>{},
+        opus::number<T::GEMM1_E_N / (T::D_128B_SIZE / T::W_N)>{},
+        opus::number<T::D_128B_SIZE / T::W_N>{},
         opus::number<grp_k>{},
         opus::number<lane_hi>{},
+        opus::number<T::GEMM1_E_K>{},
+        opus::number<T::W_K / (lane_hi * grp_k)>{},
         opus::number<grp_n>{},
         opus::number<lane_lo>{},
         opus::number<T::VEC_TR_V>{});
 
     constexpr auto rv_block_dim = opus::make_tuple(
         opus::make_tuple(opus::y_dim{}),
-        opus::make_tuple(opus::y_dim{}, opus::y_dim{}, opus::p_dim{}, opus::p_dim{}),
-        opus::make_tuple(opus::p_dim{}, opus::p_dim{}, opus::y_dim{})); 
+        opus::make_tuple(opus::y_dim{}),
+        opus::make_tuple(opus::p_dim{}, opus::p_dim{}),
+        opus::make_tuple(opus::y_dim{}, opus::y_dim{}),
+        opus::make_tuple(opus::p_dim{}, opus::p_dim{}, opus::y_dim{}));
 
     int grp_id = lane_id / lane_per_grp;
     int lane_in_grp = lane_id % lane_per_grp;
 
     return opus::make_layout<T::VEC_TR_V>(
         rv_block_shape,
-        opus::unfold_x_stride(rv_block_dim, rv_block_shape, opus::tuple{grp_n * lane_lo * T::VEC_TR_V, T::D_TILE_SIZE, 1_I}),
+        opus::unfold_x_stride(rv_block_dim, rv_block_shape, opus::tuple{T::smem_n_rpt * (T::smem_linear_wave + T::smem_padding_64B), grp_n * lane_lo * T::VEC_TR_V, T::smem_linear_wave + T::smem_padding_64B, T::D_128B_SIZE, 1_I}),
         opus::unfold_p_coord(rv_block_dim, opus::tuple{grp_id / grp_n, lane_in_grp / lane_lo, grp_id % grp_n, lane_in_grp % lane_lo}));
 }
 
@@ -312,7 +295,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Shared memory for K and V tiles
     extern __shared__ char smem[];
     auto s_k = opus::make_smem(reinterpret_cast<D_ATTN*>(smem));
-    auto s_v = opus::make_smem(reinterpret_cast<D_ATTN*>(smem) + T::smem_n_rpt * T::smem_d_rpt * (T::smem_linear_wave + T::smem_padding));
+    auto s_v = opus::make_smem(reinterpret_cast<D_ATTN*>(smem) + T::smem_n_rpt * T::smem_d_rpt * (T::smem_linear_wave + T::smem_padding_16B));
 
     // GEMM0: S = Q @ K^T
     auto mma0 = make_tiled_mma<D_ATTN, D_ATTN, D_ACC>(
@@ -329,11 +312,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     // ──── Partition layouts ────
     auto u_q  = make_layout_q<T>(warp_id, lane_id, stride_q_n);
-    auto u_gk = make_layout_gk<T>(warp_id, lane_id, stride_kv_n);
-    auto u_sk = make_layout_sk<T>(warp_id, lane_id);
+    auto u_gk = make_layout_gk_gv<T>(warp_id, lane_id, stride_kv_n);
+    auto u_sk = make_layout_sk_sv<T>(warp_id, lane_id, T::smem_padding_16B);
     auto u_rk = make_layout_rk<T>(lane_id);
-    auto u_gv = make_layout_gv_sv<T>(threadIdx.x, stride_kv_n);
-    auto u_sv = make_layout_gv_sv<T>(threadIdx.x, T::D_TILE_SIZE);
+    auto u_gv = make_layout_gk_gv<T>(warp_id, lane_id, stride_kv_n);
+    auto u_sv = make_layout_sk_sv<T>(warp_id, lane_id, T::smem_padding_64B);
     auto u_rv = make_layout_rv<T>(lane_id);
     auto u_o  = make_layout_o<T>(warp_id, lane_id, stride_q_n);
 
