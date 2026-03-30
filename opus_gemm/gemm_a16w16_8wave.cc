@@ -25,7 +25,7 @@ using opus::operator""_I;
 
 #define CHECK_HIP_KERNEL_LAUNCH() CHECK_HIP(hipGetLastError())
 
-__host__ __device__ inline int ceil_div(int a, int b) {
+__host__ __device__ constexpr inline int ceil_div(int a, int b) {
     return (a + b - 1) / b;
 }
 
@@ -117,7 +117,7 @@ inline __device__ auto make_layout_ga(int lane_id, int wave_id_m, int wave_id_n,
     constexpr int threads_m_per_wave = opus::get_warp_size() / threads_k;
 
     constexpr auto ga_block_shape = opus::make_tuple(
-        opus::number<T::HALF_B_M / threads_m_per_block>{},
+        opus::number<ceil_div(T::HALF_B_M, threads_m_per_block)>{},
         opus::number<T::T_M>{},
         opus::number<threads_m_per_wave>{},
         opus::number<T::T_N>{},
@@ -140,7 +140,7 @@ inline __device__ auto make_layout_sa(int lane_id, int wave_id_m, int wave_id_n)
     constexpr int num_waves = T::BLOCK_SIZE / opus::get_warp_size();
 
     constexpr auto sa_block_shape = opus::make_tuple(
-        opus::number<T::smem_m_rep / num_waves>{},
+        opus::number<ceil_div(T::smem_m_rep, num_waves)>{},
         opus::number<T::T_M>{},
         opus::number<T::T_N>{},
         opus::number<opus::get_warp_size()>{},
@@ -274,9 +274,9 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gemm_a16w16_kernel(opus
     int lane_id = threadIdx.x % get_warp_size();
 
     // Setup global memory pointers for A, B, C matrices
-    auto g_a = make_gmem(reinterpret_cast<const D_A*>(kargs.ptr_a) + batch_id*kargs.stride_a_batch + row*kargs.stride_a);
-    auto g_b = make_gmem(reinterpret_cast<const D_B*>(kargs.ptr_b) + batch_id*kargs.stride_b_batch + col*kargs.stride_b);
-    auto g_c = make_gmem(reinterpret_cast<D_C*>(kargs.ptr_c) + batch_id*kargs.stride_c_batch + row*kargs.stride_c + col);
+    auto g_a = make_gmem(reinterpret_cast<const D_A*>(kargs.ptr_a) + batch_id * kargs.stride_a_batch + row * kargs.stride_a, (kargs.m - row) * kargs.stride_a * sizeof(D_A));
+    auto g_b = make_gmem(reinterpret_cast<const D_B*>(kargs.ptr_b) + batch_id * kargs.stride_b_batch + col * kargs.stride_b, (kargs.n - col) * kargs.stride_b * sizeof(D_B));
+    auto g_c = make_gmem(reinterpret_cast<D_C*>(kargs.ptr_c) + batch_id * kargs.stride_c_batch + row * kargs.stride_c + col);
 
     // Calculate wave position in the output tile
     int wave_id_m = wave_id / T::T_N;
