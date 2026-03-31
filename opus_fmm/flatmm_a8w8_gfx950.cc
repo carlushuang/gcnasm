@@ -197,20 +197,20 @@ inline __device__ auto make_layout_ra(int lane_id, int wave_id_m) {
 template<typename T>
 inline __device__ auto make_layout_gb_sb(int lane_id, int wave_id, int stride) {
     constexpr int num_waves = T::BLOCK_SIZE / opus::get_warp_size();
-    constexpr int waves_k = T::E_K;
+    constexpr int waves_k = T::W_N * T::W_K / opus::get_warp_size() / T::VEC_B;
     constexpr int waves_n = num_waves / waves_k;
     
     constexpr auto flat_b_block_shape = opus::make_tuple(
         opus::number<T::flat_n_per_half_block / waves_n>{},
         opus::number<waves_n>{},
+        opus::number<T::E_K>{},
         opus::number<waves_k>{},
-        opus::number<T::W_N * T::W_K / opus::get_warp_size() / T::VEC_B>{},
         opus::number<opus::get_warp_size()>{},
         opus::number<T::VEC_B>{});
 
     constexpr auto flat_b_block_dim = opus::make_tuple(
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}),
-        opus::make_tuple(opus::p_dim{}, opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
+        opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::p_dim{}, opus::y_dim{}));
 
     return opus::make_layout<T::VEC_B>(
         flat_b_block_shape,
