@@ -66,7 +66,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
                    int stride_c)
 {
     using opus::operator""_I;
-    asm volatile("s_setreg_imm32_b32 hwreg(HW_REG_WAVE_SCHED_MODE), 2" ::: "memory");
+    // asm volatile("s_setreg_imm32_b32 hwreg(HW_REG_WAVE_SCHED_MODE), 2" ::: "memory");
 
     constexpr int Block_K = 128;
     constexpr int Block_M = 32;
@@ -232,7 +232,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
 
             fp16x8_t sld_a0, sld_a1, sld_b0, sld_b1;
             asm volatile(
-                "s_wait_alu depctr_va_vdst(0)\n\t"
+                // "s_wait_alu depctr_va_vdst(0)\n\t"
                 "ds_read_b128 %[a0], %[a_os0]\n\t"
                 "ds_read_b128 %[a1], %[a_os1]\n\t"
                 "ds_read_b128 %[b0], %[b_os0]\n\t"
@@ -294,7 +294,7 @@ wmma_kernel_standard(const void* __restrict__ ptr_a,
             lane_id % 16,
             0_I) + c_cluster_offset_elems;
 
-        asm volatile("s_wait_alu depctr_va_vdst(0)" ::: "memory");
+        // asm volatile("s_wait_alu depctr_va_vdst(0)" ::: "memory");
         *(reinterpret_cast<fp16x8_t*>(reinterpret_cast<fp16_t*>(ptr_c) + c_offset_elem)) = v_c;
         asm volatile(";CONSUMER DONE\n\t");
     }
