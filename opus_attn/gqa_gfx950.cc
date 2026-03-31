@@ -40,6 +40,12 @@ struct opus_gqa_kargs {
     int H;
     int H_KV;
     int D;
+    int stride_q_b;
+    int stride_q_n;
+    int stride_q_h;
+    int stride_kv_b;
+    int stride_kv_n;
+    int stride_kv_h;
 };
 
 // Configuration traits for GQA kernel (tile sizes, data types, vector lengths, MFMA config)
@@ -279,21 +285,14 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     const int q_start = block_tile_idx * T::NUM_WARPS * T::Q_TILE_SIZE;
 
-    const int stride_q_b = kargs.N * kargs.H * kargs.D;
-    const int stride_q_n = kargs.H * kargs.D;
-    const int stride_q_h = kargs.D;
-    const int stride_kv_b = kargs.N * kargs.H_KV * kargs.D;
-    const int stride_kv_n = kargs.H_KV * kargs.D;
-    const int stride_kv_h = kargs.D;
-
     // Create global memory tensors
-    auto g_q = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_q) + b * stride_q_b + q_start * stride_q_n + h * stride_q_h);
-    auto g_k = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_k) + b * stride_kv_b + h_kv * stride_kv_h);
-    auto g_v = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_v) + b * stride_kv_b + h_kv * stride_kv_h);
-    auto g_o = opus::make_gmem(reinterpret_cast<D_ATTN*>(kargs.ptr_o) + b * stride_q_b + q_start * stride_q_n + h * stride_q_h);
+    auto g_q = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_q) + b * kargs.stride_q_b + q_start * kargs.stride_q_n + h * kargs.stride_q_h);
+    auto g_k = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_k) + b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h);
+    auto g_v = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_v) + b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h);
+    auto g_o = opus::make_gmem(reinterpret_cast<D_ATTN*>(kargs.ptr_o) + b * kargs.stride_q_b + q_start * kargs.stride_q_n + h * kargs.stride_q_h);
 
     // Shared memory for K and V tiles
-    extern __shared__ char smem[];
+    __shared__ char smem[T::smem_size_bytes()];
     auto s_k = opus::make_smem(reinterpret_cast<D_ATTN*>(smem));
     auto s_v = opus::make_smem(reinterpret_cast<D_ATTN*>(smem) + T::smem_n_rpt * T::smem_d_rpt * (T::smem_linear_wave + T::smem_padding_16B));
 
@@ -311,14 +310,14 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         mfma_adaptor_swap_ab{});
 
     // ──── Partition layouts ────
-    auto u_q  = make_layout_q<T>(warp_id, lane_id, stride_q_n);
-    auto u_gk = make_layout_gk_gv<T>(warp_id, lane_id, stride_kv_n);
+    auto u_q  = make_layout_q<T>(warp_id, lane_id, kargs.stride_q_n);
+    auto u_gk = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
     auto u_sk = make_layout_sk_sv<T>(warp_id, lane_id, T::smem_padding_16B);
     auto u_rk = make_layout_rk<T>(lane_id);
-    auto u_gv = make_layout_gk_gv<T>(warp_id, lane_id, stride_kv_n);
+    auto u_gv = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
     auto u_sv = make_layout_sk_sv<T>(warp_id, lane_id, T::smem_padding_64B);
     auto u_rv = make_layout_rv<T>(lane_id);
-    auto u_o  = make_layout_o<T>(warp_id, lane_id, stride_q_n);
+    auto u_o  = make_layout_o<T>(warp_id, lane_id, kargs.stride_q_n);
 
     // ──── Vector registers ────
     typename decltype(mma0)::vtype_a v_q;
@@ -330,9 +329,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     constexpr index_t s_len = vector_traits<typename decltype(mma0)::vtype_c>::size();
     constexpr index_t o_len = vector_traits<typename decltype(mma1)::vtype_c>::size();
+    constexpr D_ACC RESCALE_THRESHOLD = D_ACC(8.0f);
 
     D_ACC m_row = -1e30f;
     D_ACC l_row = 0.0f;
+    int pending_scale = 0;
+    D_ACC rescale_m = D_ACC(1.0f);
 
     v_q = load<T::VEC_Q>(g_q, u_q);
     opus::clear(v_o);
@@ -340,7 +342,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     const int num_kv_tiles = ceil_div(kargs.N, T::KV_TILE_SIZE);
 
     auto kv_offset = [&](int tile_idx) {
-        return tile_idx * T::KV_TILE_SIZE * stride_kv_n;
+        return tile_idx * T::KV_TILE_SIZE * kargs.stride_kv_n;
     };
 
     for (int tile = 0; tile < num_kv_tiles; tile++) {
@@ -359,10 +361,16 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         static_for<s_len>([&](auto i) { row_max = max(row_max, v_s[i.value]); });
         row_max = max(row_max, __shfl_xor(row_max, 32));
 
-        D_ACC scale_old = expf(m_row - row_max);
-
-        // Rescale running O accumulator
-        static_for<o_len>([&](auto i) { v_o[i.value] *= scale_old; });
+        int lane_ok = ((row_max - m_row) <= RESCALE_THRESHOLD);
+        int all_ok = __all(lane_ok);
+        if (__builtin_expect(all_ok, 1)) {
+            row_max = m_row;
+            pending_scale = 0;
+        } else {
+            rescale_m = expf(m_row - row_max);
+            m_row = row_max;
+            pending_scale = 1;
+        }
 
         // P = exp(S - row_max), accumulate row sum
         D_ACC row_sum = 0.0f;
@@ -372,9 +380,13 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         });
         row_sum += __shfl_xor(row_sum, 32);
 
-        D_ACC l_new = scale_old * l_row + row_sum;
-        m_row = row_max;
-        l_row = l_new;
+        // Delayed apply style: only rescale when threshold check fails.
+        if (pending_scale) {
+            static_for<o_len>([&](auto i) { v_o[i.value] *= rescale_m; });
+            l_row *= rescale_m;
+            pending_scale = 0;
+        }
+        l_row += row_sum;
 
         // Convert P to bf16 for GEMM1
         v_p = opus::cast<D_ATTN>(v_s);
@@ -413,10 +425,10 @@ void rand_vector(T* ptr, size_t size, float min_val = 0.0f, float max_val = 1.0f
 
 // Benchmark GQA kernel performance with warm-up and timing
 template<class Traits>
-void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block, size_t smem_size,
+void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
                           int warmup = 10, int iterations = 50) {
     for (int i = 0; i < warmup; ++i) {
-        gqa_kernel<Traits><<<grid, block, smem_size>>>(kargs);
+        gqa_kernel<Traits><<<grid, block>>>(kargs);
         CHECK_HIP_KERNEL_LAUNCH();
     }
     CHECK_HIP(hipDeviceSynchronize());
@@ -427,7 +439,7 @@ void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block, si
 
     CHECK_HIP(hipEventRecord(start));
     for (int i = 0; i < iterations; ++i) {
-        gqa_kernel<Traits><<<grid, block, smem_size>>>(kargs);
+        gqa_kernel<Traits><<<grid, block>>>(kargs);
         CHECK_HIP_KERNEL_LAUNCH();
     }
     CHECK_HIP(hipEventRecord(stop));
@@ -639,6 +651,12 @@ int main(int argc, char** argv) {
     kargs.H = H;
     kargs.H_KV = H_KV;
     kargs.D = D;
+    kargs.stride_q_b = N * H * D;
+    kargs.stride_q_n = H * D;
+    kargs.stride_q_h = D;
+    kargs.stride_kv_b = N * H_KV * D;
+    kargs.stride_kv_n = H_KV * D;
+    kargs.stride_kv_h = D;
 
     using GqaTraits = opus_gqa_traits<32, 64, 128, 8>;
     if (D != GqaTraits::D_TILE_SIZE) {
@@ -649,12 +667,11 @@ int main(int argc, char** argv) {
     const int num_q_tile_blocks = ceil_div(num_q_tiles, GqaTraits::NUM_WARPS);
     dim3 grid(H, num_q_tile_blocks, B);
     dim3 block(GqaTraits::BLOCK_SIZE);
-    size_t smem_size = GqaTraits::smem_size_bytes();
 
     printf("GQA kernel launch config: grid=(%d,%d,%d), block=%d (NUM_WARPS=%d), smem=%zu bytes (K/V tiles)\n",
-           grid.x, grid.y, grid.z, (int)block.x, GqaTraits::NUM_WARPS, smem_size);
+           grid.x, grid.y, grid.z, (int)block.x, GqaTraits::NUM_WARPS, GqaTraits::smem_size_bytes());
 
-    gqa_kernel<GqaTraits><<<grid, block, smem_size>>>(kargs);
+    gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
     CHECK_HIP_KERNEL_LAUNCH();
 
 #if 1
@@ -669,7 +686,7 @@ int main(int argc, char** argv) {
 
 #if 1
     printf("\n");
-    benchmark_gqa_kernel<GqaTraits>(kargs, grid, block, smem_size);
+    benchmark_gqa_kernel<GqaTraits>(kargs, grid, block);
     printf("\n");
 #endif
 
