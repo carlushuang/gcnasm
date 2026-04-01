@@ -14,6 +14,26 @@
 using bf16_t = __bf16;
 using opus::operator""_I;
 
+constexpr int MFMA_MASK = 0x08;
+constexpr int VALU_MASK = 0x02;
+constexpr int EXP_MASK  = 0x400;
+
+#define SCHED_BARRIER(mask, cnt, group) __builtin_amdgcn_sched_group_barrier(mask, cnt, group)
+
+template<int Pairs, int VALU_CNT, int Group>
+__device__ __forceinline__ void sched_barrier_pairs() {
+    SCHED_BARRIER(MFMA_MASK, 1, Group);
+    SCHED_BARRIER(VALU_MASK, VALU_CNT, Group);
+    if constexpr (Pairs > 1) sched_barrier_pairs<Pairs - 1, VALU_CNT, Group>();
+}
+
+template<int Pairs, int EXP_CNT, int Group>
+__device__ __forceinline__ void sched_barrier_exp_pairs() {
+    SCHED_BARRIER(MFMA_MASK, 1, Group);
+    SCHED_BARRIER(EXP_MASK, EXP_CNT, Group);
+    if constexpr (Pairs > 1) sched_barrier_exp_pairs<Pairs - 1, EXP_CNT, Group>();
+}
+
 #define CHECK_HIP(call)                                                                                   \
     do {                                                                                                  \
         hipError_t status_ = call;                                                                        \
@@ -102,9 +122,17 @@ struct opus_gqa_traits {
     static constexpr int smem_d_rpt = D_TILE_SIZE / D_128B_SIZE;
     static constexpr int smem_padding_16B = 16 / sizeof(D_ATTN);
     static constexpr int smem_padding_64B = 64 / sizeof(D_ATTN);
+    static constexpr int smem_k_tile_elems = smem_n_rpt * smem_d_rpt * (smem_linear_wave + smem_padding_16B);
+    static constexpr int smem_v_tile_elems = smem_n_rpt * smem_d_rpt * (smem_linear_wave + smem_padding_64B);
+    static constexpr int smem_buffer_elems = smem_k_tile_elems + smem_v_tile_elems;
+
+    static constexpr int k_buffer_load_insts = (KV_TILE_SIZE * D_TILE_SIZE) / (BLOCK_SIZE * VEC_KV);
+    static constexpr int v_buffer_load_insts = (KV_TILE_SIZE * D_TILE_SIZE) / (BLOCK_SIZE * VEC_KV);
+    static constexpr int k_ds_read_insts = (GEMM0_E_N * GEMM0_E_K * W_N * W_K) / (WARP_SIZE * VEC_KV);
+    static constexpr int v_ds_read_insts = (GEMM1_E_N * GEMM1_E_K * W_N * W_K) / (WARP_SIZE * VEC_TR_V);
 
     static constexpr size_t smem_size_bytes() {
-        return (smem_n_rpt * smem_d_rpt * (2 * smem_linear_wave + smem_padding_16B + smem_padding_64B)) * sizeof(D_ATTN);
+        return 2 * smem_buffer_elems * sizeof(D_ATTN);
     }
 };
 
@@ -264,6 +292,52 @@ inline __device__ auto make_layout_rv(int lane_id) {
         opus::unfold_p_coord(rv_block_dim, opus::tuple{grp_id / grp_n, lane_in_grp / lane_lo, grp_id % grp_n, lane_in_grp % lane_lo}));
 }
 
+template<typename T, typename V>
+__device__ __forceinline__ typename T::D_ACC attn_row_max(const V& v_s) {
+    using D_ACC = typename T::D_ACC;
+    constexpr opus::index_t s_len = opus::vector_traits<V>::size();
+    D_ACC row_max = -1e30f;
+    opus::static_for<s_len>([&](auto i) {
+        row_max = max(row_max, v_s[i.value]);
+    });
+    row_max = max(row_max, __shfl_xor(row_max, 32));
+    return row_max;
+}
+
+template<typename T, typename V>
+__device__ __forceinline__ void attn_sub_row(V& v_s, typename T::D_ACC row_max) {
+    constexpr opus::index_t s_len = opus::vector_traits<V>::size();
+    opus::static_for<s_len>([&](auto i) {
+        v_s[i.value] -= row_max;
+    });
+}
+
+template<typename T, opus::index_t Offset, opus::index_t Count, typename V>
+__device__ __forceinline__ void attn_exp2_slice(V& v_s) {
+    opus::static_for<Count>([&](auto i) {
+        constexpr opus::index_t idx = Offset + i.value;
+        v_s[idx] = __builtin_amdgcn_exp2f(v_s[idx]);
+    });
+}
+
+template<typename T, typename V>
+__device__ __forceinline__ typename T::D_ACC attn_sum(const V& v_s) {
+    using D_ACC = typename T::D_ACC;
+    constexpr opus::index_t s_len = opus::vector_traits<V>::size();
+    D_ACC row_sum = 0.0f;
+    opus::static_for<s_len>([&](auto i) {
+        row_sum += v_s[i.value];
+    });
+    row_sum += __shfl_xor(row_sum, 32);
+    return row_sum;
+}
+
+template<typename T, typename V>
+__device__ __forceinline__ void scale_output_tile(V& v_o, typename T::D_ACC scale) {
+    constexpr opus::index_t o_len = opus::vector_traits<V>::size();
+    opus::static_for<o_len>([&](auto i) { v_o[i.value] *= scale;});
+}
+
 // ─── GQA kernel: template on traits; K/V in shared, Q in registers, Flash Attention online softmax ───
 template<class Traits>
 __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kargs kargs) {
@@ -284,15 +358,21 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     const int q_start = block_tile_idx * T::NUM_WARPS * T::Q_TILE_SIZE;
 
     // Create global memory tensors
-    auto g_q = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_q) + b * kargs.stride_q_b + q_start * kargs.stride_q_n + h * kargs.stride_q_h);
-    auto g_k = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_k) + b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h);
-    auto g_v = opus::make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_v) + b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h);
-    auto g_o = opus::make_gmem(reinterpret_cast<D_ATTN*>(kargs.ptr_o) + b * kargs.stride_q_b + q_start * kargs.stride_q_n + h * kargs.stride_q_h);
+    auto g_q = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_q) + b * kargs.stride_q_b + q_start * kargs.stride_q_n + h * kargs.stride_q_h);
+    auto g_k = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_k) + b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h);
+    auto g_v = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_v) + b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h);
+    auto g_o = make_gmem(reinterpret_cast<D_ATTN*>(kargs.ptr_o) + b * kargs.stride_q_b + q_start * kargs.stride_q_n + h * kargs.stride_q_h);
 
     // Shared memory for K and V tiles
-    __shared__ char smem[T::smem_size_bytes()];
-    auto s_k = opus::make_smem(reinterpret_cast<D_ATTN*>(smem));
-    auto s_v = opus::make_smem(reinterpret_cast<D_ATTN*>(smem) + T::smem_n_rpt * T::smem_d_rpt * (T::smem_linear_wave + T::smem_padding_16B));
+    __shared__ char smem_buf[T::smem_size_bytes()];
+    smem<D_ATTN> s_k[2] = {
+        make_smem(reinterpret_cast<D_ATTN*>(smem_buf)),
+        make_smem(reinterpret_cast<D_ATTN*>(smem_buf) + T::smem_buffer_elems)
+    };
+    smem<D_ATTN> s_v[2] = {
+        make_smem(reinterpret_cast<D_ATTN*>(smem_buf) + T::smem_k_tile_elems),
+        make_smem(reinterpret_cast<D_ATTN*>(smem_buf) + T::smem_buffer_elems + T::smem_k_tile_elems)
+    };
 
     // GEMM0: S = Q @ K^T
     auto mma0 = make_tiled_mma<D_ATTN, D_ATTN, D_ACC>(
@@ -320,49 +400,104 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // ──── Vector registers ────
     typename decltype(mma0)::vtype_a v_q;
     typename decltype(mma0)::vtype_b v_k;
-    typename decltype(mma0)::vtype_c v_s;
+    typename decltype(mma0)::vtype_c v_s[2];
     typename decltype(mma1)::vtype_a v_p;
     typename decltype(mma1)::vtype_b v_v;
     typename decltype(mma1)::vtype_c v_o;
 
     constexpr index_t q_len = vector_traits<typename decltype(mma0)::vtype_a>::size();
     constexpr index_t s_len = vector_traits<typename decltype(mma0)::vtype_c>::size();
+    constexpr index_t s_half_len = s_len / 2;
     constexpr index_t o_len = vector_traits<typename decltype(mma1)::vtype_c>::size();
     constexpr D_ACC RESCALE_THRESHOLD = D_ACC(8.0f);
+    static_assert(s_len % 2 == 0);
 
     D_ACC m_row = -1e30f;
     D_ACC l_row = 0.0f;
     int pending_scale = 0;
     D_ACC rescale_m = D_ACC(1.0f);
 
-    v_q = load<T::VEC_Q>(g_q, u_q);
+    const int stagger = warp_id / 4;
+    const int num_kv_tiles = ceil_div(kargs.N, T::KV_TILE_SIZE);
+
     constexpr float LOG2_E = 1.44269504089f;
     const float temperature_scale = (1.0f / sqrtf(static_cast<float>(kargs.D))) * LOG2_E;
-    auto v_q_f32 = opus::cast<float>(v_q);
-    static_for<q_len>([&](auto i) { v_q_f32[i.value] *= temperature_scale; });
-    v_q = opus::cast<D_ATTN>(v_q_f32);
-
     opus::clear(v_o);
-
-    const int num_kv_tiles = ceil_div(kargs.N, T::KV_TILE_SIZE);
 
     auto kv_offset = [&](int tile_idx) {
         return tile_idx * T::KV_TILE_SIZE * kargs.stride_kv_n;
     };
 
-    for (int tile = 0; tile < num_kv_tiles; tile++) {
-        async_load<T::VEC_KV>(g_k, s_k.ptr, u_gk, u_sk, kv_offset(tile));
-        opus::s_waitcnt_vmcnt(0_I);
+    // Prologue
+    async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_offset(0));
+    __builtin_amdgcn_s_waitcnt(0);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+
+    v_q = load<T::VEC_Q>(g_q, u_q);
+    auto v_q_f32 = opus::cast<float>(v_q);
+    static_for<q_len>([&](auto i) { v_q_f32[i.value] *= temperature_scale; });
+    v_q = opus::cast<D_ATTN>(v_q_f32);
+
+    async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_offset(1));
+    async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_offset(0));
+    v_k = load<T::VEC_KV>(s_k[0], u_rk);
+    __builtin_amdgcn_sched_barrier(0);
+    opus::s_waitcnt_lgkmcnt(0_I);
+    opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+
+    v_s[0] = mma0(v_q, v_k);
+    m_row = attn_row_max<T>(v_s[0]);
+    attn_sub_row<T>(v_s[0], m_row);
+    attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+
+    if (stagger) {
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
+    }
 
-        // ──── GEMM0: S = Q @ K^T via MFMA ────
-        v_k = load<T::VEC_KV>(s_k, u_rk);
-        v_s = mma0(v_q, v_k);
+    __builtin_amdgcn_sched_barrier(0);
+    v_k = load<T::VEC_KV>(s_k[1], u_rk);
+    async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_offset(2));
+    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(1));
+    opus::s_waitcnt_lgkmcnt(0_I);
+    opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
 
-        D_ACC row_max = -1e30f;
-        static_for<s_len>([&](auto i) { row_max = max(row_max, v_s[i.value]); });
-        row_max = max(row_max, __shfl_xor(row_max, 32));
+    // Main loop
+    for (int j = 3; j < num_kv_tiles - 1; j += 2) {
+        // Cluster 0:
+        if (pending_scale) {
+            l_row *= rescale_m;
+        }
+        v_s[1] = mma0(v_q, v_k);
+        subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 0));
+        attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
+        l_row += attn_sum<T>(v_s[0]);
+        subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 1));
+        sched_barrier_exp_pairs<6, 3, 1>();
+        sched_barrier_pairs<10, 5, 1>();
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
+        // Cluster 1:
+        async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_offset(j));
+        v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+        opus::s_waitcnt_lgkmcnt(0_I);
+        opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 2:
+        __builtin_amdgcn_s_setprio(1);
+        v_o = mma1(v_p, v_v, v_o);
+        D_ACC row_max = attn_row_max<T>(v_s[1]);
+        sched_barrier_pairs<4, 5, 2>();
         int below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
         int all_below = __all(below_thresh);
         if (__builtin_expect(all_below, 1)) {
@@ -370,41 +505,243 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             pending_scale = 0;
         } else {
             rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-            static_for<o_len>([&](auto i) { v_o[i.value] *= rescale_m; });
+            scale_output_tile<T>(v_o, rescale_m);
             m_row = row_max;
             pending_scale = 1;
         }
+        attn_sub_row<T>(v_s[1], row_max);
+        attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+        sched_barrier_pairs<6, 5, 2>();
+        sched_barrier_exp_pairs<6, 3, 2>();
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
-        // P = exp(S - row_max), accumulate row sum
-        D_ACC row_sum = 0.0f;
-        static_for<s_len>([&](auto i) {
-            v_s[i.value] = __builtin_amdgcn_exp2f(v_s[i.value] - row_max);
-            row_sum += v_s[i.value];
-        });
-        row_sum += __shfl_xor(row_sum, 32);
+        // Cluster 3:
+        async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_offset(j - 1));
+        v_k = load<T::VEC_KV>(s_k[0], u_rk);
+        opus::s_waitcnt_lgkmcnt(0_I);
+        opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
-        // Delayed apply: only rescale when threshold check fails.
+        // Cluster 4:
         if (pending_scale) {
             l_row *= rescale_m;
-            pending_scale = 0;
         }
-        l_row += row_sum;
-
-        // Convert P to bf16 for GEMM1
-        v_p = opus::cast<D_ATTN>(v_s);
-
-        async_load<T::VEC_KV>(g_v, s_v.ptr, u_gv, u_sv, kv_offset(tile));
-        opus::s_waitcnt_vmcnt(0_I);
+        v_s[0] = mma0(v_q, v_k);
+        subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 0));
+        attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
+        l_row += attn_sum<T>(v_s[1]);
+        subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 1));
+        sched_barrier_exp_pairs<6, 3, 3>();
+        sched_barrier_pairs<10, 5, 3>();
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
-        
-        // ──── GEMM1: O += P @ V via MFMA ────
-        v_v = tr_load<T::VEC_TR_V>(s_v, u_rv);
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 5:
+        async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_offset(j + 1));
+        v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+        opus::s_waitcnt_lgkmcnt(0_I);
+        opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 6:
+        __builtin_amdgcn_s_setprio(1);
         v_o = mma1(v_p, v_v, v_o);
+        row_max = attn_row_max<T>(v_s[0]);
+        sched_barrier_pairs<4, 5, 4>();
+        below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
+        all_below = __all(below_thresh);
+        if (__builtin_expect(all_below, 1)) {
+            row_max = m_row;
+            pending_scale = 0;
+        } else {
+            rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+            scale_output_tile<T>(v_o, rescale_m);
+            m_row = row_max;
+            pending_scale = 1;
+        }
+        attn_sub_row<T>(v_s[0], row_max);
+        attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+        sched_barrier_pairs<6, 5, 4>();
+        sched_barrier_exp_pairs<6, 3, 4>();
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 7:
+        async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(j));
+        v_k = load<T::VEC_KV>(s_k[1], u_rk);
+        opus::s_waitcnt_lgkmcnt(0_I);
+        opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
     }
+
+    // Epilogue
+    // Cluster 0:
+    if (pending_scale) {
+        l_row *= rescale_m;
+    }
+    v_s[1] = mma0(v_q, v_k);
+    subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 0));
+    attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
+    l_row += attn_sum<T>(v_s[0]);
+    subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 1));
+    sched_barrier_exp_pairs<6, 3, 5>();
+    sched_barrier_pairs<10, 5, 5>();
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 1:
+    async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_offset(num_kv_tiles - 1));
+    v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+    opus::s_waitcnt_lgkmcnt(0_I);
+    opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 2:
+    __builtin_amdgcn_s_setprio(1);
+    v_o = mma1(v_p, v_v, v_o);
+    D_ACC row_max = attn_row_max<T>(v_s[1]);
+    rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+    m_row = row_max;
+    attn_sub_row<T>(v_s[1], row_max);
+    attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+    sched_barrier_pairs<10, 5, 6>();
+    sched_barrier_exp_pairs<6, 3, 6>();
+    __builtin_amdgcn_sched_barrier(0);
+    scale_output_tile<T>(v_o, rescale_m);
+    __builtin_amdgcn_s_setprio(0);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 3:
+    async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_offset(num_kv_tiles - 2));
+    v_k = load<T::VEC_KV>(s_k[0], u_rk);
+    opus::s_waitcnt_lgkmcnt(0_I);
+    opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 4:
+    v_s[0] = mma0(v_q, v_k);
+    l_row *= rescale_m;
+    subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 0));
+    attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
+    l_row += attn_sum<T>(v_s[1]);
+    subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 1));
+    sched_barrier_exp_pairs<6, 3, 7>();
+    sched_barrier_pairs<10, 5, 7>();
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 5:
+    v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+    opus::s_waitcnt_lgkmcnt(0_I);
+    opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 6:
+    __builtin_amdgcn_s_setprio(1);
+    v_o = mma1(v_p, v_v, v_o);
+    row_max = attn_row_max<T>(v_s[0]);
+    rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+    m_row = row_max;
+    attn_sub_row<T>(v_s[0], row_max);
+    attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+    sched_barrier_pairs<10, 5, 8>();
+    sched_barrier_exp_pairs<6, 3, 8>();
+    __builtin_amdgcn_sched_barrier(0);
+    scale_output_tile<T>(v_o, rescale_m);
+    __builtin_amdgcn_s_setprio(0);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 7:
+    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(num_kv_tiles - 1));
+    v_k = load<T::VEC_KV>(s_k[1], u_rk);
+    opus::s_waitcnt_lgkmcnt(0_I);
+    opus::s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 8:
+    v_s[1] = mma0(v_q, v_k);
+    l_row *= rescale_m;
+    subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 0));
+    attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
+    l_row += attn_sum<T>(v_s[0]);
+    subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 1));
+    sched_barrier_exp_pairs<6, 3, 9>();
+    sched_barrier_pairs<10, 5, 9>();
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 9:
+    v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+    opus::s_waitcnt_lgkmcnt(0_I);
+    opus::s_waitcnt_vmcnt(0_I);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 10:
+    v_o = mma1(v_p, v_v, v_o);
+    row_max = attn_row_max<T>(v_s[1]);
+    rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+    m_row = row_max;
+    attn_sub_row<T>(v_s[1], row_max);
+    attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+    sched_barrier_pairs<10, 5, 10>();
+    sched_barrier_exp_pairs<6, 3, 10>();
+    __builtin_amdgcn_sched_barrier(0);
+
+    attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
+    l_row *= rescale_m;
+    l_row += attn_sum<T>(v_s[1]);
+    v_p = opus::cast<D_ATTN>(v_s[1]);
+    __builtin_amdgcn_sched_barrier(0);
+    scale_output_tile<T>(v_o, rescale_m);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 11:
+    v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+    opus::s_waitcnt_lgkmcnt(0_I);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 12:
+    v_o = mma1(v_p, v_v, v_o);
 
     // ──── Normalize O and store to gmem ────
     D_ACC l_inv = (l_row > D_ACC(0.0f)) ? (D_ACC(1.0f) / l_row) : D_ACC(0.0f);
     static_for<o_len>([&](auto i) { v_o[i.value] *= l_inv; });
+
+    if (!stagger) {
+        __builtin_amdgcn_s_barrier();
+    }
 
     auto v_o_bf16 = opus::cast<D_ATTN>(v_o);
     store<T::VEC_O>(g_o, v_o_bf16, u_o);
@@ -663,6 +1000,17 @@ int main(int argc, char** argv) {
     using GqaTraits = opus_gqa_traits<32, 64, 128, 8>;
     if (D != GqaTraits::D_TILE_SIZE) {
         std::cerr << "This kernel only supports head dimension D=" << GqaTraits::D_TILE_SIZE << ", got D=" << D << "\n";
+        return 1;
+    }
+    if ((N % GqaTraits::KV_TILE_SIZE) != 0 || (N / GqaTraits::KV_TILE_SIZE) < 6) {
+        std::cerr << "This attend-style pipeline requires N to be a multiple of "
+                  << GqaTraits::KV_TILE_SIZE << " and span at least 6 KV tiles, got N=" << N << "\n";
+        return 1;
+    }
+    if ((N % (GqaTraits::Q_TILE_SIZE * GqaTraits::NUM_WARPS)) != 0) {
+        std::cerr << "This kernel requires N to be a multiple of "
+                  << (GqaTraits::Q_TILE_SIZE * GqaTraits::NUM_WARPS)
+                  << " so every warp maps to a valid Q tile, got N=" << N << "\n";
         return 1;
     }
     const int num_q_tiles = ceil_div(N, GqaTraits::Q_TILE_SIZE);
