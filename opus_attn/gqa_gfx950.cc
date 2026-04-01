@@ -273,8 +273,6 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     using D_ACC = typename T::D_ACC;
 
     const int GROUP_SIZE = kargs.H / kargs.H_KV;
-    const float scale = 1.0f / sqrtf(static_cast<float>(kargs.D));
-
     const int h = (blockIdx.x % kargs.H_KV) * GROUP_SIZE + (blockIdx.x / kargs.H_KV);
     const int block_tile_idx = blockIdx.y;
     const int b = blockIdx.z;
@@ -327,6 +325,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     typename decltype(mma1)::vtype_b v_v;
     typename decltype(mma1)::vtype_c v_o;
 
+    constexpr index_t q_len = vector_traits<typename decltype(mma0)::vtype_a>::size();
     constexpr index_t s_len = vector_traits<typename decltype(mma0)::vtype_c>::size();
     constexpr index_t o_len = vector_traits<typename decltype(mma1)::vtype_c>::size();
     constexpr D_ACC RESCALE_THRESHOLD = D_ACC(8.0f);
@@ -337,6 +336,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     D_ACC rescale_m = D_ACC(1.0f);
 
     v_q = load<T::VEC_Q>(g_q, u_q);
+    constexpr float LOG2_E = 1.44269504089f;
+    const float temperature_scale = (1.0f / sqrtf(static_cast<float>(kargs.D))) * LOG2_E;
+    auto v_q_f32 = opus::cast<float>(v_q);
+    static_for<q_len>([&](auto i) { v_q_f32[i.value] *= temperature_scale; });
+    v_q = opus::cast<D_ATTN>(v_q_f32);
+
     opus::clear(v_o);
 
     const int num_kv_tiles = ceil_div(kargs.N, T::KV_TILE_SIZE);
@@ -354,20 +359,18 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         v_k = load<T::VEC_KV>(s_k, u_rk);
         v_s = mma0(v_q, v_k);
 
-        // Scale by 1/sqrt(D)
-        static_for<s_len>([&](auto i) { v_s[i.value] *= scale; });
-
         D_ACC row_max = -1e30f;
         static_for<s_len>([&](auto i) { row_max = max(row_max, v_s[i.value]); });
         row_max = max(row_max, __shfl_xor(row_max, 32));
 
-        int lane_ok = ((row_max - m_row) <= RESCALE_THRESHOLD);
-        int all_ok = __all(lane_ok);
-        if (__builtin_expect(all_ok, 1)) {
+        int below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
+        int all_below = __all(below_thresh);
+        if (__builtin_expect(all_below, 1)) {
             row_max = m_row;
             pending_scale = 0;
         } else {
-            rescale_m = expf(m_row - row_max);
+            rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+            static_for<o_len>([&](auto i) { v_o[i.value] *= rescale_m; });
             m_row = row_max;
             pending_scale = 1;
         }
@@ -375,14 +378,13 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         // P = exp(S - row_max), accumulate row sum
         D_ACC row_sum = 0.0f;
         static_for<s_len>([&](auto i) {
-            v_s[i.value] = expf(v_s[i.value] - row_max);
+            v_s[i.value] = __builtin_amdgcn_exp2f(v_s[i.value] - row_max);
             row_sum += v_s[i.value];
         });
         row_sum += __shfl_xor(row_sum, 32);
 
-        // Delayed apply style: only rescale when threshold check fails.
+        // Delayed apply: only rescale when threshold check fails.
         if (pending_scale) {
-            static_for<o_len>([&](auto i) { v_o[i.value] *= rescale_m; });
             l_row *= rescale_m;
             pending_scale = 0;
         }
