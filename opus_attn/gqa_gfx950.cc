@@ -474,10 +474,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             l_row *= rescale_m;
         }
         v_s[1] = mma0(v_q, v_k);
-        subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 0));
+        subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[0]));
         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
         l_row += attn_sum<T>(v_s[0]);
-        subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 1));
+        subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[0]));
         sched_barrier_exp_pairs<6, 3, 1>();
         sched_barrier_pairs<10, 5, 1>();
         __builtin_amdgcn_sched_barrier(0);
@@ -535,10 +535,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             l_row *= rescale_m;
         }
         v_s[0] = mma0(v_q, v_k);
-        subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 0));
+        subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[1]));
         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
         l_row += attn_sum<T>(v_s[1]);
-        subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 1));
+        subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[1]));
         sched_barrier_exp_pairs<6, 3, 3>();
         sched_barrier_pairs<10, 5, 3>();
         __builtin_amdgcn_sched_barrier(0);
@@ -598,10 +598,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         l_row *= rescale_m;
     }
     v_s[1] = mma0(v_q, v_k);
-    subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 0));
+    subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[0]));
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
     l_row += attn_sum<T>(v_s[0]);
-    subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 1));
+    subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[0]));
     sched_barrier_exp_pairs<6, 3, 5>();
     sched_barrier_pairs<10, 5, 5>();
     __builtin_amdgcn_sched_barrier(0);
@@ -646,10 +646,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 4:
     v_s[0] = mma0(v_q, v_k);
     l_row *= rescale_m;
-    subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 0));
+    subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[1]));
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
     l_row += attn_sum<T>(v_s[1]);
-    subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[1], 1));
+    subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[1]));
     sched_barrier_exp_pairs<6, 3, 7>();
     sched_barrier_pairs<10, 5, 7>();
     __builtin_amdgcn_sched_barrier(0);
@@ -693,10 +693,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 8:
     v_s[1] = mma0(v_q, v_k);
     l_row *= rescale_m;
-    subtile_inplace<s_half_len>(v_p, 0) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 0));
+    subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[0]));
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
     l_row += attn_sum<T>(v_s[0]);
-    subtile_inplace<s_half_len>(v_p, 1) = opus::cast<D_ATTN>(subtile_inplace<s_half_len>(v_s[0], 1));
+    subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[0]));
     sched_barrier_exp_pairs<6, 3, 9>();
     sched_barrier_pairs<10, 5, 9>();
     __builtin_amdgcn_sched_barrier(0);
