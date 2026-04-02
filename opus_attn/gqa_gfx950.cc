@@ -495,7 +495,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
         // Cluster 2:
         __builtin_amdgcn_s_setprio(1);
-        v_o = mma1(v_p, v_v, v_o);
+        v_o = mma1.step_k(number<0>{}, v_p, v_v, v_o);
         D_ACC row_max = attn_row_max<T>(v_s[1]);
         sched_barrier_pairs<4, 5, 2>();
         int below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
@@ -509,6 +509,9 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             m_row = row_max;
             pending_scale = 1;
         }
+        v_o = mma1.step_k(number<1>{}, v_p, v_v, v_o);
+        v_o = mma1.step_k(number<2>{}, v_p, v_v, v_o);
+        v_o = mma1.step_k(number<3>{}, v_p, v_v, v_o);
         attn_sub_row<T>(v_s[1], row_max);
         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         sched_barrier_pairs<6, 5, 2>();
@@ -553,7 +556,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
         // Cluster 6:
         __builtin_amdgcn_s_setprio(1);
-        v_o = mma1(v_p, v_v, v_o);
+        v_o = mma1.step_k(number<0>{}, v_p, v_v, v_o);
         row_max = attn_row_max<T>(v_s[0]);
         sched_barrier_pairs<4, 5, 4>();
         below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
@@ -567,6 +570,9 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             m_row = row_max;
             pending_scale = 1;
         }
+        v_o = mma1.step_k(number<1>{}, v_p, v_v, v_o);
+        v_o = mma1.step_k(number<2>{}, v_p, v_v, v_o);
+        v_o = mma1.step_k(number<3>{}, v_p, v_v, v_o);
         attn_sub_row<T>(v_s[0], row_max);
         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
         sched_barrier_pairs<6, 5, 4>();
