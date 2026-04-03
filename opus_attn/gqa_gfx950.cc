@@ -45,7 +45,7 @@ __device__ __forceinline__ void sched_barrier_exp_pairs() {
 
 #define CHECK_HIP_KERNEL_LAUNCH() CHECK_HIP(hipGetLastError())
 
-__host__ __device__ inline int ceil_div(int a, int b) {
+__host__ __device__ __forceinline__ int ceil_div(int a, int b) {
     return (a + b - 1) / b;
 }
 
@@ -138,7 +138,7 @@ struct opus_gqa_traits {
 
 // Create layout for loading Q matrix from global memory
 template<class T>
-inline __device__ auto make_layout_q(int warp_id, int lane_id, int stride_q_n) {
+__device__ __forceinline__ auto make_layout_q(int warp_id, int lane_id, int stride_q_n) {
     constexpr auto q_block_shape = opus::make_tuple(
         opus::number<T::GEMM0_E_M>{},
         opus::number<T::T_M>{},
@@ -151,7 +151,7 @@ inline __device__ auto make_layout_q(int warp_id, int lane_id, int stride_q_n) {
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::p_dim{}),
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
 
-    return opus::make_layout<T::VEC_Q>(
+    return opus::make_layout(
         q_block_shape,
         opus::unfold_x_stride(q_block_dim, q_block_shape, opus::tuple{stride_q_n, 1_I}),
         opus::unfold_p_coord(q_block_dim, opus::tuple{warp_id, lane_id % T::W_M, lane_id / T::W_M}));
@@ -159,7 +159,7 @@ inline __device__ auto make_layout_q(int warp_id, int lane_id, int stride_q_n) {
 
 // Create layout for storing O matrix to global memory
 template<class T>
-inline __device__ auto make_layout_o(int warp_id, int lane_id, int stride_o_n) {
+__device__ __forceinline__ auto make_layout_o(int warp_id, int lane_id, int stride_o_n) {
     constexpr auto o_block_shape = opus::make_tuple(
         opus::number<T::GEMM1_E_M>{},
         opus::number<T::T_M>{},
@@ -173,7 +173,7 @@ inline __device__ auto make_layout_o(int warp_id, int lane_id, int stride_o_n) {
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::p_dim{}),
         opus::make_tuple(opus::y_dim{}, opus::y_dim{}, opus::p_dim{}, opus::y_dim{}));
 
-    return opus::make_layout<T::VEC_O>(
+    return opus::make_layout(
         o_block_shape,
         opus::unfold_x_stride(o_block_dim, o_block_shape, opus::tuple{stride_o_n, 1_I}),
         opus::unfold_p_coord(o_block_dim, opus::tuple{warp_id, lane_id % T::W_M, lane_id / T::W_M}));
@@ -181,7 +181,7 @@ inline __device__ auto make_layout_o(int warp_id, int lane_id, int stride_o_n) {
 
 // Create layout for loading K matrix from global memory
 template<typename T>
-inline __device__ auto make_layout_gk_gv(int warp_id, int lane_id, int stride_kv_n) {
+__device__ __forceinline__ auto make_layout_gk_gv(int warp_id, int lane_id, int stride_kv_n) {
     constexpr int threads_d = T::D_128B_SIZE / T::VEC_KV;
     constexpr int threads_n_per_block = T::BLOCK_SIZE / threads_d;
     constexpr int threads_n_per_wave = opus::get_warp_size() / threads_d;
@@ -199,15 +199,15 @@ inline __device__ auto make_layout_gk_gv(int warp_id, int lane_id, int stride_kv
         opus::make_tuple(opus::y_dim{}, opus::p_dim{}, opus::p_dim{}),
         opus::make_tuple(opus::p_dim{}, opus::y_dim{}));
 
-    return opus::make_layout<T::VEC_KV>(
+    return opus::make_layout(
         gk_block_shape,
-        opus::unfold_x_stride(gk_block_dim, gk_block_shape, opus::tuple{T::D_128B_SIZE, stride_kv_n, 1_I}),
+        opus::unfold_x_stride(gk_block_dim, gk_block_shape, opus::tuple{opus::number<T::D_128B_SIZE>{}, stride_kv_n, 1_I}),
         opus::unfold_p_coord(gk_block_dim, opus::tuple{lane_id / threads_d, warp_id, lane_id % threads_d}));
 }
 
 // Create layout for storing K matrix to shared memory
-template<typename T>
-inline __device__ auto make_layout_sk_sv(int warp_id, int lane_id, int smem_padding) {
+template<typename T, int smem_padding>
+__device__ __forceinline__ auto make_layout_sk_sv(int warp_id, int lane_id) {
     constexpr auto sk_block_shape = opus::make_tuple(
         opus::number<T::smem_d_rpt>{},
         opus::number<T::smem_n_rpt / T::NUM_WARPS>{},
@@ -219,15 +219,15 @@ inline __device__ auto make_layout_sk_sv(int warp_id, int lane_id, int smem_padd
         opus::make_tuple(opus::y_dim{}, opus::y_dim{}, opus::p_dim{}),
         opus::make_tuple(opus::p_dim{}, opus::y_dim{}));
 
-    return opus::make_layout<T::VEC_KV>(
+    return opus::make_layout(
         sk_block_shape,
-        opus::unfold_x_stride(sk_block_dim, sk_block_shape, opus::tuple{T::smem_linear_wave + smem_padding, 1_I}),
+        opus::unfold_x_stride(sk_block_dim, sk_block_shape, opus::tuple{opus::number<T::smem_linear_wave + smem_padding>{}, 1_I}),
         opus::unfold_p_coord(sk_block_dim, opus::tuple{warp_id, lane_id}));
 }
 
 // Create layout for reading K matrix from shared memory to registers
 template<typename T>
-inline __device__ auto make_layout_rk(int lane_id) {
+__device__ __forceinline__ auto make_layout_rk(int lane_id) {
     constexpr int n_per_wave = opus::get_warp_size() / (T::D_128B_SIZE / T::VEC_KV);
     constexpr int n_grp = n_per_wave / (T::W_N / T::NUM_WARPS);
 
@@ -249,14 +249,14 @@ inline __device__ auto make_layout_rk(int lane_id) {
 
     auto lane_id_n = lane_id % T::W_N;
 
-    return opus::make_layout<T::VEC_KV>(
+    return opus::make_layout(
         rk_block_shape,
-        opus::unfold_x_stride(rk_block_dim, rk_block_shape, opus::tuple{T::smem_linear_wave + T::smem_padding_16B, T::D_128B_SIZE, T::smem_n_rpt * (T::smem_linear_wave + T::smem_padding_16B), 1_I}),
+        opus::unfold_x_stride(rk_block_dim, rk_block_shape, opus::tuple{opus::number<T::smem_linear_wave + T::smem_padding_16B>{}, opus::number<T::D_128B_SIZE>{}, opus::number<T::smem_n_rpt * (T::smem_linear_wave + T::smem_padding_16B)>{}, 1_I}),
         opus::unfold_p_coord(rk_block_dim, opus::tuple{lane_id_n % T::NUM_WARPS, lane_id_n / T::NUM_WARPS, lane_id / T::W_N}));
 }
 
 template<class T>
-inline __device__ auto make_layout_rv(int lane_id) {
+__device__ __forceinline__ auto make_layout_rv(int lane_id) {
     constexpr int lane_per_grp = 16;
     constexpr int lane_lo = 4;
     constexpr int lane_hi = lane_per_grp / lane_lo;
@@ -286,9 +286,9 @@ inline __device__ auto make_layout_rv(int lane_id) {
     int grp_id = lane_id / lane_per_grp;
     int lane_in_grp = lane_id % lane_per_grp;
 
-    return opus::make_layout<T::VEC_TR_V>(
+    return opus::make_layout(
         rv_block_shape,
-        opus::unfold_x_stride(rv_block_dim, rv_block_shape, opus::tuple{T::smem_n_rpt * (T::smem_linear_wave + T::smem_padding_64B), grp_n * lane_lo * T::VEC_TR_V, T::smem_linear_wave + T::smem_padding_64B, T::D_128B_SIZE, 1_I}),
+        opus::unfold_x_stride(rv_block_dim, rv_block_shape, opus::tuple{opus::number<T::smem_n_rpt * (T::smem_linear_wave + T::smem_padding_64B)>{}, opus::number<grp_n * lane_lo * T::VEC_TR_V>{}, opus::number<T::smem_linear_wave + T::smem_padding_64B>{}, opus::number<T::D_128B_SIZE>{}, 1_I}),
         opus::unfold_p_coord(rv_block_dim, opus::tuple{grp_id / grp_n, lane_in_grp / lane_lo, grp_id % grp_n, lane_in_grp % lane_lo}));
 }
 
@@ -300,8 +300,8 @@ __device__ __forceinline__ typename T::D_ACC attn_row_max(const V& v_s) {
     opus::static_for<s_len>([&](auto i) {
         row_max = max(row_max, v_s[i.value]);
     });
-    row_max = max(row_max, __shfl_xor(row_max, 32));
-    return row_max;
+    opus::vector_t<uint32_t, 2> res = __builtin_amdgcn_permlane32_swap(__float_as_uint(row_max), __float_as_uint(row_max), false, true);
+    return max(__uint_as_float(res.x), __uint_as_float(res.y));
 }
 
 template<typename T, typename V>
@@ -328,8 +328,8 @@ __device__ __forceinline__ typename T::D_ACC attn_sum(const V& v_s) {
     opus::static_for<s_len>([&](auto i) {
         row_sum += v_s[i.value];
     });
-    row_sum += __shfl_xor(row_sum, 32);
-    return row_sum;
+    opus::vector_t<uint32_t, 2> res = __builtin_amdgcn_permlane32_swap(__float_as_uint(row_sum), __float_as_uint(row_sum), false, true);
+    return __uint_as_float(res.x) + __uint_as_float(res.y);
 }
 
 template<typename T, typename V>
@@ -352,7 +352,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     const int b = blockIdx.z;
     const int h_kv = h / GROUP_SIZE;
 
-    const int warp_id = threadIdx.x / T::WARP_SIZE;
+    const int warp_id = __builtin_amdgcn_readfirstlane(threadIdx.x / T::WARP_SIZE);
     const int lane_id = threadIdx.x % T::WARP_SIZE;
 
     const int q_start = block_tile_idx * T::NUM_WARPS * T::Q_TILE_SIZE;
@@ -390,12 +390,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // ──── Partition layouts ────
     auto u_q  = make_layout_q<T>(warp_id, lane_id, kargs.stride_q_n);
     auto u_gk = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
-    auto u_sk = make_layout_sk_sv<T>(warp_id, lane_id, T::smem_padding_16B);
+    auto u_sk = make_layout_sk_sv<T, T::smem_padding_16B>(warp_id, lane_id);
     auto u_rk = make_layout_rk<T>(lane_id);
     auto u_gv = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
-    auto u_sv = make_layout_sk_sv<T>(warp_id, lane_id, T::smem_padding_64B);
+    auto u_sv = make_layout_sk_sv<T, T::smem_padding_64B>(warp_id, lane_id);
     auto u_rv = make_layout_rv<T>(lane_id);
-    auto u_o  = make_layout_o<T>(warp_id, lane_id, kargs.stride_q_n);
+    auto u_o = make_layout_o<T>(warp_id, lane_id, kargs.stride_q_n);
 
     // ──── Vector registers ────
     typename decltype(mma0)::vtype_a v_q;
@@ -404,6 +404,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     typename decltype(mma1)::vtype_a v_p;
     typename decltype(mma1)::vtype_b v_v;
     typename decltype(mma1)::vtype_c v_o;
+
+    opus::clear(v_o);
 
     constexpr index_t q_len = vector_traits<typename decltype(mma0)::vtype_a>::size();
     constexpr index_t s_len = vector_traits<typename decltype(mma0)::vtype_c>::size();
@@ -422,7 +424,6 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     constexpr float LOG2_E = 1.44269504089f;
     const float temperature_scale = (1.0f / sqrtf(static_cast<float>(kargs.D))) * LOG2_E;
-    opus::clear(v_o);
 
     auto kv_offset = [&](int tile_idx) {
         return tile_idx * T::KV_TILE_SIZE * kargs.stride_kv_n;
