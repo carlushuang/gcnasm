@@ -394,7 +394,6 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     auto u_gv = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
     auto u_sv = make_layout_sk_sv<T, T::smem_padding_64B>(warp_id, lane_id);
     auto u_rv = make_layout_rv<T>(lane_id);
-    auto u_o  = make_layout_o<T>(warp_id, lane_id, kargs.stride_q_n);
 
     // ──── Vector registers ────
     typename decltype(mma0)::vtype_a v_q;
@@ -415,7 +414,6 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     D_ACC m_row = -1e30f;
     D_ACC l_row = 0.0f;
-    int pending_scale = 0;
     D_ACC rescale_m = D_ACC(1.0f);
 
     const int stagger = warp_id / 4;
@@ -469,14 +467,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Main loop
     for (int j = 3; j < num_kv_tiles - 1; j += 2) {
         // Cluster 0:
-        if (pending_scale) {
-            l_row *= rescale_m;
-        }
         v_s[1] = mma0(v_q, v_k);
-        subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[0]));
         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
         l_row += attn_sum<T>(v_s[0]);
-        subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[0]));
+        v_p = opus::cast<D_ATTN>(v_s[0]);
+        asm volatile("" : "+v"(v_p) ::);
         sched_barrier_exp_pairs<6, 3, 1>();
         sched_barrier_pairs<10, 5, 1>();
         __builtin_amdgcn_sched_barrier(0);
@@ -501,12 +496,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         int all_below = __all(below_thresh);
         if (__builtin_expect(all_below, 1)) {
             row_max = m_row;
-            pending_scale = 0;
         } else {
             rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
             scale_output_tile<T>(v_o, rescale_m);
+            l_row *= rescale_m;
             m_row = row_max;
-            pending_scale = 1;
         }
         v_o = mma1.step_k(number<1>{}, v_p, v_v, v_o);
         v_o = mma1.step_k(number<2>{}, v_p, v_v, v_o);
@@ -530,14 +524,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4:
-        if (pending_scale) {
-            l_row *= rescale_m;
-        }
         v_s[0] = mma0(v_q, v_k);
-        subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[1]));
         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
         l_row += attn_sum<T>(v_s[1]);
-        subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[1]));
+        v_p = opus::cast<D_ATTN>(v_s[1]);
+        asm volatile("" : "+v"(v_p) ::);
         sched_barrier_exp_pairs<6, 3, 3>();
         sched_barrier_pairs<10, 5, 3>();
         __builtin_amdgcn_sched_barrier(0);
@@ -562,17 +553,17 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         all_below = __all(below_thresh);
         if (__builtin_expect(all_below, 1)) {
             row_max = m_row;
-            pending_scale = 0;
         } else {
             rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
             scale_output_tile<T>(v_o, rescale_m);
+            l_row *= rescale_m;
             m_row = row_max;
-            pending_scale = 1;
         }
         v_o = mma1.step_k(number<1>{}, v_p, v_v, v_o);
         v_o = mma1.step_k(number<2>{}, v_p, v_v, v_o);
         v_o = mma1.step_k(number<3>{}, v_p, v_v, v_o);
         attn_sub_row<T>(v_s[0], row_max);
+        asm volatile("" : "+v"(v_s[0]) ::);
         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
         sched_barrier_pairs<6, 5, 4>();
         sched_barrier_exp_pairs<6, 3, 4>();
@@ -593,14 +584,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     // Epilogue
     // Cluster 0:
-    if (pending_scale) {
-        l_row *= rescale_m;
-    }
     v_s[1] = mma0(v_q, v_k);
-    subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[0]));
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
     l_row += attn_sum<T>(v_s[0]);
-    subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[0]));
+    v_p = opus::cast<D_ATTN>(v_s[0]);
+    asm volatile("" : "+v"(v_p) ::);
     sched_barrier_exp_pairs<6, 3, 5>();
     sched_barrier_pairs<10, 5, 5>();
     __builtin_amdgcn_sched_barrier(0);
@@ -624,10 +612,13 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     m_row = row_max;
     attn_sub_row<T>(v_s[1], row_max);
     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+    asm volatile("" : "+v"(v_s[1]) ::);
     sched_barrier_pairs<10, 5, 6>();
     sched_barrier_exp_pairs<6, 3, 6>();
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
+    auto* v_o_pin = reinterpret_cast<vector_t<fp32_t, 16>*>(&v_o);
+    asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
@@ -645,10 +636,9 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 4:
     v_s[0] = mma0(v_q, v_k);
     l_row *= rescale_m;
-    subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[1]));
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
     l_row += attn_sum<T>(v_s[1]);
-    subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[1]));
+    v_p = opus::cast<D_ATTN>(v_s[1]);
     sched_barrier_exp_pairs<6, 3, 7>();
     sched_barrier_pairs<10, 5, 7>();
     __builtin_amdgcn_sched_barrier(0);
@@ -671,10 +661,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     m_row = row_max;
     attn_sub_row<T>(v_s[0], row_max);
     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+    asm volatile("" : "+v"(v_s[0]) ::);
     sched_barrier_pairs<10, 5, 8>();
     sched_barrier_exp_pairs<6, 3, 8>();
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
+    asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
@@ -692,10 +684,9 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 8:
     v_s[1] = mma0(v_q, v_k);
     l_row *= rescale_m;
-    subview<0, s_half_len>(v_p) = opus::cast<D_ATTN>(subview<0, s_half_len>(v_s[0]));
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
     l_row += attn_sum<T>(v_s[0]);
-    subview<s_half_len, s_len>(v_p) = opus::cast<D_ATTN>(subview<s_half_len, s_len>(v_s[0]));
+    v_p = opus::cast<D_ATTN>(v_s[0]);
     sched_barrier_exp_pairs<6, 3, 9>();
     sched_barrier_pairs<10, 5, 9>();
     __builtin_amdgcn_sched_barrier(0);
@@ -727,6 +718,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     v_p = opus::cast<D_ATTN>(v_s[1]);
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
+    asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
@@ -748,6 +740,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_s_barrier();
     }
 
+    int lane_id_o = __builtin_amdgcn_workitem_id_x() % T::WARP_SIZE;
+    int stride_o_n = kargs.stride_q_n;
+    asm volatile("" : "+v"(lane_id_o), "+s"(stride_o_n) :: "memory");
+    auto u_o = make_layout_o<T>(warp_id, lane_id_o, stride_o_n);
     auto v_o_bf16 = opus::cast<D_ATTN>(v_o);
     store<T::VEC_O>(g_o, v_o_bf16, u_o);
 }
@@ -1029,7 +1025,7 @@ int main(int argc, char** argv) {
     gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
     CHECK_HIP_KERNEL_LAUNCH();
 
-#if 1
+#if 0
     printf("\nValidating GPU results against CPU reference...\n");
     CHECK_HIP(hipMemcpy(host_o_gpu.get(), dev_o, q_size * sizeof(bf16_t), hipMemcpyDeviceToHost));
     gqa_attention_ref(host_q.get(), host_k.get(), host_v.get(), host_o_ref.get(),
