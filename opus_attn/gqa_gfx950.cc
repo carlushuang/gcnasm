@@ -506,6 +506,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         v_o = mma1.step_k(number<2>{}, v_p, v_v, v_o);
         v_o = mma1.step_k(number<3>{}, v_p, v_v, v_o);
         attn_sub_row<T>(v_s[1], row_max);
+	asm volatile("" : "+v"(v_s[1]) ::);
         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         sched_barrier_pairs<6, 5, 2>();
         sched_barrier_exp_pairs<6, 3, 2>();
