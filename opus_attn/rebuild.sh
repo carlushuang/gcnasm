@@ -1,0 +1,16 @@
+#!/bin/sh
+
+SRC=gqa_gfx950.cc
+OUT=gqa_attn.exe
+TOP=`pwd`
+BUILD="$TOP/build/"
+OPUS_INCLUDE_DIR=/path/to/aiter/csrc/include
+
+rm -rf $BUILD ; mkdir $BUILD ; cd $BUILD
+
+${HIPCXX:-/opt/rocm/bin/hipcc} "$TOP/$SRC" \
+  -I"$OPUS_INCLUDE_DIR" \
+  -std=c++20 -fopenmp -O3 -Wall \
+  --offload-arch=gfx950 -ffast-math \
+  -save-temps -Rpass-analysis=kernel-resource-usage \
+  -o "$BUILD/$OUT"

@@ -37,7 +37,6 @@ template<int BLOCK_SIZE_,   // workgroup size
         bool HAS_BIAS_      // has bias with size [1, N] or not
         >
 struct opus_flatmm_traits {
-    // always use 16x16 mfma
     using BLOCK = opus::remove_cvref_t<BLOCK_>;
     using DTYPE = opus::remove_cvref_t<DTYPE_>;
     using VEC   = opus::remove_cvref_t<VEC_>;
