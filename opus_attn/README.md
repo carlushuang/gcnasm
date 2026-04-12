@@ -113,10 +113,18 @@ The kernel is parameterized via `opus_gqa_traits<Q_TILE, KV_TILE, D_TILE, NUM_WA
 
 ## Compile-time notes
 
-Full monolithic build takes ~8.5s. Breakdown:
-- Frontend (template instantiation): ~3.0s (60%)
-- LLVM optimizer: ~1.4s (29%)
-- Backend codegen: ~0.3s (6%)
-- Host compilation: ~3.3s
+Measured on MI355X with ROCm 7.1.1 and [optimized opus.hpp](https://github.com/ROCm/aiter/pull/2701):
 
-See [issue #16](https://github.com/carlushuang/gcnasm/issues/16) for analysis of template instantiation costs in opus.hpp.
+| Build | Time | VGPRs | Spill | Occupancy |
+|-------|------|-------|-------|-----------|
+| Device-only (`--cuda-device-only`) | ~1.47s | 251 | 0 | 2 |
+| Full monolithic (`gqa_gfx950.cc`) | ~2.86s | 251 | 0 | 2 |
+
+Device-only breakdown: Frontend ~0.9s, Backend ~0.6s.
+
+### Performance
+
+| N | TFlops |
+|---|--------|
+| 1024 | ~922 |
+| 16384 | ~1268 |
