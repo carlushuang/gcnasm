@@ -1,6 +1,6 @@
 // Device-only: GQA flash attention kernel for gfx950
 // No hip/hip_runtime.h — uses hip_minimal.h for __launch_bounds__ only
-#include "hip_minimal.h"
+#include <opus/hip_minimal.hpp>
 #include <opus/opus.hpp>
 #include "gqa_common.h"
 
