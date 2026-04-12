@@ -269,14 +269,14 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gemm_a8w8_kernel(opus_g
     using D_ACC = typename T::D_ACC;
 
     // Calculate global workgroup and tile indices
-    int wgid = (blockIdx.y * gridDim.x) + blockIdx.x;
+    int wgid = (opus::block_id_y() * opus::grid_size_x()/opus::block_size_x()) + opus::block_id_x();
     const int num_tiles_n = ceil_div(kargs.n, T::B_N);
     int row = (wgid / num_tiles_n) * T::B_M;
     int col = (wgid % num_tiles_n) * T::B_N;
 
-    int batch_id = blockIdx.z;
-    int wave_id = __builtin_amdgcn_readfirstlane(threadIdx.x / get_warp_size());
-    int lane_id = threadIdx.x % get_warp_size();
+    int batch_id = opus::block_id_z();
+    int wave_id = __builtin_amdgcn_readfirstlane(opus::thread_id_x() / get_warp_size());
+    int lane_id = opus::thread_id_x() % get_warp_size();
 
     // Setup global memory pointers for A, B, C matrices
     auto g_a = make_gmem(reinterpret_cast<const D_A*>(kargs.ptr_a) + batch_id * kargs.stride_a_batch + row * kargs.stride_a, (kargs.m - row) * kargs.stride_a * sizeof(D_A));
