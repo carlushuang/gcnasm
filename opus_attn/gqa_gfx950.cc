@@ -71,12 +71,14 @@ struct opus_gqa_kargs {
 template<int Q_TILE_SIZE_ = 32,
         int KV_TILE_SIZE_ = 64,
         int D_TILE_SIZE_ = 128,
-        int NUM_WARPS_ = 8>
+        int NUM_WARPS_ = 8,
+        bool CAUSAL_ = false>
 struct opus_gqa_traits {
     static constexpr int Q_TILE_SIZE = Q_TILE_SIZE_;
     static constexpr int KV_TILE_SIZE = KV_TILE_SIZE_;
     static constexpr int D_TILE_SIZE = D_TILE_SIZE_;
     static constexpr int NUM_WARPS = NUM_WARPS_;
+    static constexpr bool CAUSAL = CAUSAL_;
 
     static constexpr int WARP_SIZE = opus::get_warp_size();
     static constexpr int BLOCK_SIZE = NUM_WARPS * WARP_SIZE;
@@ -337,6 +339,80 @@ __device__ inline void scale_output_tile(V& v_o, typename T::D_ACC scale) {
     opus::static_for<o_len>([&](auto i) { v_o[i.value] *= scale;});
 }
 
+template<int THR_X, int THR_Y>
+__device__ inline void attn_mask_vec2_imm(uint32_t rel_vgpr, uint32_t neg_inf_vgpr,
+                                          uint32_t& x_ref, uint32_t& y_ref) {
+    uint64_t x_mask, y_mask;
+    // uint32_t ox, oy;
+    asm volatile(
+        // x: rel < THR_X ?
+        "v_cmp_lt_i32_e64 %0, %6, %7\n\t"
+        // y: rel < THR_Y ?
+        "v_cmp_lt_i32_e64 %1, %6, %9\n\t"
+        "v_cndmask_b32_e64 %2, %4, %8, %0\n\t"
+        "v_cndmask_b32_e64 %3, %5, %8, %1\n\t"
+        : "=s"(x_mask), "=s"(y_mask), "=v"(x_ref), "=v"(y_ref)
+        : "v"(x_ref), "v"(y_ref), "v"(rel_vgpr),
+          "n"(THR_X), "v"(neg_inf_vgpr), "n"(THR_Y)
+        : "vcc"
+    );
+    // x_ref = ox; y_ref = oy;
+}
+
+template<typename T, typename V>
+__device__ inline void attn_mask_causal_tile(V& v_s, int q_tile_start, int kv_tile_idx, int lane_id) {
+    using D_ACC = typename T::D_ACC;
+    using D_ACC_X2 = opus::vector_t<D_ACC, 2>;
+    using U32_X2 = opus::vector_t<uint32_t, 2>;
+    static_assert(T::GEMM0_E_M == 1, "causal mask expects one Q wave tile");
+    static_assert(T::Q_TILE_SIZE == T::W_N, "causal mask expects Q tile to match wave-N");
+    static_assert(T::KV_TILE_SIZE == T::GEMM0_E_N * T::W_N, "causal mask expects KV expansion along wave-N");
+    static_assert(T::WARP_SIZE % T::W_N == 0, "unsupported warp/wave layout");
+
+    constexpr int elems_per_wave_tile = (T::W_M * T::W_N) / T::WARP_SIZE;
+    constexpr int c_pack = ((16 / sizeof(D_ACC)) < elems_per_wave_tile)
+        ? (16 / sizeof(D_ACC))
+        : elems_per_wave_tile;
+    constexpr int c_rept = elems_per_wave_tile / c_pack;
+    constexpr int kv_group_span = (T::WARP_SIZE / T::W_N) * c_pack;
+    static_assert((elems_per_wave_tile % c_pack) == 0, "unsupported accumulator packing");
+    static_assert(sizeof(D_ACC) == sizeof(uint32_t), "causal mask expects fp32 accumulators");
+    static_assert((c_pack % 2) == 0, "causal mask expects even fp32 pack size");
+
+    const int q_pos = q_tile_start + (lane_id % T::W_N);
+    const int lane_group = lane_id / T::W_N;
+    const int kv_tile_base = kv_tile_idx * T::KV_TILE_SIZE;
+    const uint32_t neg_inf_v = std::bit_cast<uint32_t>(-opus::numeric_limits<D_ACC>::infinity());
+
+    opus::static_for<T::GEMM0_E_N>([&](auto i_n) {
+        constexpr int subtile_idx = i_n.value;
+        constexpr int base_idx = subtile_idx * elems_per_wave_tile;
+        const int row_base = kv_tile_base + subtile_idx * T::W_N + lane_group * c_pack;
+        const uint32_t rel = static_cast<uint32_t>(q_pos - row_base);
+
+        opus::static_for<c_rept>([&](auto i_rept) {
+            constexpr int rept_idx = i_rept.value;
+            constexpr int rept_base_idx = base_idx + rept_idx * c_pack;
+            constexpr int thr_base = rept_idx * kv_group_span;
+            opus::static_for<c_pack / 2>([&](auto i_pair) {
+                constexpr int pair_idx = i_pair.value;
+                constexpr int idx = rept_base_idx + pair_idx * 2;
+                constexpr int thr_x = thr_base + pair_idx * 2;
+                constexpr int thr_y = thr_x + 1;
+
+                auto pair_acc = opus::slice(v_s, opus::number<idx>{}, opus::number<idx + 2>{});
+                auto pair_bits = __builtin_bit_cast(U32_X2, pair_acc);
+                uint32_t x_ref = pair_bits[0];
+                uint32_t y_ref = pair_bits[1];
+                attn_mask_vec2_imm<thr_x, thr_y>(rel, neg_inf_v, x_ref, y_ref);
+                pair_bits[0] = x_ref;
+                pair_bits[1] = y_ref;
+                opus::set_slice(v_s, __builtin_bit_cast(D_ACC_X2, pair_bits), opus::number<idx>{}, opus::number<idx + 2>{});
+            });
+        });
+    });
+}
+
 // ─── GQA kernel: template on traits; K/V in shared, Q in registers, Flash Attention online softmax ───
 template<class Traits>
 __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kargs kargs) {
@@ -355,6 +431,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     const int lane_id = __builtin_amdgcn_workitem_id_x() % T::WARP_SIZE;
 
     const int q_start = block_tile_idx * T::NUM_WARPS * T::Q_TILE_SIZE;
+    [[maybe_unused]] const int q_tile_start = q_start + warp_id * T::Q_TILE_SIZE;
 
     // Create global memory tensors
     auto g_q = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_q) + b * kargs.stride_q_b + q_start * kargs.stride_q_n + h * kargs.stride_q_h);
@@ -418,12 +495,19 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     const int stagger = warp_id / 4;
     const int num_kv_tiles = ceil_div(kargs.N, T::KV_TILE_SIZE);
+    int max_num_tiles = num_kv_tiles;
+    if constexpr (T::CAUSAL) {
+        const int block_q_end = q_start + T::NUM_WARPS * T::Q_TILE_SIZE;
+        const int causal_num_tiles = ceil_div(block_q_end, T::KV_TILE_SIZE);
+        max_num_tiles = causal_num_tiles < max_num_tiles ? causal_num_tiles : max_num_tiles;
+    }
     const int kv_tile_stride = T::KV_TILE_SIZE * kargs.stride_kv_n;
 
     constexpr float LOG2_E = 1.44269504089f;
     const float temperature_scale = (1.0f / sqrtf(static_cast<float>(kargs.D))) * LOG2_E;
 
     auto kv_offset = [&](int tile_idx) { return tile_idx * kv_tile_stride; };
+    [[maybe_unused]] int current_kv_tile_idx = 0;
 
     // Prologue
     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_offset(0));
@@ -446,6 +530,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_s_barrier();
 
     v_s[0] = mma0(v_q, v_k);
+    if constexpr (T::CAUSAL) {
+        if (q_tile_start < (current_kv_tile_idx + 1) * T::KV_TILE_SIZE) {
+            attn_mask_causal_tile<T>(v_s[0], q_tile_start, current_kv_tile_idx, lane_id);
+        }
+    }
     m_row = attn_row_max<T>(v_s[0]);
     attn_sub_row<T>(v_s[0], m_row);
     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
@@ -457,6 +546,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     __builtin_amdgcn_sched_barrier(0);
     v_k = load<T::VEC_KV>(s_k[1], u_rk);
+    current_kv_tile_idx = 1;
     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_offset(2));
     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(1));
     s_waitcnt_lgkmcnt(0_I);
@@ -465,7 +555,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_s_barrier();
 
     // Main loop
-    for (int j = 3; j < num_kv_tiles - 1; j += 2) {
+    for (int j = 3; j < max_num_tiles - 1; j += 2) {
         // Cluster 0:
         v_s[1] = mma0(v_q, v_k);
         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
@@ -506,7 +596,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
         attn_sub_row<T>(v_s[1], row_max);
-	asm volatile("" : "+v"(v_s[1]) ::);
+        asm volatile("" : "+v"(v_s[1]) ::);
         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         sched_barrier_pairs<6, 5, 2>();
         sched_barrier_exp_pairs<6, 3, 2>();
@@ -518,6 +608,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         // Cluster 3:
         async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_offset(j - 1));
         v_k = load<T::VEC_KV>(s_k[0], u_rk);
+        current_kv_tile_idx = j - 1;
         s_waitcnt_lgkmcnt(0_I);
         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         __builtin_amdgcn_sched_barrier(0);
@@ -539,6 +630,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         // Cluster 5:
         async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_offset(j + 1));
         v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+        if constexpr (T::CAUSAL) {
+            const int kv_end_pos = j * T::KV_TILE_SIZE;
+            if (q_tile_start < kv_end_pos) {
+                attn_mask_causal_tile<T>(v_s[0], q_tile_start, current_kv_tile_idx, lane_id);
+            }
+        }
         s_waitcnt_lgkmcnt(0_I);
         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         __builtin_amdgcn_sched_barrier(0);
@@ -576,6 +673,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         // Cluster 7:
         async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(j));
         v_k = load<T::VEC_KV>(s_k[1], u_rk);
+        current_kv_tile_idx = j;
         s_waitcnt_lgkmcnt(0_I);
         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         __builtin_amdgcn_sched_barrier(0);
@@ -597,8 +695,14 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 1:
-    async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_offset(num_kv_tiles - 1));
+    async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_offset(max_num_tiles - 1));
     v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+    if constexpr (T::CAUSAL) {
+        const int kv_end_pos = (max_num_tiles - 2) * T::KV_TILE_SIZE;
+        if (q_tile_start < kv_end_pos) {
+            attn_mask_causal_tile<T>(v_s[1], q_tile_start, current_kv_tile_idx, lane_id);
+        }
+    }
     s_waitcnt_lgkmcnt(0_I);
     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
@@ -626,8 +730,9 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 3:
-    async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_offset(num_kv_tiles - 2));
+    async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_offset(max_num_tiles - 2));
     v_k = load<T::VEC_KV>(s_k[0], u_rk);
+    current_kv_tile_idx = max_num_tiles - 2;
     s_waitcnt_lgkmcnt(0_I);
     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
@@ -640,6 +745,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
     l_row += attn_sum<T>(v_s[1]);
     v_p = opus::cast<D_ATTN>(v_s[1]);
+    asm volatile("" : "+v"(v_p) ::);
     sched_barrier_exp_pairs<6, 3, 7>();
     sched_barrier_pairs<10, 5, 7>();
     __builtin_amdgcn_sched_barrier(0);
@@ -648,6 +754,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     // Cluster 5:
     v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+    if constexpr (T::CAUSAL) {
+        const int kv_end_pos = (max_num_tiles - 1) * T::KV_TILE_SIZE;
+        if (q_tile_start < kv_end_pos) {
+            attn_mask_causal_tile<T>(v_s[0], q_tile_start, current_kv_tile_idx, lane_id);
+        }
+    }
     s_waitcnt_lgkmcnt(0_I);
     s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
@@ -674,8 +786,9 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 7:
-    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(num_kv_tiles - 1));
+    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(max_num_tiles - 1));
     v_k = load<T::VEC_KV>(s_k[1], u_rk);
+    current_kv_tile_idx = max_num_tiles - 1;
     s_waitcnt_lgkmcnt(0_I);
     s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
@@ -688,6 +801,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
     l_row += attn_sum<T>(v_s[0]);
     v_p = opus::cast<D_ATTN>(v_s[0]);
+    asm volatile("" : "+v"(v_p) ::);
     sched_barrier_exp_pairs<6, 3, 9>();
     sched_barrier_pairs<10, 5, 9>();
     __builtin_amdgcn_sched_barrier(0);
@@ -696,6 +810,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     // Cluster 9:
     v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+    if constexpr (T::CAUSAL) {
+        const int kv_end_pos = max_num_tiles * T::KV_TILE_SIZE;
+        if (q_tile_start < kv_end_pos) {
+            attn_mask_causal_tile<T>(v_s[1], q_tile_start, current_kv_tile_idx, lane_id);
+        }
+    }
     s_waitcnt_lgkmcnt(0_I);
     s_waitcnt_vmcnt(0_I);
     __builtin_amdgcn_sched_barrier(0);
@@ -717,6 +837,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     l_row *= rescale_m;
     l_row += attn_sum<T>(v_s[1]);
     v_p = opus::cast<D_ATTN>(v_s[1]);
+    asm volatile("" : "+v"(v_p) ::);
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
@@ -793,11 +914,15 @@ void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
     CHECK_HIP(hipEventDestroy(stop));
 
     const float avg_time = total_time / iterations;
-    // Approximate FLOPs: 2*B*H*N*N*D (QK^T) + 2*B*H*N*D*N (softmax+PV)
-    const double flops = 4.0 * kargs.B * kargs.H * kargs.N * kargs.N * kargs.D;
+    // Match HipKittens benchmark scripts:
+    //   full attention  -> 4 * B * H * N^2 * D
+    //   causal attention -> half of the full-attention work
+    const double flops = (4.0 * kargs.B * kargs.H * kargs.N * kargs.N * kargs.D)
+                       / (Traits::CAUSAL ? 2.0 : 1.0);
     const double tflops = flops / (avg_time * 1e-3) / 1e12;
 
-    printf("GQA Kernel Performance: avg_time=%.3f ms, %.2f TFlops\n", avg_time, tflops);
+    printf("GQA %s Kernel Performance: avg_time=%.3f ms, %.2f TFlops\n",
+           Traits::CAUSAL ? "Causal" : "Non-causal", avg_time, tflops);
 }
 
 // Validate GQA GPU results against CPU reference
@@ -865,7 +990,7 @@ void gqa_attention_ref(
     const bf16_t* K,  // [B, N, H_KV, D]
     const bf16_t* V,  // [B, N, H_KV, D]
     bf16_t*       O,  // [B, N, H, D]
-    int B, int N, int H, int H_KV, int D)
+    int B, int N, int H, int H_KV, int D, bool causal = false)
 {
     const int GROUP_SIZE = H / H_KV;
     const float scale = 1.0f / std::sqrt(static_cast<float>(D));
@@ -887,8 +1012,9 @@ void gqa_attention_ref(
                 const bf16_t* q_row = Q + b * stride_q_b + i * stride_q_n + h * stride_q_h;
 
                 // ---- Compute attention scores S[j] = Q[b,i,h,:] . K[b,j,h_kv,:] ----
-                std::vector<float> scores(N);
-                for (int j = 0; j < N; j++) {
+                const int max_j = causal ? (i + 1) : N;
+                std::vector<float> scores(max_j);
+                for (int j = 0; j < max_j; j++) {
                     const bf16_t* k_row = K + b * stride_kv_b + j * stride_kv_n + h_kv * stride_kv_h;
                     float dot = 0.0f;
                     for (int d = 0; d < D; d++) {
@@ -900,11 +1026,11 @@ void gqa_attention_ref(
                 // ---- Softmax ----
                 float max_score = *std::max_element(scores.begin(), scores.end());
                 float sum_exp = 0.0f;
-                for (int j = 0; j < N; j++) {
+                for (int j = 0; j < max_j; j++) {
                     scores[j] = std::exp(scores[j] - max_score);
                     sum_exp += scores[j];
                 }
-                for (int j = 0; j < N; j++) {
+                for (int j = 0; j < max_j; j++) {
                     scores[j] /= sum_exp;
                 }
 
@@ -912,7 +1038,7 @@ void gqa_attention_ref(
                 bf16_t* o_row = O + b * stride_q_b + i * stride_q_n + h * stride_q_h;
                 for (int d = 0; d < D; d++) {
                     float acc = 0.0f;
-                    for (int j = 0; j < N; j++) {
+                    for (int j = 0; j < max_j; j++) {
                         const bf16_t* v_row = V + b * stride_kv_b + j * stride_kv_n + h_kv * stride_kv_h;
                         acc += scores[j] * static_cast<float>(v_row[d]);
                     }
@@ -953,8 +1079,9 @@ int main(int argc, char** argv) {
     }
 
     const int GROUP_SIZE = H / H_KV;
-    printf("GQA Attention: B=%d, H=%d, H_KV=%d, GROUP_SIZE=%d, N=%d, D=%d\n",
-           B, H, H_KV, GROUP_SIZE, N, D);
+    using GqaTraits = opus_gqa_traits<32, 64, 128, 8, true>;
+    printf("GQA Attention: B=%d, H=%d, H_KV=%d, GROUP_SIZE=%d, N=%d, D=%d, CAUSAL=%d\n",
+           B, H, H_KV, GROUP_SIZE, N, D, GqaTraits::CAUSAL ? 1 : 0);
 
     // Allocate host memory
     const size_t q_size = (size_t)B * N * H * D;
@@ -999,7 +1126,6 @@ int main(int argc, char** argv) {
     kargs.stride_kv_n = H_KV * D;
     kargs.stride_kv_h = D;
 
-    using GqaTraits = opus_gqa_traits<32, 64, 128, 8>;
     if (D != GqaTraits::D_TILE_SIZE) {
         std::cerr << "This kernel only supports head dimension D=" << GqaTraits::D_TILE_SIZE << ", got D=" << D << "\n";
         return 1;
@@ -1026,11 +1152,11 @@ int main(int argc, char** argv) {
     gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
     CHECK_HIP_KERNEL_LAUNCH();
 
-#if 0
+#if 1
     printf("\nValidating GPU results against CPU reference...\n");
     CHECK_HIP(hipMemcpy(host_o_gpu.get(), dev_o, q_size * sizeof(bf16_t), hipMemcpyDeviceToHost));
     gqa_attention_ref(host_q.get(), host_k.get(), host_v.get(), host_o_ref.get(),
-                      B, N, H, H_KV, D);
+                      B, N, H, H_KV, D, GqaTraits::CAUSAL);
 
     bool all_valid = validate_gqa_results(host_o_ref.get(), host_o_gpu.get(), B, N, H, D);
     printf("\n[Overall] %s\n", all_valid ? "✓ GPU KERNEL VALID" : "✗ GPU KERNEL FAILED");
