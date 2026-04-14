@@ -20,10 +20,11 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 # Kernel objects (heavy — device+host passes, parallelizable via make -j)
+# -D__HIPCC_RTC__ skips implicit __clang_hip_runtime_wrapper.h on host pass (~250ms saved)
 $(BUILD)/%.o: %.cc gqa_gfx950_kernel_template.hpp gqa_common.h | $(BUILD)
-	$(HIPCC) $< $(COMMON_FLAGS) -Rpass-analysis=kernel-resource-usage -c -o $@
+	$(HIPCC) $< $(COMMON_FLAGS) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -c -o $@
 
-# Host object
+# Host object (no -D__HIPCC_RTC__ — needs full HIP runtime for <<<>>> syntax)
 $(HOST_OBJ): $(HOST_SRC) gqa_common.h | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) -c -o $@
 

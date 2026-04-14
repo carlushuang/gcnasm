@@ -5,6 +5,7 @@
 #include <opus/opus.hpp>
 #include "gqa_common.h"
 #include <bit>
+#include <cstdint>
 
 using opus::operator""_I;
 
