@@ -1,4 +1,5 @@
-#include <hip/hip_runtime.h>
+#include <opus/hip_minimal.hpp>
+#include <opus/opus.hpp>
 #include <random>
 #include <iostream>
 #include <numeric>
@@ -7,8 +8,6 @@
 #include <cstdlib>
 #include <cassert>
 #include <omp.h>
-
-#include <opus/opus.hpp>
 
 using bf16_t = __bf16;
 using opus::operator""_I;
@@ -301,7 +300,7 @@ __device__ inline typename T::D_ACC attn_row_max(const V& v_s) {
     opus::static_for<s_len>([&](auto i) {
         row_max = max(row_max, v_s[i.value]);
     });
-    opus::vector_t<uint32_t, 2> res = __builtin_amdgcn_permlane32_swap(std::bit_cast<uint32_t>(row_max), std::bit_cast<uint32_t>(row_max), false, true);
+    opus::vector_t<opus::u32_t, 2> res = __builtin_amdgcn_permlane32_swap(std::bit_cast<opus::u32_t>(row_max), std::bit_cast<opus::u32_t>(row_max), false, true);
     return max(std::bit_cast<float>(res.x), std::bit_cast<float>(res.y));
 }
 
@@ -329,7 +328,7 @@ __device__ inline typename T::D_ACC attn_sum(const V& v_s) {
     opus::static_for<s_len>([&](auto i) {
         row_sum += v_s[i.value];
     });
-    opus::vector_t<uint32_t, 2> res = __builtin_amdgcn_permlane32_swap(std::bit_cast<uint32_t>(row_sum), std::bit_cast<uint32_t>(row_sum), false, true);
+    opus::vector_t<opus::u32_t, 2> res = __builtin_amdgcn_permlane32_swap(std::bit_cast<opus::u32_t>(row_sum), std::bit_cast<opus::u32_t>(row_sum), false, true);
     return std::bit_cast<float>(res.x) + std::bit_cast<float>(res.y);
 }
 
@@ -340,10 +339,10 @@ __device__ inline void scale_output_tile(V& v_o, typename T::D_ACC scale) {
 }
 
 template<int THR_X, int THR_Y>
-__device__ inline void attn_mask_vec2_imm(uint32_t rel_vgpr, uint32_t neg_inf_vgpr,
-                                          uint32_t& x_ref, uint32_t& y_ref) {
+__device__ inline void attn_mask_vec2_imm(opus::u32_t rel_vgpr, opus::u32_t neg_inf_vgpr,
+                                          opus::u32_t& x_ref, opus::u32_t& y_ref) {
     uint64_t x_mask, y_mask;
-    // uint32_t ox, oy;
+    // opus::u32_t ox, oy;
     asm volatile(
         // x: rel < THR_X ?
         "v_cmp_lt_i32_e64 %0, %6, %7\n\t"
@@ -360,10 +359,10 @@ __device__ inline void attn_mask_vec2_imm(uint32_t rel_vgpr, uint32_t neg_inf_vg
 }
 
 template<typename T, typename V>
-__device__ inline void attn_mask_causal_tile(V& v_s, int q_start_pos, int kv_tile_idx, uint32_t neg_inf_v, int lane_id) {
+__device__ inline void attn_mask_causal_tile(V& v_s, int q_start_pos, int kv_tile_idx, opus::u32_t neg_inf_v, int lane_id) {
     using D_ACC = typename T::D_ACC;
     using D_ACC_X2 = opus::vector_t<D_ACC, 2>;
-    using U32_X2 = opus::vector_t<uint32_t, 2>;
+    using U32_X2 = opus::vector_t<opus::u32_t, 2>;
 
     constexpr int elems_per_wave_tile = (T::W_M * T::W_N) / T::WARP_SIZE;
     constexpr int c_pack = 4;
@@ -377,7 +376,7 @@ __device__ inline void attn_mask_causal_tile(V& v_s, int q_start_pos, int kv_til
     opus::static_for<T::GEMM0_E_N>([&](auto i_n) {
         constexpr int base_idx = i_n.value * elems_per_wave_tile;
         const int k_pos = k_start_pos + i_n.value * T::W_N + lane_group * c_pack;
-        const uint32_t rel = static_cast<uint32_t>(q_pos - k_pos);
+        const opus::u32_t rel = static_cast<opus::u32_t>(q_pos - k_pos);
 
         opus::static_for<c_rept>([&](auto i_rept) {
             constexpr int rept_base_idx = base_idx + i_rept.value * c_pack;
@@ -389,8 +388,8 @@ __device__ inline void attn_mask_causal_tile(V& v_s, int q_start_pos, int kv_til
 
                 auto pair_acc = opus::slice(v_s, opus::number<idx>{}, opus::number<idx + 2>{});
                 auto pair_bits = __builtin_bit_cast(U32_X2, pair_acc);
-                uint32_t x_ref = pair_bits[0];
-                uint32_t y_ref = pair_bits[1];
+                opus::u32_t x_ref = pair_bits[0];
+                opus::u32_t y_ref = pair_bits[1];
                 attn_mask_vec2_imm<thr_x, thr_y>(rel, neg_inf_v, x_ref, y_ref);
                 pair_bits[0] = x_ref;
                 pair_bits[1] = y_ref;
@@ -499,7 +498,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     // Causal masking helpers
     [[maybe_unused]] const int q_start_pos = q_block_start + warp_id * T::Q_TILE_SIZE;
-    [[maybe_unused]] const uint32_t neg_inf_v = std::bit_cast<uint32_t>(-opus::numeric_limits<D_ACC>::infinity());
+    [[maybe_unused]] const opus::u32_t neg_inf_v = std::bit_cast<opus::u32_t>(-opus::numeric_limits<D_ACC>::infinity());
 
     auto kv_offset = [&](int tile_idx) { return tile_idx * kv_tile_stride; };
 
@@ -579,8 +578,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
         D_ACC row_max = attn_row_max<T>(v_s[1]);
         sched_barrier_pairs<4, 5, 2>();
-        int below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
-        int all_below = __all(below_thresh);
+        bool below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
+        bool all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
         if (__builtin_expect(all_below, 1)) {
             row_max = m_row;
         } else {
@@ -644,7 +643,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         row_max = attn_row_max<T>(v_s[0]);
         sched_barrier_pairs<4, 5, 4>();
         below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
-        all_below = __all(below_thresh);
+        all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
         if (__builtin_expect(all_below, 1)) {
             row_max = m_row;
         } else {
@@ -1143,7 +1142,7 @@ int main(int argc, char** argv) {
     gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
     CHECK_HIP_KERNEL_LAUNCH();
 
-#if 1
+#if 0
     printf("\nValidating GPU results against CPU reference...\n");
     CHECK_HIP(hipMemcpy(host_o_gpu.get(), dev_o, q_size * sizeof(bf16_t), hipMemcpyDeviceToHost));
     gqa_attention_ref(host_q.get(), host_k.get(), host_v.get(), host_o_ref.get(),

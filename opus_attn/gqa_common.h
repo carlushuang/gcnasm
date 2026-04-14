@@ -26,12 +26,14 @@ struct opus_gqa_kargs {
 template<int Q_TILE_SIZE_ = 32,
         int KV_TILE_SIZE_ = 64,
         int D_TILE_SIZE_ = 128,
-        int NUM_WARPS_ = 8>
+        int NUM_WARPS_ = 8,
+        bool CAUSAL_ = false>
 struct opus_gqa_traits {
     static constexpr int Q_TILE_SIZE = Q_TILE_SIZE_;
     static constexpr int KV_TILE_SIZE = KV_TILE_SIZE_;
     static constexpr int D_TILE_SIZE = D_TILE_SIZE_;
     static constexpr int NUM_WARPS = NUM_WARPS_;
+    static constexpr bool CAUSAL = CAUSAL_;
 
     static constexpr int WARP_SIZE = 64; // AMD wavefront size
     static constexpr int BLOCK_SIZE = NUM_WARPS * WARP_SIZE;
