@@ -1,30 +1,35 @@
 #!/bin/sh
+TOP=$(cd "$(dirname "$0")" && pwd)
+cd "$TOP"
 
-SRC=gqa_gfx950.cc
-OUT=gqa_attn.exe
-TOP=`pwd`
-BUILD="$TOP/build/"
-OPUS_INCLUDE_DIR=${OPUS_INCLUDE_DIR:-/home/carhuang/repo/aiter/csrc/include}
-HIPCC=${HIPCXX:-/opt/rocm/bin/hipcc}
+make clean 2>/dev/null
 
-rm -rf $BUILD ; mkdir $BUILD ; cd $BUILD
-
-echo "=== Monolithic build ==="
+echo "=== Parallel build (make -j) ==="
 START=$(date +%s%N)
-$HIPCC "$TOP/$SRC" \
-  -I"$OPUS_INCLUDE_DIR" \
-  -std=c++20 -fopenmp -O3 -Wall \
-  --offload-arch=gfx950 -ffast-math \
-  -save-temps -Rpass-analysis=kernel-resource-usage \
-  -o "$BUILD/$OUT"
+make -j 2>&1
 RC=$?
 END=$(date +%s%N)
-BUILD_MS=$(( (END - START) / 1000000 ))
-
-echo "Build: ${BUILD_MS} ms (rc=$RC)"
+TOTAL_MS=$(( (END - START) / 1000000 ))
 
 if [ $RC -ne 0 ]; then
-  exit $RC
+    echo "Build FAILED (rc=$RC)"
+    exit 1
 fi
 
-echo "Output: $BUILD/$OUT"
+echo ""
+echo "=== Build time: ${TOTAL_MS} ms ==="
+echo "Output: $TOP/build/gqa_attn.exe"
+echo ""
+
+# Run benchmark
+echo "=== Causal ==="
+./build/gqa_attn.exe --causal
+echo ""
+echo "=== Causal N=16384 ==="
+./build/gqa_attn.exe --causal -n 16384
+echo ""
+echo "=== Non-causal ==="
+./build/gqa_attn.exe --no-causal
+echo ""
+echo "=== Non-causal N=16384 ==="
+./build/gqa_attn.exe --no-causal -n 16384

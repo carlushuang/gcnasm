@@ -1,6 +1,7 @@
-// Device-only: GQA flash attention kernel for gfx950
-// No hip/hip_runtime.h — uses hip_minimal.hpp for __launch_bounds__ only
-#include <opus/hip_minimal.hpp>
+// GQA flash attention kernel template for gfx950
+// Include this header from per-variant .cc files that instantiate specific traits.
+#pragma once
+
 #include <opus/opus.hpp>
 #include "gqa_common.h"
 #include <bit>
@@ -751,5 +752,3 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     store<T::VEC_O>(g_o, v_o_bf16, u_o);
 }
 
-// Explicit template instantiation for the traits used by the host
-template __global__ void gqa_kernel<opus_gqa_traits<32, 64, 128, 8, true>>(opus_gqa_kargs);

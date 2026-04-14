@@ -213,19 +213,34 @@ int main(int argc, char** argv) {
     int N    = 1024;  // sequence length
     int D    = 128;   // head dimension
 
-    // Parse command line arguments
+    // Parse command line arguments. Supports: -n 16384, -n=16384, --seq=16384
+    bool causal = true;
+    auto parse_val = [](const char* arg, const char* flag) -> const char* {
+        size_t len = std::strlen(flag);
+        if (std::strncmp(arg, flag, len) == 0) {
+            if (arg[len] == '=') return arg + len + 1;       // --flag=value
+            if (arg[len] == '\0') return reinterpret_cast<const char*>(1); // --flag value (next arg)
+        }
+        return nullptr;
+    };
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
-        if ((std::strcmp(arg, "-b") == 0 || std::strcmp(arg, "--batch") == 0) && i + 1 < argc)
-            B = std::atoi(argv[++i]);
-        else if ((std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--heads") == 0) && i + 1 < argc)
-            H = std::atoi(argv[++i]);
-        else if ((std::strcmp(arg, "--hkv") == 0) && i + 1 < argc)
-            H_KV = std::atoi(argv[++i]);
-        else if ((std::strcmp(arg, "-n") == 0 || std::strcmp(arg, "--seq") == 0) && i + 1 < argc)
-            N = std::atoi(argv[++i]);
-        else if ((std::strcmp(arg, "-d") == 0 || std::strcmp(arg, "--dim") == 0) && i + 1 < argc)
-            D = std::atoi(argv[++i]);
+        const char* val;
+        if (std::strcmp(arg, "--causal") == 0) { causal = true; continue; }
+        if (std::strcmp(arg, "--no-causal") == 0) { causal = false; continue; }
+        auto try_parse = [&](int& target, const char* s, const char* l) {
+            if ((val = parse_val(arg, s)) || (l && (val = parse_val(arg, l)))) {
+                if (val == reinterpret_cast<const char*>(1)) { if (i + 1 < argc) target = std::atoi(argv[++i]); }
+                else target = std::atoi(val);
+                return true;
+            }
+            return false;
+        };
+        if (try_parse(B, "-b", "--batch")) continue;
+        if (try_parse(H, "-h", "--heads")) continue;
+        if (try_parse(H_KV, "--hkv", nullptr)) continue;
+        if (try_parse(N, "-n", "--seq")) continue;
+        if (try_parse(D, "-d", "--dim")) continue;
     }
 
     if (B <= 0 || H <= 0 || H_KV <= 0 || N <= 0 || D <= 0 || H % H_KV != 0) {
@@ -234,9 +249,8 @@ int main(int argc, char** argv) {
     }
 
     const int GROUP_SIZE = H / H_KV;
-    using GqaTraits = opus_gqa_traits<32, 64, 128, 8, true>;
     printf("GQA Attention: B=%d, H=%d, H_KV=%d, GROUP_SIZE=%d, N=%d, D=%d, CAUSAL=%d\n",
-           B, H, H_KV, GROUP_SIZE, N, D, GqaTraits::CAUSAL ? 1 : 0);
+           B, H, H_KV, GROUP_SIZE, N, D, causal ? 1 : 0);
 
     // Allocate host memory
     const size_t q_size = (size_t)B * N * H * D;
@@ -281,47 +295,46 @@ int main(int argc, char** argv) {
     kargs.stride_kv_n = H_KV * D;
     kargs.stride_kv_h = D;
 
-    if (D != GqaTraits::D_TILE_SIZE) {
-        std::cerr << "This kernel only supports head dimension D=" << GqaTraits::D_TILE_SIZE << ", got D=" << D << "\n";
-        return 1;
-    }
-    if ((N % GqaTraits::KV_TILE_SIZE) != 0 || (N / GqaTraits::KV_TILE_SIZE) < 6) {
-        std::cerr << "This attend-style pipeline requires N to be a multiple of "
-                  << GqaTraits::KV_TILE_SIZE << " and span at least 6 KV tiles, got N=" << N << "\n";
-        return 1;
-    }
-    if ((N % (GqaTraits::Q_TILE_SIZE * GqaTraits::NUM_WARPS)) != 0) {
-        std::cerr << "This kernel requires N to be a multiple of "
-                  << (GqaTraits::Q_TILE_SIZE * GqaTraits::NUM_WARPS)
-                  << " so every warp maps to a valid Q tile, got N=" << N << "\n";
-        return 1;
-    }
-    const int num_q_tiles = ceil_div(N, GqaTraits::Q_TILE_SIZE);
-    const int num_q_blocks = ceil_div(num_q_tiles, GqaTraits::NUM_WARPS);
-    dim3 grid(H, num_q_blocks, B);
-    dim3 block(GqaTraits::BLOCK_SIZE);
+    // Dispatch to causal or non-causal kernel
+    auto run = [&]<typename GqaTraits>(GqaTraits) {
+        if (D != GqaTraits::D_TILE_SIZE) {
+            std::cerr << "This kernel only supports head dimension D=" << GqaTraits::D_TILE_SIZE << ", got D=" << D << "\n";
+            return 1;
+        }
+        if ((N % GqaTraits::KV_TILE_SIZE) != 0 || (N / GqaTraits::KV_TILE_SIZE) < 6) {
+            std::cerr << "This attend-style pipeline requires N to be a multiple of "
+                      << GqaTraits::KV_TILE_SIZE << " and span at least 6 KV tiles, got N=" << N << "\n";
+            return 1;
+        }
+        if ((N % (GqaTraits::Q_TILE_SIZE * GqaTraits::NUM_WARPS)) != 0) {
+            std::cerr << "This kernel requires N to be a multiple of "
+                      << (GqaTraits::Q_TILE_SIZE * GqaTraits::NUM_WARPS)
+                      << " so every warp maps to a valid Q tile, got N=" << N << "\n";
+            return 1;
+        }
+        const int num_q_tiles = ceil_div(N, GqaTraits::Q_TILE_SIZE);
+        const int num_q_blocks = ceil_div(num_q_tiles, GqaTraits::NUM_WARPS);
+        dim3 grid(H, num_q_blocks, B);
+        dim3 block(GqaTraits::BLOCK_SIZE);
 
-    printf("GQA kernel launch config: grid=(%d,%d,%d), block=%d (NUM_WARPS=%d), smem=%zu bytes (K/V tiles)\n",
-           grid.x, grid.y, grid.z, (int)block.x, GqaTraits::NUM_WARPS, GqaTraits::smem_size_bytes());
+        printf("GQA kernel launch config: grid=(%d,%d,%d), block=%d (NUM_WARPS=%d), smem=%zu bytes (K/V tiles)\n",
+               grid.x, grid.y, grid.z, (int)block.x, GqaTraits::NUM_WARPS, GqaTraits::smem_size_bytes());
 
-    gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
-    CHECK_HIP_KERNEL_LAUNCH();
+        gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
+        CHECK_HIP_KERNEL_LAUNCH();
 
-#if 0
-    printf("\nValidating GPU results against CPU reference...\n");
-    CHECK_HIP(hipMemcpy(host_o_gpu.get(), dev_o, q_size * sizeof(bf16_t), hipMemcpyDeviceToHost));
-    gqa_attention_ref(host_q.get(), host_k.get(), host_v.get(), host_o_ref.get(),
-                      B, N, H, H_KV, D, GqaTraits::CAUSAL);
+        printf("\n");
+        benchmark_gqa_kernel<GqaTraits>(kargs, grid, block);
+        printf("\n");
+        return 0;
+    };
 
-    bool all_valid = validate_gqa_results(host_o_ref.get(), host_o_gpu.get(), B, N, H, D);
-    printf("\n[Overall] %s\n", all_valid ? "✓ GPU KERNEL VALID" : "✗ GPU KERNEL FAILED");
-#endif
-
-#if 1
-    printf("\n");
-    benchmark_gqa_kernel<GqaTraits>(kargs, grid, block);
-    printf("\n");
-#endif
+    int rc;
+    if (causal)
+        rc = run(opus_gqa_traits<32, 64, 128, 8, true>{});
+    else
+        rc = run(opus_gqa_traits<32, 64, 128, 8, false>{});
+    if (rc) return rc;
 
     // Cleanup
     CHECK_HIP(hipFree(dev_q));
