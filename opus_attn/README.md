@@ -121,7 +121,12 @@ Measured on MI355X with ROCm 7.1.1 and [optimized opus.hpp](https://github.com/R
 
 ## Performance
 
-| N | Causal TFlops | Non-causal TFlops |
-|---:|---:|---:|
-| 1024 | 418 | 938 |
-| 16384 | 871 | 949 |
+B=16, H=64, H_KV=8, D=128, measured on MI355X:
+
+| N | Causal TFlops | Causal Time | Non-causal TFlops | Non-causal Time |
+|---:|---:|---:|---:|---:|
+| 1024 | 648 | 0.42 ms | 939 | 0.59 ms |
+| 2048 | 920 | 1.20 ms | 1124 | 1.96 ms |
+| 4096 | 1085 | 4.05 ms | 1212 | 7.26 ms |
+| 8192 | 1178 | 14.94 ms | 1253 | 28.09 ms |
+| 16384 | 1233 | 57.07 ms | 1278 | 110.14 ms |
