@@ -215,6 +215,7 @@ int main(int argc, char** argv) {
 
     // Parse command line arguments. Supports: -n 16384, -n=16384, --seq=16384
     bool causal = true;
+    int verify = 0;
     auto parse_val = [](const char* arg, const char* flag) -> const char* {
         size_t len = std::strlen(flag);
         if (std::strncmp(arg, flag, len) == 0) {
@@ -241,6 +242,7 @@ int main(int argc, char** argv) {
         if (try_parse(H_KV, "--hkv", nullptr)) continue;
         if (try_parse(N, "-n", "--seq")) continue;
         if (try_parse(D, "-d", "--dim")) continue;
+        if (try_parse(verify, "-v", "--verify")) continue;
     }
 
     if (B <= 0 || H <= 0 || H_KV <= 0 || N <= 0 || D <= 0 || H % H_KV != 0) {
@@ -322,6 +324,17 @@ int main(int argc, char** argv) {
 
         gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
         CHECK_HIP_KERNEL_LAUNCH();
+
+        if (verify) {
+            printf("\nValidating GPU results against CPU reference...\n");
+            CHECK_HIP(hipMemcpy(host_o_gpu.get(), dev_o, q_size * sizeof(bf16_t), hipMemcpyDeviceToHost));
+            gqa_attention_ref(host_q.get(), host_k.get(), host_v.get(), host_o_ref.get(),
+                              B, N, H, H_KV, D, GqaTraits::CAUSAL);
+
+            bool all_valid = validate_gqa_results(host_o_ref.get(), host_o_gpu.get(), B, N, H, D);
+            printf("\n[Overall] %s\n", all_valid ? "✓ GPU KERNEL VALID" : "✗ GPU KERNEL FAILED");
+            if (!all_valid) return 1;
+        }
 
         printf("\n");
         benchmark_gqa_kernel<GqaTraits>(kargs, grid, block);
