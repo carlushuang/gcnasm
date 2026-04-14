@@ -100,16 +100,22 @@ Measured on MI355X with ROCm 7.1.1 and [optimized opus.hpp](https://github.com/R
 
 | Build mode | Time | Notes |
 |------------|------|-------|
-| `make -j` (parallel) | **~1.9s** | Both kernel variants + host compiled in parallel |
-| `make` (sequential) | ~4.7s | Causal + non-causal + host sequentially |
+| `make -j` (parallel) | **~1.35s** | Both kernel variants + host compiled in parallel |
+| `make` (sequential) | ~4.2s | Causal + non-causal + host sequentially |
 | Monolithic (`monolithic/rebuild.sh`) | ~2.9s | Single file, host+device |
+
+### Compile-time techniques applied
+
+- **`__HIP_DEVICE_COMPILE__` guard**: kernel .cc files skip the full kernel body on the host pass, providing only an empty stub for `__device_stub__` generation (~580ms saved per kernel file)
+- **`-D__HIPCC_RTC__`**: applied to kernel .cc files to skip the implicit `__clang_hip_runtime_wrapper.h` on the host pass (~250ms saved per kernel file)
+- **Parallel build**: causal, non-causal, and host compile simultaneously via `make -j`
 
 ### Per-file breakdown
 
 | File | Time | VGPRs | Spill | Occ |
 |------|------|-------|-------|-----|
-| `gqa_gfx950_kernel_causal.cc` | ~1.9s | 244 | 0 | 2 |
-| `gqa_gfx950_kernel_noncausal.cc` | ~1.9s | 238 | 0 | 2 |
+| `gqa_gfx950_kernel_causal.cc` | ~1.3s | 244 | 0 | 2 |
+| `gqa_gfx950_kernel_noncausal.cc` | ~1.3s | 238 | 0 | 2 |
 | `gqa_gfx950_host.cc` | ~0.9s | — | — | — |
 | Link | ~0.03s | — | — | — |
 
