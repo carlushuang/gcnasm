@@ -77,6 +77,7 @@ cd monolithic
 | `-d`, `--dim` | Head dimension (must be 128) | 128 |
 | `--causal` | Enable causal masking | (default) |
 | `--no-causal` | Disable causal masking | |
+| `-v`, `--verify` | CPU reference verification (0=off, 1=on) | 0 |
 
 All flags support both `-n 16384` and `-n=16384` syntax.
 
