@@ -2,13 +2,14 @@
 
 TOP=`pwd`
 BUILD="$TOP/build/"
-OPUS_INCLUDE_DIR=/home/carhuang/repo/aiter/csrc/include
+OUT=gqa_attn.exe
+OPUS_INCLUDE_DIR=${OPUS_INCLUDE_DIR:-/home/carhuang/repo/aiter/csrc/include}
 HIPCC=${HIPCXX:-/opt/rocm/bin/hipcc}
 COMMON_FLAGS="-I$TOP -I$OPUS_INCLUDE_DIR -std=c++20 -fopenmp -O3 -Wall --offload-arch=gfx950 -ffast-math"
 
 rm -rf $BUILD ; mkdir $BUILD ; cd $BUILD
 
-echo "=== Compiling device kernel (no hip_runtime.h) ==="
+echo "=== Compiling device kernel (with hip_minimal.hpp) ==="
 START_DEV=$(date +%s%N)
 $HIPCC "$TOP/gqa_gfx950_kernel.cc" \
   $COMMON_FLAGS \
@@ -25,7 +26,7 @@ if [ $DEV_RC -ne 0 ]; then
 fi
 
 echo ""
-echo "=== Compiling host code (with hip_runtime.h) ==="
+echo "=== Compiling host code (with hip_minimal.hpp) ==="
 START_HOST=$(date +%s%N)
 $HIPCC "$TOP/gqa_gfx950_host.cc" \
   $COMMON_FLAGS \
@@ -45,7 +46,7 @@ echo "=== Linking ==="
 START_LINK=$(date +%s%N)
 $HIPCC "$BUILD/gqa_kernel.o" "$BUILD/gqa_host.o" \
   --offload-arch=gfx950 -fopenmp \
-  -o "$BUILD/gqa_attn.exe" 2>&1
+  -o "$BUILD/$OUT" 2>&1
 LINK_RC=$?
 END_LINK=$(date +%s%N)
 LINK_MS=$(( (END_LINK - START_LINK) / 1000000 ))
@@ -58,3 +59,4 @@ echo "Host compile:   ${HOST_MS} ms"
 echo "Link:           ${LINK_MS} ms"
 TOTAL_MS=$(( DEV_MS + HOST_MS + LINK_MS ))
 echo "Total:          ${TOTAL_MS} ms"
+echo "Output:         $BUILD$OUT"
