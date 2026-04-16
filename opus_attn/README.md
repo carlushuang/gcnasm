@@ -115,8 +115,8 @@ Measured on MI355X with ROCm 7.1.1 and [optimized opus.hpp](https://github.com/R
 
 | File | Time | VGPRs | Spill | Occ |
 |------|------|-------|-------|-----|
-| `gqa_gfx950_kernel_causal.cc` | ~1.3s | 244 | 0 | 2 |
-| `gqa_gfx950_kernel_noncausal.cc` | ~1.3s | 238 | 0 | 2 |
+| `gqa_gfx950_kernel_causal.cc` | ~1.3s | 236 | 0 | 2 |
+| `gqa_gfx950_kernel_noncausal.cc` | ~1.3s | 232 | 0 | 2 |
 | `gqa_gfx950_host.cc` | ~0.9s | — | — | — |
 | Link | ~0.03s | — | — | — |
 

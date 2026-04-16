@@ -207,22 +207,21 @@ __device__ inline auto make_layout_gk_gv(int warp_id, int lane_id, int stride_kv
 
 // Create layout for storing K matrix to shared memory
 template<typename T, int smem_padding>
-__device__ inline auto make_layout_sk_sv(int warp_id, int lane_id) {
+__device__ inline auto make_layout_sk_sv(int warp_id) {
     constexpr auto sk_block_shape = opus::make_tuple(
         opus::number<T::smem_d_rpt>{},
         opus::number<T::smem_n_rpt / T::NUM_WARPS>{},
         opus::number<T::NUM_WARPS>{},
-        opus::number<opus::get_warp_size()>{},
         opus::number<T::VEC_KV>{});
 
     constexpr auto sk_block_dim = opus::make_tuple(
         opus::make_tuple(opus::y_dim{}, opus::y_dim{}, opus::p_dim{}),
-        opus::make_tuple(opus::p_dim{}, opus::y_dim{}));
+        opus::make_tuple(opus::y_dim{}));
 
     return opus::make_layout(
         sk_block_shape,
         opus::unfold_x_stride(sk_block_dim, sk_block_shape, opus::tuple{opus::number<T::smem_linear_wave + smem_padding>{}, 1_I}),
-        opus::unfold_p_coord(sk_block_dim, opus::tuple{warp_id, lane_id}));
+        opus::unfold_p_coord(sk_block_dim, opus::tuple{warp_id}));
 }
 
 // Create layout for reading K matrix from shared memory to registers
@@ -407,11 +406,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     using D_ATTN = typename T::D_ATTN;
     using D_ACC = typename T::D_ACC;
 
-    const int workgroup_x = __builtin_amdgcn_workgroup_id_x();
-    const int q_block_idx = __builtin_amdgcn_workgroup_id_y();
-    const int b = __builtin_amdgcn_workgroup_id_z();
-    const int warp_id = __builtin_amdgcn_readfirstlane(__builtin_amdgcn_workitem_id_x() / T::WARP_SIZE);
-    const int lane_id = __builtin_amdgcn_workitem_id_x() % T::WARP_SIZE;
+    const int workgroup_x = block_id_x();
+    const int q_block_idx = block_id_y();
+    const int b = block_id_z();
+    const int warp_id = __builtin_amdgcn_readfirstlane(thread_id_x() / T::WARP_SIZE);
+    const int lane_id = thread_id_x() % T::WARP_SIZE;
     const int stagger = warp_id / 4;
 
     const int group_size = kargs.H / kargs.H_KV;
@@ -455,10 +454,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Partition layouts
     auto u_q  = make_layout_q<T>(warp_id, lane_id, kargs.stride_q_n);
     auto u_gk = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
-    auto u_sk = make_layout_sk_sv<T, T::smem_padding_16B>(warp_id, lane_id);
+    auto u_sk = make_layout_sk_sv<T, T::smem_padding_16B>(warp_id);
     auto u_rk = make_layout_rk<T>(lane_id);
     auto u_gv = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
-    auto u_sv = make_layout_sk_sv<T, T::smem_padding_64B>(warp_id, lane_id);
+    auto u_sv = make_layout_sk_sv<T, T::smem_padding_64B>(warp_id);
     auto u_rv = make_layout_rv<T>(lane_id);
 
     // Register fragments
@@ -518,7 +517,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     v_k = load<T::VEC_KV>(s_k[0], u_rk);
     __builtin_amdgcn_sched_barrier(0);
     s_waitcnt_lgkmcnt(0_I);
-    s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
+    s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
 
@@ -754,7 +753,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         }
     }
     s_waitcnt_lgkmcnt(0_I);
-    s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
+    s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -782,7 +781,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_offset(max_num_tiles - 1));
     v_k = load<T::VEC_KV>(s_k[1], u_rk);
     s_waitcnt_lgkmcnt(0_I);
-    s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
+    s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
