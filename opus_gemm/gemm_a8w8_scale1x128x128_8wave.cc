@@ -326,7 +326,7 @@ inline __device__ auto make_layout_sfa(int lane_id, int wave_id_m, int stride_sf
 
     return opus::make_layout(
         sfa_block_shape,
-        opus::unfold_x_stride(sfa_block_dim, sfa_block_shape, opus::tuple{stride_sfa, 1_I}),
+        opus::unfold_x_stride(sfa_block_dim, sfa_block_shape, opus::tuple{1_I, stride_sfa}),
         opus::unfold_p_coord(sfa_block_dim, opus::tuple{wave_id_m, lane_id % T::W_M}));
 }
 
@@ -358,7 +358,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gemm_a8w8_kernel(opus_g
     auto g_c = make_gmem(reinterpret_cast<D_C*>(kargs.ptr_c) + batch_id*kargs.stride_c_batch + row*kargs.stride_c + col);
 
     // Setup global memory pointers for SFA, SFB matrices
-    auto g_sfa = make_gmem(reinterpret_cast<const D_SF*>(kargs.ptr_sfa) + batch_id*kargs.stride_sfa_batch + static_cast<int>(row/T::GROUP_M)*kargs.stride_sfa);
+    auto g_sfa = make_gmem(reinterpret_cast<const D_SF*>(kargs.ptr_sfa) + batch_id*kargs.stride_sfa_batch + static_cast<int>(row/T::GROUP_M));
     auto g_sfb = make_gmem(reinterpret_cast<const D_SF*>(kargs.ptr_sfb) + batch_id*kargs.stride_sfb_batch + static_cast<int>(col/T::GROUP_N)*kargs.stride_sfb);
 
     // Calculate wave position in the output tile
@@ -423,7 +423,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gemm_a8w8_kernel(opus_g
         return half_tile_n * T::HALF_B_N * kargs.stride_b + tile_k * T::B_K;
     };
     auto sfa_offset = [&](int half_tile_m, int tile_k) {
-        return half_tile_m * (T::HALF_B_M / T::GROUP_M) * kargs.stride_sfa + tile_k * (T::B_K / T::GROUP_K);
+        return half_tile_m * (T::HALF_B_M / T::GROUP_M) + tile_k * (T::B_K / T::GROUP_K) * kargs.stride_sfa;
     };
     auto sfb_offset = [&](int half_tile_n, int tile_k) {
         return half_tile_n * (T::HALF_B_N / T::GROUP_N) * kargs.stride_sfb + tile_k * (T::B_K / T::GROUP_K);
@@ -929,7 +929,7 @@ int main(int argc, char** argv) {
     kargs.stride_c_batch = M * N;
     kargs.ptr_sfa = dev_sfa;
     kargs.ptr_sfb = dev_sfb;
-    kargs.stride_sfa = num_groups_k;
+    kargs.stride_sfa = num_groups_m;
     kargs.stride_sfb = num_groups_k;
     kargs.stride_sfa_batch = num_groups_m * num_groups_k;
     kargs.stride_sfb_batch = num_groups_n * num_groups_k;
@@ -947,7 +947,7 @@ int main(int argc, char** argv) {
     
     CHECK_HIP_KERNEL_LAUNCH();
 
-#if 0
+#if 1
     // Copy fp32 results back to host for validation
     CHECK_HIP(hipMemcpy(host_c_out.get(), dev_c, batch * M * N * sizeof(fp32_t), hipMemcpyDeviceToHost));
 
