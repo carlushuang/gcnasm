@@ -2,7 +2,7 @@ OPUS_INCLUDE_DIR ?= /path/to/aiter/csrc/include
 HIPCC           ?= /opt/rocm/bin/hipcc
 ARCH            ?= gfx950
 
-COMMON_FLAGS = -I. -I$(OPUS_INCLUDE_DIR) -std=c++20 -fopenmp -O3 -Wall --offload-arch=$(ARCH) -ffast-math
+COMMON_FLAGS = -I. -I$(OPUS_INCLUDE_DIR) -std=c++17 -fopenmp -O3 -Wall --offload-arch=$(ARCH) -ffast-math
 
 BUILD = build
 OUT   = $(BUILD)/gemm_a8w8_blockscale.exe

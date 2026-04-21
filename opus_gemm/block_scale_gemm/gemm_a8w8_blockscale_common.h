@@ -69,7 +69,6 @@ struct gemm_a8w8_blockscale_traits {
     static constexpr int GROUP_N = GROUP_N_;
     static constexpr int GROUP_K = GROUP_K_;
 
-    // fp8 tiles use 1-byte elements, so the 16B compact-pixel rule maps directly to elements.
     static constexpr int smem_linear_wave = WARP_SIZE * 16;
     static constexpr int smem_sub = smem_linear_wave / B_K;
     static constexpr int smem_m_rep = HALF_B_M / smem_sub;

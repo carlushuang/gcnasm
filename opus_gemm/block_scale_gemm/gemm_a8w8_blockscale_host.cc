@@ -1,6 +1,5 @@
-#include <opus/hip_minimal.hpp>
 #include <hip/hip_fp8.h>
-
+#include <opus/hip_minimal.hpp>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -8,7 +7,6 @@
 #include <iostream>
 #include <memory>
 #include <random>
-
 #include <omp.h>
 
 #include "gemm_a8w8_blockscale_common.h"
@@ -27,9 +25,9 @@ __global__ void gemm_a8w8_blockscale_kernel(opus_gemm_kargs kargs);
 
 #define CHECK_HIP_KERNEL_LAUNCH() CHECK_HIP(hipGetLastError())
 
+using GemmTraits = gemm_a8w8_blockscale_traits<>;
 using host_fp8_t = __hip_fp8_e4m3;
 using fp32_t = float;
-using GemmTraits = gemm_a8w8_blockscale_traits<>;
 
 template<typename T>
 void rand_vector(T* ptr, std::size_t size, fp32_t min_val = 0.0f, fp32_t max_val = 1.0f) {
@@ -137,18 +135,41 @@ int main(int argc, char** argv) {
     int N = 512;
     int K = 256;
     int batch = 8;
+    int verify = 0;
 
+    auto parse_val = [](const char* arg, const char* flag) -> const char* {
+        const std::size_t len = std::strlen(flag);
+        if (std::strncmp(arg, flag, len) == 0) {
+            if (arg[len] == '=') {
+                return arg + len + 1;
+            }
+            if (arg[len] == '\0') {
+                return reinterpret_cast<const char*>(1);
+            }
+        }
+        return nullptr;
+    };
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
-        if ((std::strcmp(arg, "-m") == 0 || std::strcmp(arg, "--m") == 0) && i + 1 < argc) {
-            M = std::atoi(argv[++i]);
-        } else if ((std::strcmp(arg, "-n") == 0 || std::strcmp(arg, "--n") == 0) && i + 1 < argc) {
-            N = std::atoi(argv[++i]);
-        } else if ((std::strcmp(arg, "-k") == 0 || std::strcmp(arg, "--k") == 0) && i + 1 < argc) {
-            K = std::atoi(argv[++i]);
-        } else if ((std::strcmp(arg, "-b") == 0 || std::strcmp(arg, "--b") == 0) && i + 1 < argc) {
-            batch = std::atoi(argv[++i]);
-        }
+        const char* val = nullptr;
+        auto try_parse = [&](int& target, const char* short_flag, const char* long_flag) {
+            if ((val = parse_val(arg, short_flag)) || (long_flag && (val = parse_val(arg, long_flag)))) {
+                if (val == reinterpret_cast<const char*>(1)) {
+                    if (i + 1 < argc) {
+                        target = std::atoi(argv[++i]);
+                    }
+                } else {
+                    target = std::atoi(val);
+                }
+                return true;
+            }
+            return false;
+        };
+        if (try_parse(M, "-m", "--m")) continue;
+        if (try_parse(N, "-n", "--n")) continue;
+        if (try_parse(K, "-k", "--k")) continue;
+        if (try_parse(batch, "-b", "--b")) continue;
+        if (try_parse(verify, "-v", "--verify")) continue;
     }
 
     if (M <= 0 || N <= 0 || K <= 0 || batch <= 0) {
@@ -171,8 +192,12 @@ int main(int argc, char** argv) {
 
     auto host_a = std::make_unique<host_fp8_t[]>(static_cast<std::size_t>(batch) * M * K);
     auto host_b = std::make_unique<host_fp8_t[]>(static_cast<std::size_t>(batch) * N * K);
-    auto host_c = std::make_unique<fp32_t[]>(static_cast<std::size_t>(batch) * M * N);
-    auto host_c_out = std::make_unique<fp32_t[]>(static_cast<std::size_t>(batch) * M * N);
+    std::unique_ptr<fp32_t[]> host_c;
+    std::unique_ptr<fp32_t[]> host_c_out;
+    if (verify) {
+        host_c = std::make_unique<fp32_t[]>(static_cast<std::size_t>(batch) * M * N);
+        host_c_out = std::make_unique<fp32_t[]>(static_cast<std::size_t>(batch) * M * N);
+    }
 
     const std::size_t sfa_count = static_cast<std::size_t>(batch) * num_groups_m * num_groups_k;
     const std::size_t sfb_count = static_cast<std::size_t>(batch) * num_groups_n * num_groups_k;
@@ -223,7 +248,7 @@ int main(int argc, char** argv) {
 
     const int num_tiles_m = ceil_div(M, BLOCK_M);
     const int num_tiles_n = ceil_div(N, BLOCK_N);
-    dim3 grid(num_tiles_n, num_tiles_m, batch);
+    dim3 grid(num_tiles_m * num_tiles_n, 1, batch);
     dim3 block(BLOCK_SIZE);
 
     std::printf("Launching GEMM kernel: M=%d, N=%d, K=%d, grid=(%u,%u,%u), block=%d\n",
@@ -232,25 +257,28 @@ int main(int argc, char** argv) {
     gemm_a8w8_blockscale_kernel<GemmTraits><<<grid, block>>>(kargs);
     CHECK_HIP_KERNEL_LAUNCH();
 
-    CHECK_HIP(hipMemcpy(host_c_out.get(), dev_c, static_cast<std::size_t>(batch) * M * N * sizeof(fp32_t),
-                        hipMemcpyDeviceToHost));
+    if (verify) {
+        std::printf("\nValidating GPU results against CPU reference...\n");
+        CHECK_HIP(hipMemcpy(host_c_out.get(), dev_c, static_cast<std::size_t>(batch) * M * N * sizeof(fp32_t),
+                            hipMemcpyDeviceToHost));
 
-    bool all_valid = true;
-    for (int b = 0; b < batch; ++b) {
-        gemm_ref(host_a.get() + static_cast<std::size_t>(b) * M * K,
-                 host_b.get() + static_cast<std::size_t>(b) * N * K,
-                 host_sfa.get() + static_cast<std::size_t>(b) * kargs.stride_sfa_batch,
-                 host_sfb.get() + static_cast<std::size_t>(b) * kargs.stride_sfb_batch,
-                 host_c.get() + static_cast<std::size_t>(b) * M * N,
-                 M, N, K, K, K, N, kargs.stride_sfa, kargs.stride_sfb, GROUP_M, GROUP_N, GROUP_K);
-        const bool valid = valid_vector(host_c.get() + static_cast<std::size_t>(b) * M * N,
-                                        host_c_out.get() + static_cast<std::size_t>(b) * M * N, M * N, 1e-3f);
-        std::printf("[GEMM batch %d/%d: %dx%dx%d, block_%dx%dx%d] %s\n",
-                    b + 1, batch, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, valid ? "VALID" : "FAIL");
-        all_valid = all_valid && valid;
+        bool all_valid = true;
+        for (int b = 0; b < batch; ++b) {
+            gemm_ref(host_a.get() + static_cast<std::size_t>(b) * M * K,
+                     host_b.get() + static_cast<std::size_t>(b) * N * K,
+                     host_sfa.get() + static_cast<std::size_t>(b) * kargs.stride_sfa_batch,
+                     host_sfb.get() + static_cast<std::size_t>(b) * kargs.stride_sfb_batch,
+                     host_c.get() + static_cast<std::size_t>(b) * M * N,
+                     M, N, K, K, K, N, kargs.stride_sfa, kargs.stride_sfb, GROUP_M, GROUP_N, GROUP_K);
+            const bool valid = valid_vector(host_c.get() + static_cast<std::size_t>(b) * M * N,
+                                            host_c_out.get() + static_cast<std::size_t>(b) * M * N, M * N, 1e-3f);
+            std::printf("[GEMM batch %d/%d: %dx%dx%d, block_%dx%dx%d] %s\n",
+                        b + 1, batch, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, valid ? "VALID" : "FAIL");
+            all_valid = all_valid && valid;
+        }
+
+        std::printf("\n[Overall] %s\n", all_valid ? "ALL BATCHES VALID" : "SOME BATCHES FAILED");
     }
-
-    std::printf("\n[Overall] %s\n", all_valid ? "ALL BATCHES VALID" : "SOME BATCHES FAILED");
 
     std::printf("\n");
     benchmark_kernel<GemmTraits>(kargs, grid, block);
