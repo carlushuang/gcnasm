@@ -113,12 +113,12 @@ Measured on MI355X with ROCm 7.1.1 and [optimized opus.hpp](https://github.com/R
 
 ### Per-file breakdown
 
-| File | Time | VGPRs | Spill | Occ |
-|------|------|-------|-------|-----|
-| `gqa_gfx950_kernel_causal.cc` | ~1.3s | 236 | 0 | 2 |
-| `gqa_gfx950_kernel_noncausal.cc` | ~1.3s | 232 | 0 | 2 |
-| `gqa_gfx950_host.cc` | ~0.9s | — | — | — |
-| Link | ~0.03s | — | — | — |
+| File | Time | VGPRs | SGPRs | Spill | Occ |
+|------|:----:|:-----:|:-----:|:-----:|:---:|
+| `gqa_gfx950_kernel_causal.cc` | ~1.3s | 236 | 50 | 0 | 2 |
+| `gqa_gfx950_kernel_noncausal.cc` | ~1.3s | 232 | 44 | 0 | 2 |
+| `gqa_gfx950_host.cc` | ~0.9s | — | — | — | — |
+| Link | ~0.03s | — | — | — | — |
 
 ## Performance
 
@@ -126,8 +126,8 @@ B=16, H=64, H_KV=8, D=128, measured on MI355X:
 
 | N | Causal TFlops | Causal Time | Non-causal TFlops | Non-causal Time |
 |---:|---:|---:|---:|---:|
-| 1024 | 648 | 0.42 ms | 939 | 0.59 ms |
-| 2048 | 920 | 1.20 ms | 1124 | 1.96 ms |
-| 4096 | 1085 | 4.05 ms | 1212 | 7.26 ms |
-| 8192 | 1178 | 14.94 ms | 1253 | 28.09 ms |
-| 16384 | 1233 | 57.07 ms | 1278 | 110.14 ms |
+| 1024 | 721 | 0.38 ms | 1020 | 0.54 ms |
+| 2048 | 930 | 1.18 ms | 1178 | 1.87 ms |
+| 4096 | 1118 | 3.93 ms | 1227 | 7.17 ms |
+| 8192 | 1207 | 14.57 ms | 1265 | 27.80 ms |
+| 16384 | 1252 | 56.17 ms | 1275 | 110.37 ms |
