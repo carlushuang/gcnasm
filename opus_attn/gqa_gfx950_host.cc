@@ -44,7 +44,7 @@ void rand_vector(T* ptr, size_t size, float min_val = 0.0f, float max_val = 1.0f
 // Benchmark GQA kernel performance with warm-up and timing
 template<class Traits>
 void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
-                          int warmup = 10, int iterations = 50) {
+                          int warmup = 100, int iterations = 50) {
     for (int i = 0; i < warmup; ++i) {
         gqa_kernel<Traits><<<grid, block>>>(kargs);
         CHECK_HIP_KERNEL_LAUNCH();

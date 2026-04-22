@@ -14,14 +14,14 @@
 template<class Traits>
 __global__ void gemm_a8w8_blockscale_kernel(opus_gemm_kargs kargs);
 
-#define CHECK_HIP(call)                                                                                  \
-    do {                                                                                                 \
-        hipError_t status_ = call;                                                                       \
-        if (status_ != hipSuccess) {                                                                     \
-            std::fprintf(stderr, "HIP error (%s:%d): %s\n", __FILE__, __LINE__, hipGetErrorString(status_)); \
-            std::exit(1);                                                                                \
-        }                                                                                                \
-    } while (0)
+#define CHECK_HIP(call)                                                                                   \
+    do {                                                                                                  \
+        hipError_t status_ = call;                                                                        \
+        if (status_ != hipSuccess) {                                                                      \
+            fprintf(stderr, "HIP error (%s:%d): %s\n", __FILE__, __LINE__, hipGetErrorString(status_));   \
+            exit(1);                                                                                      \
+        }                                                                                                 \
+    } while(0)
 
 #define CHECK_HIP_KERNEL_LAUNCH() CHECK_HIP(hipGetLastError())
 
