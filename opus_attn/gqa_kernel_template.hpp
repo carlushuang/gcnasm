@@ -472,11 +472,6 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
 
-    if (stagger) {
-        __builtin_amdgcn_sched_barrier(0);
-        __builtin_amdgcn_s_barrier();
-    }
-
     compute_qk(v_s[0], v_q_slices, v_k, s_k[0]);
     __builtin_amdgcn_sched_barrier(0);
     if constexpr (T::CAUSAL) {
@@ -488,22 +483,25 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     }
     m_row = attn_row_max<T>(v_s[0]);
     attn_sub_row<T>(v_s[0], m_row);
-    asm volatile("" : "+v"(v_s[0]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+    asm volatile("" : "+v"(v_s[0]) ::);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gkv, u_skv, kv_tile(2));
+    if (stagger) {
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+    }
 
     // Main loop
     for (int j = 3; j < max_num_tiles - 1; j += 2) {
         // Cluster 0:
-        async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(j - 2));
+        async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gkv, u_skv, kv_tile(j - 1));
         v_k[0] = load<T::VEC_KV>(s_k[1], u_rk);
         v_k[1] = load<T::VEC_KV>(s_k[1], u_rk + skv_slice(1_I));
         s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
-        s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -522,11 +520,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 2:
-        async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gkv, u_skv, kv_tile(j));
+        async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(j - 2));
         v_v[0] = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
         v_v[1] = tr_load<T::VEC_TR_V>(s_v[0], u_rv + skv_slice(1_I));
         s_waitcnt_lgkmcnt(number<T::v_ds_read_insts>{});
-        s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -546,19 +544,19 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             m_row = row_max;
         }
         attn_sub_row<T>(v_s[1], row_max);
-        asm volatile("" : "+v"(v_s[1]) ::);
         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+        asm volatile("" : "+v"(v_s[1]) ::);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4:
-        async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gkv, u_skv, kv_tile(j - 1));
+        async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gkv, u_skv, kv_tile(j));
         v_k[0] = load<T::VEC_KV>(s_k[0], u_rk);
         v_k[1] = load<T::VEC_KV>(s_k[0], u_rk + skv_slice(1_I));
         s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
-        s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -577,7 +575,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 6:
-        async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gkv, u_skv, kv_tile(j + 1));
+        async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gkv, u_skv, kv_tile(j - 1));
         v_v[0] = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
         v_v[1] = tr_load<T::VEC_TR_V>(s_v[1], u_rv + skv_slice(1_I));
         if constexpr (T::CAUSAL) {
@@ -588,7 +586,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             }
         }
         s_waitcnt_lgkmcnt(number<T::v_ds_read_insts>{});
-        s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+        s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -608,8 +606,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
             m_row = row_max;
         }
         attn_sub_row<T>(v_s[0], row_max);
-        asm volatile("" : "+v"(v_s[0]) ::);
         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+        asm volatile("" : "+v"(v_s[0]) ::);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
@@ -618,11 +616,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
 
     // Epilogue
     // Cluster 0:
-    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 3));
+    async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 2));
     v_k[0] = load<T::VEC_KV>(s_k[1], u_rk);
     v_k[1] = load<T::VEC_KV>(s_k[1], u_rk + skv_slice(1_I));
     s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
-    s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+    s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -641,7 +639,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 2:
-    async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 1));
+    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 3));
     v_v[0] = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
     v_v[1] = tr_load<T::VEC_TR_V>(s_v[0], u_rv + skv_slice(1_I));
     if constexpr (T::CAUSAL) {
@@ -652,7 +650,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         }
     }
     s_waitcnt_lgkmcnt(number<T::v_ds_read_insts>{});
-    s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+    s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -660,12 +658,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 3:
     __builtin_amdgcn_s_setprio(1);
     compute_pv(v_p, v_v, v_o_slices, s_v[0]);
-    D_ACC row_max = attn_row_max<T>(v_s[1]);
+    D_ACC row_max = max(m_row, attn_row_max<T>(v_s[1]));
     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
     m_row = row_max;
     attn_sub_row<T>(v_s[1], row_max);
-    asm volatile("" : "+v"(v_s[1]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+    asm volatile("" : "+v"(v_s[1]) ::);
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
     pin_output_tile(v_o);
@@ -675,11 +673,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 4:
-    async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 2));
+    async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 1));
     v_k[0] = load<T::VEC_KV>(s_k[0], u_rk);
     v_k[1] = load<T::VEC_KV>(s_k[0], u_rk + skv_slice(1_I));
     s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
-    s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
+    s_waitcnt_vmcnt(number<T::k_buffer_load_insts>{});
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -699,6 +697,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 6:
+    async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 2));
     v_v[0] = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
     v_v[1] = tr_load<T::VEC_TR_V>(s_v[1], u_rv + skv_slice(1_I));
     if constexpr (T::CAUSAL) {
@@ -717,12 +716,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 7:
     __builtin_amdgcn_s_setprio(1);
     compute_pv(v_p, v_v, v_o_slices, s_v[1]);
-    row_max = attn_row_max<T>(v_s[0]);
+    row_max = max(m_row, attn_row_max<T>(v_s[0]));
     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
     m_row = row_max;
     attn_sub_row<T>(v_s[0], row_max);
-    asm volatile("" : "+v"(v_s[0]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+    asm volatile("" : "+v"(v_s[0]) ::);
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
     pin_output_tile(v_o);
@@ -732,7 +731,6 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 8:
-    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 1));
     v_k[0] = load<T::VEC_KV>(s_k[1], u_rk);
     v_k[1] = load<T::VEC_KV>(s_k[1], u_rk + skv_slice(1_I));
     s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
@@ -756,6 +754,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_sched_barrier(0);
 
     // Cluster 10:
+    async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(max_num_tiles - 1));
     v_v[0] = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
     v_v[1] = tr_load<T::VEC_TR_V>(s_v[0], u_rv + skv_slice(1_I));
     if constexpr (T::CAUSAL) {
@@ -774,12 +773,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 11:
     __builtin_amdgcn_s_setprio(1);
     compute_pv(v_p, v_v, v_o_slices, s_v[0]);
-    row_max = attn_row_max<T>(v_s[1]);
+    row_max = max(m_row, attn_row_max<T>(v_s[1]));
     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
     m_row = row_max;
     attn_sub_row<T>(v_s[1], row_max);
-    asm volatile("" : "+v"(v_s[1]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+    asm volatile("" : "+v"(v_s[1]) ::);
     __builtin_amdgcn_sched_barrier(0);
 
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
