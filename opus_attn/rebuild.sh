@@ -22,6 +22,7 @@ echo "Output: $TOP/build/gqa_attn.exe"
 echo ""
 
 # Run benchmark
+echo "=== Head Dim 128 ==="
 echo "=== Causal ==="
 ./build/gqa_attn.exe --causal
 echo ""
@@ -33,3 +34,15 @@ echo "=== Non-causal ==="
 echo ""
 echo "=== Non-causal N=16384 ==="
 ./build/gqa_attn.exe --no-causal -n 16384
+echo "=== Head Dim 256 ==="
+echo "=== Causal ==="
+./build/gqa_attn.exe --causal -d 256
+echo ""
+echo "=== Causal N=16384 ==="
+./build/gqa_attn.exe --causal -n 16384 -d 256
+echo ""
+echo "=== Non-causal ==="
+./build/gqa_attn.exe --no-causal -d 256
+echo ""
+echo "=== Non-causal N=16384 ==="
+./build/gqa_attn.exe --no-causal -n 16384 -d 256

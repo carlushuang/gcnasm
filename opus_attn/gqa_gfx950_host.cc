@@ -76,8 +76,8 @@ void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
                        / (Traits::CAUSAL ? 2.0 : 1.0);
     const double tflops = flops / (avg_time * 1e-3) / 1e12;
 
-    printf("GQA %s Kernel Performance: avg_time=%.3f ms, %.2f TFlops\n",
-           Traits::CAUSAL ? "Causal" : "Non-causal", avg_time, tflops);
+    printf("GQA %s (hdim=%d) Kernel Performance: avg_time=%.3f ms, %.2f TFlops\n",
+           Traits::CAUSAL ? "Causal" : "Non-causal", Traits::D_TILE_SIZE, avg_time, tflops);
 }
 
 // Validate GQA GPU results against CPU reference
@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
     int H    = 64;    // query heads
     int H_KV = 8;     // key/value heads
     int N    = 1024;  // sequence length
-    int D    = 128;   // head dimension
+    int D    = 128;   // head dimension (can be 128 or 256)
 
     // Parse command line arguments. Supports: -n 16384, -n=16384, --seq=16384
     bool causal = true;
@@ -342,11 +342,16 @@ int main(int argc, char** argv) {
         return 0;
     };
 
-    int rc;
-    if (causal)
+    int rc = 0;
+    if (D == 128 && causal) {
         rc = run(opus_gqa_traits<32, 64, 128, 8, true>{});
-    else
+    } else if (D == 128 && !causal) {
         rc = run(opus_gqa_traits<32, 64, 128, 8, false>{});
+    } else if (D == 256 && causal) {
+        rc = run(opus_gqa_traits<32, 64, 256, 4, true>{});
+    } else if (D == 256 && !causal) {
+        rc = run(opus_gqa_traits<32, 64, 256, 4, false>{});
+    }
     if (rc) return rc;
 
     // Cleanup

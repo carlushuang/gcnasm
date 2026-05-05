@@ -64,6 +64,7 @@ cd monolithic
 ./build/gqa_attn.exe --no-causal              # non-causal
 ./build/gqa_attn.exe -n=16384                 # causal, N=16384
 ./build/gqa_attn.exe --no-causal -n=16384     # non-causal, N=16384
+./build/gqa_attn.exe -d=256 --no-causal       # HesdDim=256, non-causal
 ```
 
 ### Command-line options
@@ -74,7 +75,7 @@ cd monolithic
 | `-h`, `--heads` | Number of query heads | 64 |
 | `--hkv` | Number of KV heads | 8 |
 | `-n`, `--seq` | Sequence length | 1024 |
-| `-d`, `--dim` | Head dimension (must be 128) | 128 |
+| `-d`, `--dim` | Head dimension (must be 128 or 256) | 128 |
 | `--causal` | Enable causal masking | (default) |
 | `--no-causal` | Disable causal masking | |
 | `-v`, `--verify` | CPU reference verification (0=off, 1=on) | 0 |
@@ -89,7 +90,7 @@ The kernel is parameterized via `opus_gqa_traits<Q_TILE, KV_TILE, D_TILE, NUM_WA
 |-----------|-------|-------------|
 | Q_TILE_SIZE | 32 | Query tile size per warp |
 | KV_TILE_SIZE | 64 | KV tile size in shared memory |
-| D_TILE_SIZE | 128 | Head dimension (fixed) |
+| D_TILE_SIZE | 128 | Head dimension (128 or 256) |
 | NUM_WARPS | 8 | Warps per workgroup (512 threads) |
 | CAUSAL | `true`/`false` | Causal masking (two separate kernel binaries) |
 | MFMA | 32x32x16 bf16 | Matrix multiply instruction |
@@ -131,3 +132,13 @@ B=16, H=64, H_KV=8, D=128, measured on MI355X:
 | 4096 | 1118 | 3.93 ms | 1227 | 7.17 ms |
 | 8192 | 1207 | 14.57 ms | 1265 | 27.80 ms |
 | 16384 | 1252 | 56.17 ms | 1275 | 110.37 ms |
+
+B=16, H=64, H_KV=8, D=256, measured on MI355X:
+
+| N | Causal TFlops | Causal Time | Non-causal TFlops | Non-causal Time |
+|---:|---:|---:|---:|---:|
+| 1024 | 550 | 0.99 ms | 701 | 1.569 ms |
+| 2048 | 714 | 3.08 ms | 809 | 5.425 ms |
+| 4096 | 819 | 10.73 ms | 861 | 20.41 ms |
+| 8192 | 878 | 40.05 ms | 889 | 79.07 ms |
+| 16384 | 915 | 153.64 ms | 902 | 311.97 ms |

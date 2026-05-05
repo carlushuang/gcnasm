@@ -33,8 +33,10 @@ $(OUT): $(KERNEL_OBJS) $(HOST_OBJ)
 	$(HIPCC) $^ --offload-arch=$(ARCH) -fopenmp -o $@
 
 benchmark: $(OUT)
-	@echo "=== Causal ===" && $(OUT)
-	@echo "=== Non-causal ===" && $(OUT) --no-causal
+	@echo "=== hdim=128 Causal ===" && $(OUT) -d 128
+	@echo "=== hdim=128 Non-causal ===" && $(OUT) -d 128 --no-causal
+	@echo "=== hdim=256 Causal ===" && $(OUT) -d 256
+	@echo "=== hdim=256 Non-causal ===" && $(OUT) -d 256 --no-causal
 
 clean:
 	rm -rf $(BUILD)

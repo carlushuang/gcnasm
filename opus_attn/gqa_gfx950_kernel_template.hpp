@@ -7,6 +7,14 @@
 #include <bit>
 #include <cstdint>
 
+// HDIM-dependent configuration - select based on D_TILE_SIZE at compile time
+template<int D_TILE_SIZE>
+struct kernel_config {
+    static constexpr int OCCUPANCY_HINT = (D_TILE_SIZE == 128) ? 2 : 1;
+    static constexpr int SCHED_EXP_PAIRS = (D_TILE_SIZE == 128) ? 6 : 12;
+    static constexpr int SCHED_VALU_PAIRS = (D_TILE_SIZE == 128) ? 10 : 20;
+};
+
 using opus::operator""_I;
 
 constexpr int MFMA_MASK = 0x08;
@@ -293,9 +301,13 @@ __device__ inline void attn_mask_causal_tile(V& v_s, int q_start_pos, int kv_til
 
 // ─── GQA kernel: template on traits; K/V in shared, Q in registers, Flash Attention online softmax ───
 template<class Traits>
-__global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kargs kargs) {
+__global__ __launch_bounds__(Traits::BLOCK_SIZE, kernel_config<Traits::D_TILE_SIZE>::OCCUPANCY_HINT) void gqa_kernel(opus_gqa_kargs kargs) {
     using namespace opus;
     using T = opus::remove_cvref_t<Traits>;
+    // HDIM-dependent parameters
+    using KConfig = kernel_config<T::D_TILE_SIZE>;
+    constexpr int SCHED_EXP_PAIRS = KConfig::SCHED_EXP_PAIRS;
+    constexpr int SCHED_VALU_PAIRS = KConfig::SCHED_VALU_PAIRS;
     using D_ATTN = typename T::D_ATTN;
     using D_ACC = typename T::D_ACC;
 
@@ -311,8 +323,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     const int h_kv = h / group_size;
     const int q_block_size = T::NUM_WARPS * T::Q_TILE_SIZE;
     const int q_block_start = q_block_idx * q_block_size;
-    const int qo_gmem_offset = b * kargs.stride_q_b + q_block_start * kargs.stride_q_n + h * kargs.stride_q_h;
-    const int kv_gmem_offset = b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h;
+    const int64_t qo_gmem_offset = (int64_t)b * kargs.stride_q_b + (int64_t)q_block_start * kargs.stride_q_n + h * kargs.stride_q_h;
+    const int64_t kv_gmem_offset = (int64_t)b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h;
 
     // Global memory tensors
     auto g_q = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_q) + qo_gmem_offset);
@@ -450,8 +462,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         l_row += attn_sum<T>(v_s[0]);
         v_p = opus::cast<D_ATTN>(v_s[0]);
         asm volatile("" : "+v"(v_p) ::);
-        sched_barrier_exp_pairs<6, 3, 1>();
-        sched_barrier_pairs<10, 5, 1>();
+        sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 1>();
+        sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 1>();
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -487,7 +499,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         asm volatile("" : "+v"(v_s[1]) ::);
         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         sched_barrier_pairs<6, 5, 2>();
-        sched_barrier_exp_pairs<6, 3, 2>();
+        sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 2>();
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
@@ -508,8 +520,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         l_row += attn_sum<T>(v_s[1]);
         v_p = opus::cast<D_ATTN>(v_s[1]);
         asm volatile("" : "+v"(v_p) ::);
-        sched_barrier_exp_pairs<6, 3, 3>();
-        sched_barrier_pairs<10, 5, 3>();
+        sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 3>();
+        sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 3>();
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -551,7 +563,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         asm volatile("" : "+v"(v_s[0]) ::);
         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
         sched_barrier_pairs<6, 5, 4>();
-        sched_barrier_exp_pairs<6, 3, 4>();
+        sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 4>();
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
@@ -574,8 +586,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     l_row += attn_sum<T>(v_s[0]);
     v_p = opus::cast<D_ATTN>(v_s[0]);
     asm volatile("" : "+v"(v_p) ::);
-    sched_barrier_exp_pairs<6, 3, 5>();
-    sched_barrier_pairs<10, 5, 5>();
+    sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 5>();
+    sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 5>();
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -604,8 +616,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     attn_sub_row<T>(v_s[1], row_max);
     asm volatile("" : "+v"(v_s[1]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-    sched_barrier_pairs<10, 5, 6>();
-    sched_barrier_exp_pairs<6, 3, 6>();
+    sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 6>();
+    sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 6>();
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
     auto* v_o_pin = reinterpret_cast<vector_t<fp32_t, 16>*>(&v_o);
@@ -631,8 +643,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     l_row += attn_sum<T>(v_s[1]);
     v_p = opus::cast<D_ATTN>(v_s[1]);
     asm volatile("" : "+v"(v_p) ::);
-    sched_barrier_exp_pairs<6, 3, 7>();
-    sched_barrier_pairs<10, 5, 7>();
+    sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 7>();
+    sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 7>();
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -660,8 +672,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     attn_sub_row<T>(v_s[0], row_max);
     asm volatile("" : "+v"(v_s[0]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-    sched_barrier_pairs<10, 5, 8>();
-    sched_barrier_exp_pairs<6, 3, 8>();
+    sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 8>();
+    sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 8>();
     __builtin_amdgcn_sched_barrier(0);
     scale_output_tile<T>(v_o, rescale_m);
     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
@@ -686,8 +698,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     l_row += attn_sum<T>(v_s[0]);
     v_p = opus::cast<D_ATTN>(v_s[0]);
     asm volatile("" : "+v"(v_p) ::);
-    sched_barrier_exp_pairs<6, 3, 9>();
-    sched_barrier_pairs<10, 5, 9>();
+    sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 9>();
+    sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 9>();
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -714,8 +726,8 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     attn_sub_row<T>(v_s[1], row_max);
     asm volatile("" : "+v"(v_s[1]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-    sched_barrier_pairs<10, 5, 10>();
-    sched_barrier_exp_pairs<6, 3, 10>();
+    sched_barrier_pairs<SCHED_VALU_PAIRS, 5, 10>();
+    sched_barrier_exp_pairs<SCHED_EXP_PAIRS, 3, 10>();
     __builtin_amdgcn_sched_barrier(0);
 
     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
