@@ -11,9 +11,21 @@
 
 #include "gqa_defs.h"
 
-// Declared in gqa_kernel_*.cc (device TUs)
+// Declared in gqa_d128_kernel_*.cc / gqa_d512_kernel_*.cc (device TUs)
 template<class Traits>
-__global__ void gqa_kernel(opus_gqa_kargs kargs);
+__global__ void gqa_d128_kernel(opus_gqa_kargs kargs);
+template<class Traits>
+__global__ void gqa_d512_kernel(opus_gqa_kargs kargs);
+
+// Common launch wrapper that dispatches by D_TILE_SIZE at compile time
+template<class Traits>
+inline void gqa_launch(const opus_gqa_kargs& kargs, dim3 grid, dim3 block) {
+    if constexpr (Traits::D_TILE_SIZE == 128) {
+        gqa_d128_kernel<Traits><<<grid, block>>>(kargs);
+    } else {
+        gqa_d512_kernel<Traits><<<grid, block>>>(kargs);
+    }
+}
 
 #define CHECK_HIP(call)                                                                                   \
     do {                                                                                                  \
@@ -46,7 +58,7 @@ template<class Traits>
 void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
                           int warmup = 100, int iterations = 50) {
     for (int i = 0; i < warmup; ++i) {
-        gqa_kernel<Traits><<<grid, block>>>(kargs);
+        gqa_launch<Traits>(kargs, grid, block);
         CHECK_HIP_KERNEL_LAUNCH();
     }
     CHECK_HIP(hipDeviceSynchronize());
@@ -57,7 +69,7 @@ void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
 
     CHECK_HIP(hipEventRecord(start));
     for (int i = 0; i < iterations; ++i) {
-        gqa_kernel<Traits><<<grid, block>>>(kargs);
+        gqa_launch<Traits>(kargs, grid, block);
         CHECK_HIP_KERNEL_LAUNCH();
     }
     CHECK_HIP(hipEventRecord(stop));
@@ -314,7 +326,7 @@ int main(int argc, char** argv) {
         printf("GQA kernel launch config: grid=(%d,%d,%d), block=%d (NUM_WARPS=%d), smem=%zu bytes (K/V tiles)\n",
                grid.x, grid.y, grid.z, (int)block.x, GqaTraits::NUM_WARPS, GqaTraits::smem_size_bytes());
 
-        gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
+        gqa_launch<GqaTraits>(kargs, grid, block);
         CHECK_HIP_KERNEL_LAUNCH();
 
         if (verify) {
@@ -335,10 +347,16 @@ int main(int argc, char** argv) {
     };
 
     int rc;
-    if (causal)
-        rc = run(opus_gqa_traits<16, 32, 512, 8, true>{});
-    else
-        rc = run(opus_gqa_traits<16, 32, 512, 8, false>{});
+    if (D == 128) {
+        rc = causal ? run(opus_gqa_traits<32, 64, 128, 8, true>{})
+                    : run(opus_gqa_traits<32, 64, 128, 8, false>{});
+    } else if (D == 512) {
+        rc = causal ? run(opus_gqa_traits<16, 32, 512, 8, true>{})
+                    : run(opus_gqa_traits<16, 32, 512, 8, false>{});
+    } else {
+        std::cerr << "-d must be 128 or 512, got " << D << "\n";
+        return 1;
+    }
     if (rc) return rc;
 
     // Cleanup

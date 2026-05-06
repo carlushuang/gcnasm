@@ -21,15 +21,21 @@ echo "=== Build time: ${TOTAL_MS} ms ==="
 echo "Output: $TOP/build/gqa_attn.exe"
 echo ""
 
-# Run benchmark
-echo "=== Causal ==="
-./build/gqa_attn.exe --causal
+# Run benchmarks: d=512 (current default) then d=128
+echo "=== d=512 Causal ==="
+./build/gqa_attn.exe -d 512 --causal
 echo ""
-echo "=== Causal N=16384 ==="
-./build/gqa_attn.exe --causal -n 16384
+echo "=== d=512 Causal N=16384 ==="
+./build/gqa_attn.exe -d 512 --causal -n 16384
 echo ""
-echo "=== Non-causal ==="
-./build/gqa_attn.exe --no-causal
+echo "=== d=512 Non-causal ==="
+./build/gqa_attn.exe -d 512 --no-causal
 echo ""
-echo "=== Non-causal N=16384 ==="
-./build/gqa_attn.exe --no-causal -n 16384
+echo "=== d=512 Non-causal N=16384 ==="
+./build/gqa_attn.exe -d 512 --no-causal -n 16384
+echo ""
+echo "=== d=128 Causal ==="
+./build/gqa_attn.exe -d 128 --causal
+echo ""
+echo "=== d=128 Non-causal ==="
+./build/gqa_attn.exe -d 128 --no-causal

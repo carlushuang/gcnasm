@@ -1,4 +1,4 @@
-// GQA flash attention kernel template for gfx950
+// GQA flash attention kernel template for D=512 on gfx950
 // Include this header from per-variant .cc files that instantiate specific traits.
 #pragma once
 
@@ -6,6 +6,8 @@
 #include "gqa_defs.h"
 #include <bit>
 #include <cstdint>
+
+namespace gqa_d512 {
 
 using opus::operator""_I;
 
@@ -15,29 +17,29 @@ constexpr int SALU_MASK    = 0x04;
 constexpr int EXP_MASK     = 0x400;
 constexpr int DS_READ_MASK = 0x100;
 
-#define SCHED_BARRIER(mask, cnt, group) __builtin_amdgcn_sched_group_barrier(mask, cnt, group)
+#define GQA_D512_SCHED_BARRIER(mask, cnt, group) __builtin_amdgcn_sched_group_barrier(mask, cnt, group)
 
 template<int Group>
 __device__ inline void sched_compute_qk() {
     opus::static_for<4>([&](auto) {
-        SCHED_BARRIER(MFMA_MASK, 1, Group);
-        SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        SCHED_BARRIER(EXP_MASK, 1, Group);
-        SCHED_BARRIER(MFMA_MASK, 1, Group);
-        SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        SCHED_BARRIER(SALU_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(EXP_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(SALU_MASK, 1, Group);
     });
     opus::static_for<10>([&](auto) {
-        SCHED_BARRIER(MFMA_MASK, 1, Group);
-        SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        SCHED_BARRIER(MFMA_MASK, 1, Group);
-        SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        SCHED_BARRIER(VALU_MASK, 1, Group);
-        SCHED_BARRIER(SALU_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(VALU_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(SALU_MASK, 1, Group);
     });
     opus::static_for<4>([&](auto) {
-        SCHED_BARRIER(MFMA_MASK, 1, Group);
-        SCHED_BARRIER(VALU_MASK, 2, Group);
+        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
+        GQA_D512_SCHED_BARRIER(VALU_MASK, 2, Group);
     });
 }
 
@@ -261,7 +263,6 @@ template<int THR_X, int THR_Y>
 __device__ inline void attn_mask_vec2_imm(opus::u32_t rel_vgpr, opus::u32_t neg_inf_vgpr,
                                           opus::u32_t& x_ref, opus::u32_t& y_ref) {
     uint64_t x_mask, y_mask;
-    // opus::u32_t ox, oy;
     asm volatile(
         // x: rel < THR_X ?
         "v_cmp_lt_i32_e64 %0, %6, %7\n\t"
@@ -274,7 +275,6 @@ __device__ inline void attn_mask_vec2_imm(opus::u32_t rel_vgpr, opus::u32_t neg_
           "n"(THR_X), "v"(neg_inf_vgpr), "n"(THR_Y)
         : "vcc"
     );
-    // x_ref = ox; y_ref = oy;
 }
 
 template<typename T, typename V>
@@ -318,10 +318,13 @@ __device__ inline void attn_mask_causal_tile(V& v_s, int q_start_pos, int kv_til
     });
 }
 
+} // namespace gqa_d512
+
 // ─── GQA kernel: template on traits; K/V in shared, Q in registers, Flash Attention online softmax ───
 template<class Traits>
-__global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kargs kargs) {
+__global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_d512_kernel(opus_gqa_kargs kargs) {
     using namespace opus;
+    using namespace gqa_d512;
     using T = opus::remove_cvref_t<Traits>;
     using D_ATTN = typename T::D_ATTN;
     using D_ACC = typename T::D_ACC;
