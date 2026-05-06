@@ -473,7 +473,12 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
 
     compute_qk(v_s[0], v_q_slices, v_k, s_k[0]);
-    __builtin_amdgcn_sched_barrier(0);
+    
+    if (stagger) {
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+    }
+
     if constexpr (T::CAUSAL) {
         constexpr int tile_idx = 0;
         constexpr int kv_end_pos = (tile_idx + 1) * T::KV_TILE_SIZE;
@@ -489,15 +494,10 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    if (stagger) {
-        __builtin_amdgcn_sched_barrier(0);
-        __builtin_amdgcn_s_barrier();
-    }
-
     // Main loop
-    for (int j = 3; j < max_num_tiles - 1; j += 2) {
+    for (int j = 1; j < max_num_tiles - 3; j += 2) {
         // Cluster 0:
-        async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gkv, u_skv, kv_tile(j - 1));
+        async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gkv, u_skv, kv_tile(j + 1));
         v_k[0] = load<T::VEC_KV>(s_k[1], u_rk);
         v_k[1] = load<T::VEC_KV>(s_k[1], u_rk + skv_slice(1_I));
         s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
@@ -520,7 +520,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 2:
-        async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(j - 2));
+        async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gkv, u_skv, kv_tile(j));
         v_v[0] = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
         v_v[1] = tr_load<T::VEC_TR_V>(s_v[0], u_rv + skv_slice(1_I));
         s_waitcnt_lgkmcnt(number<T::v_ds_read_insts>{});
@@ -552,7 +552,7 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4:
-        async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gkv, u_skv, kv_tile(j));
+        async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gkv, u_skv, kv_tile(j + 2));
         v_k[0] = load<T::VEC_KV>(s_k[0], u_rk);
         v_k[1] = load<T::VEC_KV>(s_k[0], u_rk + skv_slice(1_I));
         s_waitcnt_lgkmcnt(number<T::k_ds_read_insts>{});
@@ -575,11 +575,11 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 6:
-        async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gkv, u_skv, kv_tile(j - 1));
+        async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gkv, u_skv, kv_tile(j + 1));
         v_v[0] = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
         v_v[1] = tr_load<T::VEC_TR_V>(s_v[1], u_rv + skv_slice(1_I));
         if constexpr (T::CAUSAL) {
-            const int tile_idx = j - 1;
+            const int tile_idx = j + 1;
             const int kv_end_pos = (tile_idx + 1) * T::KV_TILE_SIZE;
             if (q_start_pos < kv_end_pos) {
                 attn_mask_causal_tile<T>(v_s[0], q_start_pos, tile_idx, neg_inf_v, lane_id);

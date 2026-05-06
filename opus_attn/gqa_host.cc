@@ -84,45 +84,33 @@ void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
 bool validate_gqa_results(const bf16_t* ref, const bf16_t* gpu,
                           int B, int N, int H, int D, float threshold = 5e-2f) {
     bool all_valid = true;
-    int total_errors = 0;
+    size_t total_errors = 0;
+    const size_t total_elements = (size_t)B * N * H * D;
 
-    // Sample-based validation (check a subset to avoid too much output)
-    const int sample_heads = std::min(4, H);
-    const int sample_queries = std::min(8, N);
-    
     for (int b = 0; b < B; b++) {
-        for (int h = 0; h < sample_heads; h++) {
-            for (int i = 0; i < sample_queries; i++) {
-                int offset = b * N * H * D + i * H * D + h * D;
-                
-                // Check element-wise
-                int local_errors = 0;
-                float max_diff = 0.0f;
+        for (int i = 0; i < N; i++) {
+            for (int h = 0; h < H; h++) {
+                const size_t offset = ((size_t)b * N * H + (size_t)i * H + h) * D;
                 for (int d = 0; d < D; d++) {
-                    float ref_val = static_cast<float>(ref[offset + d]);
-                    float gpu_val = static_cast<float>(gpu[offset + d]);
-                    float diff = std::abs(ref_val - gpu_val);
-                    max_diff = std::max(max_diff, diff);
+                    const float ref_val = static_cast<float>(ref[offset + d]);
+                    const float gpu_val = static_cast<float>(gpu[offset + d]);
+                    const float diff = std::abs(gpu_val - ref_val);
                     if (diff > threshold) {
-                        local_errors++;
                         total_errors++;
+                        all_valid = false;
+                        printf("  mismatch [b=%d,n=%d,h=%d,d=%d] ref=%.6f gpu=%.6f diff=%.6f\n",
+                               b, i, h, d, ref_val, gpu_val, diff);
                     }
-                }
-                
-                if (local_errors > 0) {
-                    printf("  [b=%d,h=%d,n=%d] max_diff=%.6f, errors=%d/%d\n",
-                           b, h, i, max_diff, local_errors, D);
-                    all_valid = false;
                 }
             }
         }
     }
     
     if (all_valid) {
-        printf("✓ Sample validation passed (checked %d samples)\n", 
-               B * sample_heads * sample_queries);
+        printf("✓ Full validation passed (checked %zu elements)\n", total_elements);
     } else {
-        printf("✗ Validation failed with %d total errors\n", total_errors);
+        printf("✗ Validation failed with %zu/%zu total errors\n",
+               total_errors, total_elements);
     }
     
     return all_valid;
@@ -173,7 +161,7 @@ void gqa_attention_ref(
                     const bf16_t* k_row = K + b * stride_kv_b + j * stride_kv_n + h_kv * stride_kv_h;
                     float dot = 0.0f;
                     for (int d = 0; d < D; d++) {
-                        dot += static_cast<float>(q_row[d]) * static_cast<float>(k_row[d]);
+                        dot += static_cast<float>(q_row[d] * k_row[d]);
                     }
                     scores[j] = dot * scale;
                 }
@@ -188,6 +176,10 @@ void gqa_attention_ref(
                 for (int j = 0; j < max_j; j++) {
                     scores[j] /= sum_exp;
                 }
+                std::vector<bf16_t> p_row(max_j);
+                for (int j = 0; j < max_j; j++) {
+                    p_row[j] = static_cast<bf16_t>(scores[j]);
+                }
 
                 // ---- Output: O[b,i,h,d] = sum_j P[j] * V[b,j,h_kv,d] ----
                 bf16_t* o_row = O + b * stride_q_b + i * stride_q_n + h * stride_q_h;
@@ -195,7 +187,7 @@ void gqa_attention_ref(
                     float acc = 0.0f;
                     for (int j = 0; j < max_j; j++) {
                         const bf16_t* v_row = V + b * stride_kv_b + j * stride_kv_n + h_kv * stride_kv_h;
-                        acc += scores[j] * static_cast<float>(v_row[d]);
+                        acc += static_cast<float>(p_row[j] * v_row[d]);
                     }
                     o_row[d] = static_cast<bf16_t>(acc);
                 }
