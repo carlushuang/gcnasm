@@ -24,7 +24,7 @@ $(BUILD):
 # -D__HIPCC_RTC__ skips implicit __clang_hip_runtime_wrapper.h on host pass (~250ms saved)
 # Each kernel .cc only includes its own template hpp; depending on both keeps the rule simple.
 $(BUILD)/%.o: %.cc gqa_d128_kernel_template.hpp gqa_d512_kernel_template.hpp gqa_defs.h | $(BUILD)
-	$(HIPCC) $< $(COMMON_FLAGS) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -c -o $@
+	$(HIPCC) $< $(COMMON_FLAGS) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
 
 # Host object (no -D__HIPCC_RTC__ — needs full HIP runtime for <<<>>> syntax)
 $(HOST_OBJ): $(HOST_SRC) gqa_defs.h | $(BUILD)

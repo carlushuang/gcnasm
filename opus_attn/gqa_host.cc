@@ -215,7 +215,7 @@ int main(int argc, char** argv) {
     int H    = 64;    // query heads
     int H_KV = 8;     // key/value heads
     int N    = 1024;  // sequence length
-    int D    = 512;   // head dimension
+    int D    = 128;   // head dimension
 
     // Parse command line arguments. Supports: -n 16384 and -n=16384.
     bool causal = true;
