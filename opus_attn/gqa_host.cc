@@ -9,11 +9,23 @@
 #include <cassert>
 #include <omp.h>
 
-#include "gqa_common.h"
+#include "gqa_defs.h"
 
-// Declared in gqa_gfx950_kernel.cc (device TU)
+// Declared in gqa_d128_kernel_*.cc / gqa_d512_kernel_*.cc (device TUs)
 template<class Traits>
-__global__ void gqa_kernel(opus_gqa_kargs kargs);
+__global__ void gqa_d128_kernel(opus_gqa_kargs kargs);
+template<class Traits>
+__global__ void gqa_d512_kernel(opus_gqa_kargs kargs);
+
+// Common launch wrapper that dispatches by D_TILE_SIZE at compile time
+template<class Traits>
+inline void gqa_launch(const opus_gqa_kargs& kargs, dim3 grid, dim3 block) {
+    if constexpr (Traits::D_TILE_SIZE == 128) {
+        gqa_d128_kernel<Traits><<<grid, block>>>(kargs);
+    } else {
+        gqa_d512_kernel<Traits><<<grid, block>>>(kargs);
+    }
+}
 
 #define CHECK_HIP(call)                                                                                   \
     do {                                                                                                  \
@@ -46,7 +58,7 @@ template<class Traits>
 void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
                           int warmup = 100, int iterations = 50) {
     for (int i = 0; i < warmup; ++i) {
-        gqa_kernel<Traits><<<grid, block>>>(kargs);
+        gqa_launch<Traits>(kargs, grid, block);
         CHECK_HIP_KERNEL_LAUNCH();
     }
     CHECK_HIP(hipDeviceSynchronize());
@@ -57,7 +69,7 @@ void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
 
     CHECK_HIP(hipEventRecord(start));
     for (int i = 0; i < iterations; ++i) {
-        gqa_kernel<Traits><<<grid, block>>>(kargs);
+        gqa_launch<Traits>(kargs, grid, block);
         CHECK_HIP_KERNEL_LAUNCH();
     }
     CHECK_HIP(hipEventRecord(stop));
@@ -84,45 +96,33 @@ void benchmark_gqa_kernel(const opus_gqa_kargs& kargs, dim3 grid, dim3 block,
 bool validate_gqa_results(const bf16_t* ref, const bf16_t* gpu,
                           int B, int N, int H, int D, float threshold = 5e-2f) {
     bool all_valid = true;
-    int total_errors = 0;
+    size_t total_errors = 0;
+    const size_t total_elements = (size_t)B * N * H * D;
 
-    // Sample-based validation (check a subset to avoid too much output)
-    const int sample_heads = std::min(4, H);
-    const int sample_queries = std::min(8, N);
-    
     for (int b = 0; b < B; b++) {
-        for (int h = 0; h < sample_heads; h++) {
-            for (int i = 0; i < sample_queries; i++) {
-                int offset = b * N * H * D + i * H * D + h * D;
-                
-                // Check element-wise
-                int local_errors = 0;
-                float max_diff = 0.0f;
+        for (int i = 0; i < N; i++) {
+            for (int h = 0; h < H; h++) {
+                const size_t offset = ((size_t)b * N * H + (size_t)i * H + h) * D;
                 for (int d = 0; d < D; d++) {
-                    float ref_val = static_cast<float>(ref[offset + d]);
-                    float gpu_val = static_cast<float>(gpu[offset + d]);
-                    float diff = std::abs(ref_val - gpu_val);
-                    max_diff = std::max(max_diff, diff);
+                    const float ref_val = static_cast<float>(ref[offset + d]);
+                    const float gpu_val = static_cast<float>(gpu[offset + d]);
+                    const float diff = std::abs(gpu_val - ref_val);
                     if (diff > threshold) {
-                        local_errors++;
                         total_errors++;
+                        all_valid = false;
+                        printf("  mismatch [b=%d,n=%d,h=%d,d=%d] ref=%.6f gpu=%.6f diff=%.6f\n",
+                               b, i, h, d, ref_val, gpu_val, diff);
                     }
-                }
-                
-                if (local_errors > 0) {
-                    printf("  [b=%d,h=%d,n=%d] max_diff=%.6f, errors=%d/%d\n",
-                           b, h, i, max_diff, local_errors, D);
-                    all_valid = false;
                 }
             }
         }
     }
     
     if (all_valid) {
-        printf("✓ Sample validation passed (checked %d samples)\n", 
-               B * sample_heads * sample_queries);
+        printf("✓ Full validation passed (checked %zu elements)\n", total_elements);
     } else {
-        printf("✗ Validation failed with %d total errors\n", total_errors);
+        printf("✗ Validation failed with %zu/%zu total errors\n",
+               total_errors, total_elements);
     }
     
     return all_valid;
@@ -173,7 +173,7 @@ void gqa_attention_ref(
                     const bf16_t* k_row = K + b * stride_kv_b + j * stride_kv_n + h_kv * stride_kv_h;
                     float dot = 0.0f;
                     for (int d = 0; d < D; d++) {
-                        dot += static_cast<float>(q_row[d]) * static_cast<float>(k_row[d]);
+                        dot += static_cast<float>(q_row[d] * k_row[d]);
                     }
                     scores[j] = dot * scale;
                 }
@@ -188,6 +188,10 @@ void gqa_attention_ref(
                 for (int j = 0; j < max_j; j++) {
                     scores[j] /= sum_exp;
                 }
+                std::vector<bf16_t> p_row(max_j);
+                for (int j = 0; j < max_j; j++) {
+                    p_row[j] = static_cast<bf16_t>(scores[j]);
+                }
 
                 // ---- Output: O[b,i,h,d] = sum_j P[j] * V[b,j,h_kv,d] ----
                 bf16_t* o_row = O + b * stride_q_b + i * stride_q_n + h * stride_q_h;
@@ -195,7 +199,7 @@ void gqa_attention_ref(
                     float acc = 0.0f;
                     for (int j = 0; j < max_j; j++) {
                         const bf16_t* v_row = V + b * stride_kv_b + j * stride_kv_n + h_kv * stride_kv_h;
-                        acc += scores[j] * static_cast<float>(v_row[d]);
+                        acc += static_cast<float>(p_row[j] * v_row[d]);
                     }
                     o_row[d] = static_cast<bf16_t>(acc);
                 }
@@ -213,14 +217,14 @@ int main(int argc, char** argv) {
     int N    = 1024;  // sequence length
     int D    = 128;   // head dimension
 
-    // Parse command line arguments. Supports: -n 16384, -n=16384, --seq=16384
+    // Parse command line arguments. Supports: -n 16384 and -n=16384.
     bool causal = true;
-    int verify = 0;
+    bool verify = false;
     auto parse_val = [](const char* arg, const char* flag) -> const char* {
         size_t len = std::strlen(flag);
         if (std::strncmp(arg, flag, len) == 0) {
-            if (arg[len] == '=') return arg + len + 1;       // --flag=value
-            if (arg[len] == '\0') return reinterpret_cast<const char*>(1); // --flag value (next arg)
+            if (arg[len] == '=') return arg + len + 1;       // -flag=value
+            if (arg[len] == '\0') return reinterpret_cast<const char*>(1); // -flag value (next arg)
         }
         return nullptr;
     };
@@ -229,29 +233,29 @@ int main(int argc, char** argv) {
         const char* val;
         if (std::strcmp(arg, "--causal") == 0) { causal = true; continue; }
         if (std::strcmp(arg, "--no-causal") == 0) { causal = false; continue; }
-        auto try_parse = [&](int& target, const char* s, const char* l) {
-            if ((val = parse_val(arg, s)) || (l && (val = parse_val(arg, l)))) {
+        if (std::strcmp(arg, "--verify") == 0) { verify = true; continue; }
+        auto try_parse = [&](int& target, const char* flag) {
+            if ((val = parse_val(arg, flag))) {
                 if (val == reinterpret_cast<const char*>(1)) { if (i + 1 < argc) target = std::atoi(argv[++i]); }
                 else target = std::atoi(val);
                 return true;
             }
             return false;
         };
-        if (try_parse(B, "-b", "--batch")) continue;
-        if (try_parse(H, "-h", "--heads")) continue;
-        if (try_parse(H_KV, "--hkv", nullptr)) continue;
-        if (try_parse(N, "-n", "--seq")) continue;
-        if (try_parse(D, "-d", "--dim")) continue;
-        if (try_parse(verify, "-v", "--verify")) continue;
+        if (try_parse(B, "-b")) continue;
+        if (try_parse(H, "-h_q")) continue;
+        if (try_parse(H_KV, "-h_kv")) continue;
+        if (try_parse(N, "-n")) continue;
+        if (try_parse(D, "-d")) continue;
     }
 
     if (B <= 0 || H <= 0 || H_KV <= 0 || N <= 0 || D <= 0 || H % H_KV != 0) {
-        std::cerr << "Invalid parameters. B,H,H_KV,N,D must be positive and H must be divisible by H_KV.\n";
+        std::cerr << "Invalid parameters. B,H_Q,H_KV,N,D must be positive and H_Q must be divisible by H_KV.\n";
         return 1;
     }
 
     const int GROUP_SIZE = H / H_KV;
-    printf("GQA Attention: B=%d, H=%d, H_KV=%d, GROUP_SIZE=%d, N=%d, D=%d, CAUSAL=%d\n",
+    printf("GQA Attention: B=%d, H_Q=%d, H_KV=%d, GROUP_SIZE=%d, N=%d, D=%d, CAUSAL=%d\n",
            B, H, H_KV, GROUP_SIZE, N, D, causal ? 1 : 0);
 
     // Allocate host memory
@@ -322,7 +326,7 @@ int main(int argc, char** argv) {
         printf("GQA kernel launch config: grid=(%d,%d,%d), block=%d (NUM_WARPS=%d), smem=%zu bytes (K/V tiles)\n",
                grid.x, grid.y, grid.z, (int)block.x, GqaTraits::NUM_WARPS, GqaTraits::smem_size_bytes());
 
-        gqa_kernel<GqaTraits><<<grid, block>>>(kargs);
+        gqa_launch<GqaTraits>(kargs, grid, block);
         CHECK_HIP_KERNEL_LAUNCH();
 
         if (verify) {
@@ -343,10 +347,16 @@ int main(int argc, char** argv) {
     };
 
     int rc;
-    if (causal)
-        rc = run(opus_gqa_traits<32, 64, 128, 8, true>{});
-    else
-        rc = run(opus_gqa_traits<32, 64, 128, 8, false>{});
+    if (D == 128) {
+        rc = causal ? run(opus_gqa_traits<32, 64, 128, 8, true>{})
+                    : run(opus_gqa_traits<32, 64, 128, 8, false>{});
+    } else if (D == 512) {
+        rc = causal ? run(opus_gqa_traits<16, 32, 512, 8, true>{})
+                    : run(opus_gqa_traits<16, 32, 512, 8, false>{});
+    } else {
+        std::cerr << "-d must be 128 or 512, got " << D << "\n";
+        return 1;
+    }
     if (rc) return rc;
 
     // Cleanup
