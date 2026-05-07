@@ -17,29 +17,27 @@ constexpr int SALU_MASK    = 0x04;
 constexpr int EXP_MASK     = 0x400;
 constexpr int DS_READ_MASK = 0x100;
 
-#define GQA_D512_SCHED_BARRIER(mask, cnt, group) __builtin_amdgcn_sched_group_barrier(mask, cnt, group)
-
 template<int Group>
 __device__ inline void sched_compute_qk() {
     opus::static_for<4>([&](auto) {
-        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(EXP_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(SALU_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(MFMA_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(DS_READ_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(EXP_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(MFMA_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(DS_READ_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(SALU_MASK, 1, Group);
     });
     opus::static_for<10>([&](auto) {
-        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(DS_READ_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(VALU_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(SALU_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(MFMA_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(DS_READ_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(MFMA_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(DS_READ_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(VALU_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(SALU_MASK, 1, Group);
     });
     opus::static_for<4>([&](auto) {
-        GQA_D512_SCHED_BARRIER(MFMA_MASK, 1, Group);
-        GQA_D512_SCHED_BARRIER(VALU_MASK, 2, Group);
+        __builtin_amdgcn_sched_group_barrier(MFMA_MASK, 1, Group);
+        __builtin_amdgcn_sched_group_barrier(VALU_MASK, 2, Group);
     });
 }
 

@@ -15,19 +15,17 @@ constexpr int MFMA_MASK = 0x08;
 constexpr int VALU_MASK = 0x02;
 constexpr int EXP_MASK  = 0x400;
 
-#define GQA_D128_SCHED_BARRIER(mask, cnt, group) __builtin_amdgcn_sched_group_barrier(mask, cnt, group)
-
 template<int Pairs, int VALU_CNT, int Group>
 __device__ inline void sched_barrier_pairs() {
-    GQA_D128_SCHED_BARRIER(MFMA_MASK, 1, Group);
-    GQA_D128_SCHED_BARRIER(VALU_MASK, VALU_CNT, Group);
+    __builtin_amdgcn_sched_group_barrier(MFMA_MASK, 1, Group);
+    __builtin_amdgcn_sched_group_barrier(VALU_MASK, VALU_CNT, Group);
     if constexpr (Pairs > 1) sched_barrier_pairs<Pairs - 1, VALU_CNT, Group>();
 }
 
 template<int Pairs, int EXP_CNT, int Group>
 __device__ inline void sched_barrier_exp_pairs() {
-    GQA_D128_SCHED_BARRIER(MFMA_MASK, 1, Group);
-    GQA_D128_SCHED_BARRIER(EXP_MASK, EXP_CNT, Group);
+    __builtin_amdgcn_sched_group_barrier(MFMA_MASK, 1, Group);
+    __builtin_amdgcn_sched_group_barrier(EXP_MASK, EXP_CNT, Group);
     if constexpr (Pairs > 1) sched_barrier_exp_pairs<Pairs - 1, EXP_CNT, Group>();
 }
 
