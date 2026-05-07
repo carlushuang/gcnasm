@@ -599,9 +599,15 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_s_setprio(1);
     v_o = mma1(v_p, v_v, v_o);
     D_ACC row_max = attn_row_max<T>(v_s[1]);
-    rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-    m_row = row_max;
-    attn_sub_row<T>(v_s[1], row_max);
+    if constexpr (T::CAUSAL) {
+        bool need_rescale = (row_max > m_row);
+        rescale_m = need_rescale ? __builtin_amdgcn_exp2f(m_row - row_max) : D_ACC(1.0f);
+        m_row = need_rescale ? row_max : m_row;
+    } else {
+        rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+        m_row = row_max;
+    }
+    attn_sub_row<T>(v_s[1], m_row);
     asm volatile("" : "+v"(v_s[1]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
     sched_barrier_pairs<10, 5, 6>();
@@ -655,9 +661,15 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     __builtin_amdgcn_s_setprio(1);
     v_o = mma1(v_p, v_v, v_o);
     row_max = attn_row_max<T>(v_s[0]);
-    rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-    m_row = row_max;
-    attn_sub_row<T>(v_s[0], row_max);
+    if constexpr (T::CAUSAL) {
+        bool need_rescale = (row_max > m_row);
+        rescale_m = need_rescale ? __builtin_amdgcn_exp2f(m_row - row_max) : D_ACC(1.0f);
+        m_row = need_rescale ? row_max : m_row;
+    } else {
+        rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+        m_row = row_max;
+    }
+    attn_sub_row<T>(v_s[0], m_row);
     asm volatile("" : "+v"(v_s[0]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
     sched_barrier_pairs<10, 5, 8>();
@@ -709,9 +721,15 @@ __global__ __launch_bounds__(Traits::BLOCK_SIZE, 2) void gqa_kernel(opus_gqa_kar
     // Cluster 10:
     v_o = mma1(v_p, v_v, v_o);
     row_max = attn_row_max<T>(v_s[1]);
-    rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-    m_row = row_max;
-    attn_sub_row<T>(v_s[1], row_max);
+    if constexpr (T::CAUSAL) {
+        bool need_rescale = (row_max > m_row);
+        rescale_m = need_rescale ? __builtin_amdgcn_exp2f(m_row - row_max) : D_ACC(1.0f);
+        m_row = need_rescale ? row_max : m_row;
+    } else {
+        rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
+        m_row = row_max;
+    }
+    attn_sub_row<T>(v_s[1], m_row);
     asm volatile("" : "+v"(v_s[1]) ::);
     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
     sched_barrier_pairs<10, 5, 10>();
