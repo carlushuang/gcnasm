@@ -6,7 +6,8 @@ EXE   := $(BUILD)/opus_attn_gfx1201.exe
 CXXFLAGS := -std=c++17 -O3 -Wall -fopenmp --offload-arch=$(ARCH)
 
 KERNELS  := attn_gfx1201_kernel_v0.cc \
-            attn_gfx1201_kernel_v1.cc
+            attn_gfx1201_kernel_v1.cc \
+            attn_gfx1201_kernel_v2.cc
 KERN_OBJ := $(patsubst %.cc,$(BUILD)/%.o,$(KERNELS))
 HOST_OBJ := $(BUILD)/attn_gfx1201_host.o
 
@@ -20,6 +21,9 @@ $(BUILD)/attn_gfx1201_kernel_v0.o: attn_gfx1201_kernel_v0.cc attn_gfx1201_kernel
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/attn_gfx1201_kernel_v1.o: attn_gfx1201_kernel_v1.cc attn_gfx1201_kernel_v1_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v2.o: attn_gfx1201_kernel_v2.cc attn_gfx1201_kernel_v2_template.hpp attn_common.h | $(BUILD)
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
 
 $(HOST_OBJ): attn_gfx1201_host.cc attn_common.h | $(BUILD)

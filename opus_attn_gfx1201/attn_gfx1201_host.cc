@@ -20,23 +20,23 @@
 // Forward-declare kernel symbols from per-version .cc files.
 template<class T> __global__ void opus_attn_gfx1201_kernel   (opus_attn_kargs);  // v0
 template<class T> __global__ void opus_attn_gfx1201_kernel_v1(opus_attn_kargs);  // v1
+template<class T> __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs);  // v2
+
+template<int BM, int BN, class K>
+static void launch_(opus_attn_kargs k, K kern) {
+    using T = opus_attn_traits<BM, BN, 128>;
+    const int n_blocks = k.N / T::BLOCK_M;
+    const dim3 grid(n_blocks, k.H, k.B);
+    const dim3 block(T::BLOCK_SIZE);
+    kern<<<grid, block, 0, 0>>>(k);
+}
 
 static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
-    if (version == 0) {
-        using T = opus_attn_traits<16, 16, 128>;
-        const int n_blocks = k.N / T::BLOCK_M;
-        const dim3 grid(n_blocks, k.H, k.B);
-        const dim3 block(T::BLOCK_SIZE);
-        opus_attn_gfx1201_kernel<T><<<grid, block, 0, 0>>>(k);
-    } else if (version == 1) {
-        using T = opus_attn_traits<64, 16, 128>;
-        const int n_blocks = k.N / T::BLOCK_M;
-        const dim3 grid(n_blocks, k.H, k.B);
-        const dim3 block(T::BLOCK_SIZE);
-        opus_attn_gfx1201_kernel_v1<T><<<grid, block, 0, 0>>>(k);
-    } else {
-        fprintf(stderr, "unknown --version=%d\n", version);
-        std::exit(1);
+    switch (version) {
+        case 0: launch_<16, 16>(k, opus_attn_gfx1201_kernel   <opus_attn_traits<16, 16, 128>>); break;
+        case 1: launch_<64, 16>(k, opus_attn_gfx1201_kernel_v1<opus_attn_traits<64, 16, 128>>); break;
+        case 2: launch_<64, 64>(k, opus_attn_gfx1201_kernel_v2<opus_attn_traits<64, 64, 128>>); break;
+        default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
 
