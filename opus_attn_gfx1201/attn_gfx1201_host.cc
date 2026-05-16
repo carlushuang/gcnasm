@@ -17,15 +17,27 @@
     if (e != hipSuccess) { fprintf(stderr, "HIP %s @ %s:%d\n", hipGetErrorString(e), __FILE__, __LINE__); std::exit(1); } \
 } while(0)
 
-// Forward-declare the kernel symbol — defined by attn_gfx1201_kernel.cc.
-template<class T> __global__ void opus_attn_gfx1201_kernel(opus_attn_kargs);
+// Forward-declare kernel symbols from per-version .cc files.
+template<class T> __global__ void opus_attn_gfx1201_kernel   (opus_attn_kargs);  // v0
+template<class T> __global__ void opus_attn_gfx1201_kernel_v1(opus_attn_kargs);  // v1
 
-static void run_opus_attn_gfx1201(opus_attn_kargs k) {
-    using T = opus_attn_traits<16, 16, 128>;
-    const int n_blocks = k.N / T::BLOCK_M;
-    const dim3 grid(n_blocks, k.H, k.B);
-    const dim3 block(T::BLOCK_SIZE);
-    opus_attn_gfx1201_kernel<T><<<grid, block, 0, 0>>>(k);
+static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
+    if (version == 0) {
+        using T = opus_attn_traits<16, 16, 128>;
+        const int n_blocks = k.N / T::BLOCK_M;
+        const dim3 grid(n_blocks, k.H, k.B);
+        const dim3 block(T::BLOCK_SIZE);
+        opus_attn_gfx1201_kernel<T><<<grid, block, 0, 0>>>(k);
+    } else if (version == 1) {
+        using T = opus_attn_traits<64, 16, 128>;
+        const int n_blocks = k.N / T::BLOCK_M;
+        const dim3 grid(n_blocks, k.H, k.B);
+        const dim3 block(T::BLOCK_SIZE);
+        opus_attn_gfx1201_kernel_v1<T><<<grid, block, 0, 0>>>(k);
+    } else {
+        fprintf(stderr, "unknown --version=%d\n", version);
+        std::exit(1);
+    }
 }
 
 static void cpu_reference(int B, int H, int N, int D,
@@ -65,7 +77,7 @@ static void cpu_reference(int B, int H, int N, int D,
 
 int main(int argc, char** argv) {
     int B = 1, H = 1, N = 256, D = 128;
-    int verify = 1, warmups = 5, iters = 100;
+    int verify = 1, warmups = 5, iters = 100, version = 1;
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         auto eq = [&](const char* k, int& dst) {
@@ -79,9 +91,11 @@ int main(int argc, char** argv) {
         if (eq("-d", D) || eq("--dim",   D)) continue;
         if (eq("--verify", verify)) continue;
         if (eq("--iters",  iters))  continue;
+        if (eq("--version", version)) continue;
     }
-    if (D != 128) { fprintf(stderr, "v0: only D=128 supported (got %d)\n", D); return 1; }
-    if (N % 16) { fprintf(stderr, "N must be a multiple of 16 (got %d)\n", N); return 1; }
+    if (D != 128) { fprintf(stderr, "only D=128 supported (got %d)\n", D); return 1; }
+    if (N % 64)   { fprintf(stderr, "N must be a multiple of 64 (got %d)\n", N); return 1; }
+    printf("running version v%d  B=%d H=%d N=%d D=%d\n", version, B, H, N, D);
 
     fp32_t scale = 1.0f / std::sqrt((fp32_t)D);
     size_t sz_qkvo = (size_t)B * H * N * D;
@@ -107,7 +121,7 @@ int main(int argc, char** argv) {
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
-    for (int i = 0; i < warmups; ++i) run_opus_attn_gfx1201(kargs);
+    for (int i = 0; i < warmups; ++i) run_opus_attn_gfx1201(version, kargs);
     HIP_CALL(hipDeviceSynchronize());
 
     // Verify
@@ -135,7 +149,7 @@ int main(int argc, char** argv) {
     HIP_CALL(hipEventCreate(&ev0));
     HIP_CALL(hipEventCreate(&ev1));
     HIP_CALL(hipEventRecord(ev0));
-    for (int i = 0; i < iters; ++i) run_opus_attn_gfx1201(kargs);
+    for (int i = 0; i < iters; ++i) run_opus_attn_gfx1201(version, kargs);
     HIP_CALL(hipEventRecord(ev1));
     HIP_CALL(hipEventSynchronize(ev1));
     float ms = 0;
