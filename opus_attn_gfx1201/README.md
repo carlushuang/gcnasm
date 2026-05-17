@@ -1,7 +1,7 @@
 # opus_attn_gfx1201 — Flash Attention forward for gfx1201 (RDNA4)
 
 Hand-written **Flash Attention 2** forward kernel for AMD **gfx1201** (Navi 48,
-RX 9070 / 9070 XT) using the wave32 `_w32_gfx12` WMMA builtins. fp16 in/out,
+RX 9070 / 9070 XT) using the wave32 `_w32_gfx12` WMMA builtins. bf16 in/out,
 fp32 accumulator, online softmax, **D = 128 head dim** (only).
 
 Companion to [`opus_attn`](../opus_attn) which targets gfx950 / MFMA. The two
@@ -105,48 +105,62 @@ B=1 H=1 N=2048 D=128   max_abs=0.0000  mean_abs=0.00000  max_rel=0.0040  n_bad(>
 `max_abs=0.0000` is bit-exact within fp16 quantization. All tested shapes
 pass.
 
-## Performance — v0 through v11 results
+## Performance — v0 through v11 results (bf16)
 
 RX 9070 XT (gfx1201), measured TFLOPS = `4 · B · H · N² · D / time`. All
-twelve versions pass the same bit-exact-in-fp16 correctness checks; the table
+twelve versions pass the same bit-exact-in-bf16 correctness checks (max
+absolute error within bf16's ~7-bit mantissa quantization); the table
 below is throughput only. Selectable at runtime via `--version=N`.
 
 | version | geometry                          | H=8 N=1024 | H=32 N=2048 | H=32 N=4096 (B=4) |
 |:---:|---|---:|---:|---:|
-| v0 | 1 wave/WG, BLOCK_M=16, BLOCK_N=16 — direct global reads | 14.9 | 30.3 | 29.2 |
-| v1 | 4 waves/WG, BLOCK_M=64, BLOCK_N=16, coop smem K/V | 17.3 | 23.8 | 27.2 |
-| v2 | v1 + BLOCK_N=64 (4 sub-tiles, FA online softmax) | 6.3  | 7.9  | 8.5  |
-| v3 | v1 + tighter launch_bounds + fused softmax | 16.1 | 23.3 | 23.5 |
-| v4 | v0 + double-buffered K/V register prefetch | 9.3  | 11.9 | 12.7 |
-| v5 | v0 + BLOCK_N=32 (online softmax, 2 sub-tiles) | 14.6 | 30.0 | 28.9 |
-| v6 | v0 + contiguous V load + smem transpose | 19.9 | 32.3 | 34.3 |
-| v7 | v6 + batched V load (all 8 D-tiles at once, 1 barrier) | 22.5 | 31.1 | 30.6 |
-| v8 | v6 + BLOCK_N=32 | 19.1 | 34.9 | 33.2 |
-| v9 | v6 + V pre-transposed in DRAM (NOT production-realistic) | 18.9 | 36.3 | 37.0 |
-| v10 | v9 + BLOCK_N=32 | 19.2 | 36.3 | 36.4 |
-| **v11** | **mma swap_ab — no S→P smem flip, vectorized O write** | **26.7** | **47.5** | **41.8** |
+| v0 | 1 wave/WG, BLOCK_M=16, BLOCK_N=16 — direct global reads | 15.0 | 30.3 | 29.4 |
+| v1 | 4 waves/WG, BLOCK_M=64, BLOCK_N=16, coop smem K/V | 17.3 | 27.5 | 27.2 |
+| v2 | v1 + BLOCK_N=64 (4 sub-tiles, FA online softmax) | 6.3  | 6.6  | 8.5  |
+| v3 | v1 + tighter launch_bounds + fused softmax | 16.1 | 28.1 | 23.5 |
+| v4 | v0 + double-buffered K/V register prefetch | 9.3  | 15.0 | 12.7 |
+| v5 | v0 + BLOCK_N=32 (online softmax, 2 sub-tiles) | 16.3 | 23.5 | 22.7 |
+| v6 | v0 + contiguous V load + smem transpose | 18.6 | 34.4 | 35.3 |
+| v7 | v6 + batched V load (all 8 D-tiles at once, 1 barrier) | 22.5 | 29.9 | 30.6 |
+| v8 | v6 + BLOCK_N=32 | 23.6 | 30.9 | 31.5 |
+| v9 | v6 + V pre-transposed in DRAM (NOT production-realistic) | 25.2 | 42.9 | 43.6 |
+| v10 | v9 + BLOCK_N=32 | 19.2 | 39.2 | 36.4 |
+| **v11** | **mma swap_ab — no S→P smem flip, vectorized O write** | **17.7** | **37.2** | **37.1** |
 
 **v11 is the recommended production kernel.** Takes V in the standard
 `[B, H, N, D]` layout, eliminates the S→P smem flip entirely, vectorizes the
-output write, and reaches **47.5 TFLOPS = ~24% MFU on H=32 N=2048**
-(against the 195 TFLOPS marketing peak). +56% over v0, +46% over v6.
+output write, and reaches **37.2 TFLOPS = ~19% MFU on H=32 N=2048**
+(against the 195 TFLOPS marketing peak). +23% over v0, +8% over v6.
 
-### Achieved MFU vs. RX 9070 XT 195 TFLOPS dense fp16 peak
+### Achieved MFU vs. RX 9070 XT 195 TFLOPS dense bf16 peak
 
 | version | best TFLOPS | MFU |
 |---|---:|---:|
 | v0 | 30.3 | 15.5% |
-| v6 | 34.3 | 17.6% |
-| v9 (upper-bound, V pre-transposed in DRAM, NOT production) | 37.0 | 19.0% |
-| **v11** | **47.5** | **24.4%** |
+| v6 | 35.3 | 18.1% |
+| v9 (upper-bound, V pre-transposed in DRAM, NOT production) | 43.6 | 22.4% |
+| **v11** | **37.2** | **19.1%** |
 
 The included `ubench` measures on-chip ceilings directly: WMMA
-`f32_16x16x16_f16` reaches **179 TFLOPS** (~92% of marketing peak) and
+`f32_16x16x16_bf16` reaches **200 TFLOPS** (slightly above marketing) and
 `v_exp2_f32` reaches **3.28 T ops/s**. The interleaved-mode benchmark
 (`./ubench interleave`) shows that wmma and v_exp2 **partially co-execute**
-on gfx12 — at 1 exp per wmma, wmma TFLOPS drops only 15% (179→153) while
-exp adds ~18.7 G wave-inst/s on top. So softmax exp work is partially
-hidden behind wmma's multi-cycle issue window, but not free.
+on gfx12 — at 1 exp per wmma, bf16 wmma TFLOPS drops only 8% (200→164)
+while exp adds ~20 G wave-inst/s on top. Softmax exp work is partially
+hidden behind wmma's multi-cycle issue window, but the bf16 window (12.6
+cyc) is tighter than fp16's (14 cyc), so less hides — about 0.4 cyc of
+exp work per wmma for bf16 vs 1.5 cyc for fp16.
+
+### Note on v11's narrower margin under bf16
+
+In fp16 v11 was +46% over v6 (47 vs 32 TFLOPS). Under bf16 the margin
+shrinks to +8% (37 vs 35) because (a) bf16 wmma is faster (12.6 cyc
+vs 14), so v11's many small VALU ops per wmma fit less easily into the
+wmma shadow, and (b) bf16 → fp32 conversion is a 5-ALU-op sequence on
+gfx12 (no single-instruction `v_cvt_pk_bf16_f32`), penalizing kernels
+that do many per-iter conversions. v11 hoists this conversion out of
+the inner dt loop to mitigate (without the hoist v11 was only 30
+TFLOPS under bf16).
 
 ### Why v9 is kept but not recommended
 
