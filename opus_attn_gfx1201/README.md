@@ -21,8 +21,8 @@ opus_attn_gfx1201/
 ├── Makefile
 ├── README.md                          ← you are here
 ├── attn_common.h                      ← kargs, traits
-├── attn_gfx1201_kernel_template.hpp   ← device kernel template
-├── attn_gfx1201_kernel.cc             ← explicit template instantiation
+├── attn_gfx1201_kernel_v{0..10}_template.hpp   ← device kernel templates
+├── attn_gfx1201_kernel_v{0..10}.cc             ← explicit template instantiations
 └── attn_gfx1201_host.cc               ← launcher, CPU reference, bench, main()
 ```
 
@@ -105,25 +105,53 @@ B=1 H=1 N=2048 D=128   max_abs=0.0000  mean_abs=0.00000  max_rel=0.0040  n_bad(>
 `max_abs=0.0000` is bit-exact within fp16 quantization. All tested shapes
 pass.
 
-## Performance — v0 through v5 results
+## Performance — v0 through v10 results
 
 RX 9070 XT (gfx1201), measured TFLOPS = `4 · B · H · N² · D / time`. All
-six versions pass the same bit-exact-in-fp16 correctness checks; the table
+eleven versions pass the same bit-exact-in-fp16 correctness checks; the table
 below is throughput only. Selectable at runtime via `--version=N`.
 
 | version | geometry                          | H=8 N=1024 | H=32 N=2048 | H=32 N=4096 (B=4) |
 |:---:|---|---:|---:|---:|
-| **v0** | 1 wave/WG, BLOCK_M=16, BLOCK_N=16 — direct global reads | **14.9** | **30.6** | **29.5** |
+| v0 | 1 wave/WG, BLOCK_M=16, BLOCK_N=16 — direct global reads | 14.9 | 30.3 | 29.2 |
 | v1 | 4 waves/WG, BLOCK_M=64, BLOCK_N=16, coop smem K/V | 17.3 | 23.8 | 27.2 |
 | v2 | v1 + BLOCK_N=64 (4 sub-tiles, FA online softmax) | 6.3  | 7.9  | 8.5  |
 | v3 | v1 + tighter launch_bounds + fused softmax | 16.1 | 23.3 | 23.5 |
 | v4 | v0 + double-buffered K/V register prefetch | 9.3  | 11.9 | 12.7 |
 | v5 | v0 + BLOCK_N=32 (online softmax, 2 sub-tiles) | 14.6 | 30.0 | 28.9 |
+| **v6** | v0 + **contiguous V load + smem transpose** | **19.9** | 32.3 | 34.3 |
+| v7 | v6 + batched V load (all 8 D-tiles at once, 1 barrier) | 22.5 | 31.1 | 30.6 |
+| v8 | v6 + BLOCK_N=32 | 19.1 | 34.9 | 33.2 |
+| **v9** | v6 + **V pre-transposed in DRAM** (no in-kernel V flip) | 18.9 | **36.3** | **37.0** |
+| v10 | v9 + BLOCK_N=32 | 19.2 | 36.3 | 36.4 |
 
-**v0 is the perf winner.** v5 ties v0. All other variants regressed —
-see the per-version commit messages for root-cause analysis.
+**v9 wins** at the production-sized shapes (≥H=32, N≥2048): **37.0 TFLOPS = ~19.5% MFU**
+on the 9070 XT's ~190 TFLOPS dense fp16 peak. **v6 wins at small shapes** because it
+doesn't require a pre-transpose pass.
 
-## What I learned trying v1 → v5
+### What v6 vs v0 actually changed
+
+v0's V load is strided per lane (`v_col[j * stride_n]`), which forces the
+compiler to emit 8 `global_load_u16`/`d16_hi` pairs per V tile per lane —
+80+ small loads per outer iter. v6 loads V along its contiguous D axis (1
+`global_load_b128` per lane), then transposes the tile in smem to recover
+the B-fragment layout. Net: 10× fewer V load instructions, +15% TFLOPS.
+
+### What v9 vs v6 actually changed
+
+v9 assumes V is already stored in DRAM as `[B, H, D, N]` (transposed from
+the standard `[B, H, N, D]`). The B-fragment access pattern is then
+naturally contiguous along N — no in-kernel transpose needed at all. Saves
+the smem store + wave_barrier + strided smem reads per V tile vs v6. Net:
++8–14% TFLOPS over v6. The host runs a one-time transpose kernel before
+the benchmark loop; in production this is amortizable since the V projection
+output can be emitted directly in the transposed layout.
+
+This matches CK's `MakeShuffledVRegBlockDescriptor` pattern in spirit — CK
+shuffles in registers after a row-major DRAM load; v9 takes the simpler
+path of doing the transpose once in DRAM and skipping the per-tile shuffle.
+
+## What I learned trying v1 → v10
 
 Three "obvious" optimization paths from the original roadmap turned out
 to be **regressions** on gfx1201 — kept in the tree as documented
@@ -150,38 +178,56 @@ negative results:
    scheduler that was already doing a fine job hiding VMEM latency.
    The hardware OOO + waitcnt does this better than hand-rolled buffers.
 
-The one optimization that **didn't** regress (v5: BLOCK_N=32 with online
-softmax) tied v0 — the halved softmax overhead didn't materialize as
-expected because softmax wasn't actually the bottleneck the projection
-assumed.
+The one v1-v5 optimization that **didn't** regress (v5: BLOCK_N=32 with online
+softmax) tied v0. That projection ("halve softmax overhead → faster") was
+wrong because softmax was not the bottleneck — turned out the **V load
+pattern** was.
 
-## What actually limits gfx1201 attention perf
+### What I learned from v6-v10 (after disasm-driven profiling)
 
-Based on the empirical sweep:
+Disassembling v0 with `llvm-objdump` revealed the actual issue:
 
-- **v0 at ~30 TFLOPS = ~16% MFU** on a ~190 TFLOPS dense-fp16 chip.
-- Not memory-bound: the L1 cache absorbs the redundant K/V reads, so
-  reducing global traffic doesn't help.
-- Not softmax-bound: BLOCK_N=32 (halving softmax-per-output) tied v0.
-- Likely **wmma issue rate** + **smem round-trip on P** dominate. The
-  P col→row flip via smem happens every BLOCK_N rows of output.
+```
+v0 V load: 42× global_load_u16  +  40× global_load_d16_hi_b16   (per outer iter)
+v0 K load:  7× global_load_b128 +   9× global_load_b96          (per outer iter)
+```
 
-## Directions a v6+ might explore
+K is loaded contiguously along D (vectorizes to `b128`/`b96`), but V is read
+strided by `stride_n = D = 128 fp16` per lane to construct the wmma
+B-fragment layout — the compiler is forced to emit 16-bit-granularity loads.
+Per outer iter: 80+ V loads vs 16 K loads. **V load was the bandwidth
+bottleneck the whole time**, hidden under "we're wmma-bound" intuition.
 
-These are GENUINELY open and would need investigation rather than the
-"safe" optimizations I tried in v1-v5:
+Fixes:
+- **v6**: load V along its contiguous axis, transpose in smem → **+15%** over v0.
+- **v9**: pre-transpose V in DRAM so the B-layout load is naturally contiguous,
+  drop the smem flip entirely → **+27%** over v0 (~19.5% MFU).
+- **v10** (v9 + BLOCK_N=32): tied v9 — softmax still not the bottleneck.
+
+## What still limits gfx1201 attention perf at ~19.5% MFU
+
+- v9 at 37 TFLOPS / 190 TFLOPS dense = ~19.5% MFU.
+- The S → P transpose via smem still happens once per outer iter (1 store +
+  barrier + 8 strided reads). That accounts for ~10 small ds-ops per iter.
+- The fp32 v_o accumulator pins 64 VGPRs/lane (32 dwords); the compiler has
+  to keep them live across the entire V tile loop.
+- wmma issue rate: at 16 wmmas/outer iter × 128 outer × 16 cycles/wmma =
+  32K cycles of pure wmma per WG; we're running at ~2× that. The "other 50%"
+  is global load latency + smem transpose + softmax dependency chain.
+
+## Directions a v11+ might explore
 
 | Idea | Risk | Likely impact |
 |---|---|---|
-| Skip the P→smem flip entirely by emitting V already pre-permuted so the wmma B-operand layout matches column-distributed P directly | high (changes V load layout) | moderate — would save the `__builtin_amdgcn_wave_barrier()` cost |
-| Use `__builtin_amdgcn_global_load_lds_*` (true async global→LDS) with smem cooperation, accepting that this only helps when K/V exceeds L1 capacity (very long contexts, large H_KV) | medium | moderate — only at very large N |
-| Drop fp32 accumulation for v_o; use fp16 + periodic fp32 rescale (lossy) | high (numerics) | high — halves v_o register footprint, frees compiler to schedule more aggressively |
-| Switch to GQA (H_kv < H_q) and share K/V loads across query heads on the same SM, which IS amortizable across waves | medium | high for GQA-shaped workloads (DeepSeek/Llama 3) |
-| Add causal masking (avoiding wasted compute on upper triangular) | low | up to ~2× for causal inference |
+| Causal masking (skip upper triangular) | low | up to ~2× for causal inference |
+| GQA (share K/V across query heads) | medium | high for GQA-shaped workloads (Llama 3, DeepSeek) |
+| fp16 v_o accumulator with periodic fp32 rescale | high (numerics) | high — halves v_o footprint, frees scheduler |
+| Drop the S→P smem flip by computing the wmma in transposed form (compute O^T = V^T @ P^T directly, write transposed) | high (layout rework) | moderate — saves the last smem barrier |
+| `__builtin_amdgcn_global_load_lds_*` (true async global→LDS) for K | medium | only helps when K exceeds L1 (very long contexts) |
 
-The user-facing recommendation is to **run `--version=0`** today; v1-v5
-remain in the tree for reference and as a starting point for any of the
-above v6+ explorations.
+The user-facing recommendation is **`--version=9`** for production (with V
+pre-transposed) or **`--version=6`** if pre-transposing V is impractical.
+v0–v5 remain in the tree as documented negative-result references.
 
 ## Architectural notes specific to gfx1201
 
