@@ -128,21 +128,25 @@ below is throughput only. Selectable at runtime via `--version=N`.
 
 **v11 is the recommended production kernel.** Takes V in the standard
 `[B, H, N, D]` layout, eliminates the S→P smem flip entirely, vectorizes the
-output write, and reaches **47.5 TFLOPS = ~36% wmma MFU on H=32 N=2048**.
-+56% over v0, +46% over v6.
+output write, and reaches **47.5 TFLOPS = ~24% MFU on H=32 N=2048**
+(against the 195 TFLOPS marketing peak). +56% over v0, +46% over v6.
 
-### Achieved MFU vs. measured hardware ceiling
+### Achieved MFU vs. RX 9070 XT 195 TFLOPS dense fp16 peak
 
-`opus_attn_gfx1201/ubench` reports the gfx1201 wmma throughput ceiling at
-**132 TFLOPS** (8-pipe wmma_f32_16x16x16_f16, ~70% of the 195 TFLOPS
-marketing spec). v_exp2_f32 peak ≈ **3.25 G ops/s**.
-
-| version | best TFLOPS | vs 132 TFLOPS wmma peak |
+| version | best TFLOPS | MFU |
 |---|---:|---:|
-| v0 | 30.3 | 23% |
-| v6 | 34.3 | 26% |
-| v9 (upper-bound, V pre-transposed in DRAM, NOT production) | 37.0 | 28% |
-| **v11** | **47.5** | **36%** |
+| v0 | 30.3 | 15.5% |
+| v6 | 34.3 | 17.6% |
+| v9 (upper-bound, V pre-transposed in DRAM, NOT production) | 37.0 | 19.0% |
+| **v11** | **47.5** | **24.4%** |
+
+The included `ubench` measures on-chip ceilings directly: WMMA
+`f32_16x16x16_f16` reaches **179 TFLOPS** (~92% of marketing peak) and
+`v_exp2_f32` reaches **3.28 T ops/s**. The interleaved-mode benchmark
+(`./ubench interleave`) shows that wmma and v_exp2 **partially co-execute**
+on gfx12 — at 1 exp per wmma, wmma TFLOPS drops only 15% (179→153) while
+exp adds ~18.7 G wave-inst/s on top. So softmax exp work is partially
+hidden behind wmma's multi-cycle issue window, but not free.
 
 ### Why v9 is kept but not recommended
 
@@ -210,12 +214,11 @@ negative results:
    The hardware OOO + waitcnt does this better than hand-rolled buffers.
 
 The one v1-v5 optimization that **didn't** regress (v5: BLOCK_N=32 with online
-softmax) tied v0. At the time I concluded "softmax wasn't the bottleneck" —
-that conclusion was overstated. The ubench numbers (~3.25 G exp2/s ceiling)
-show exp2 alone would take ~40% of v6's runtime if it ran fully serialized.
-At v0/v5 perf level, V load was the dominant bottleneck, so halving softmax
-didn't help much; but after v6 fixed V load, softmax becomes a real factor —
-which is why v8 (v6 + BLOCK_N=32) does pick up a bit on the H=32 N=2048 shape.
+softmax) tied v0. The reason softmax doesn't move the needle much: ubench's
+interleaved-mode benchmark shows wmma and v_exp2 PARTIALLY co-execute on
+gfx12 (1 exp per wmma costs only 15% of wmma TFLOPS, vs 100% if they fully
+serialized). The FA pipeline has ~1 exp per wmma, so halving softmax can
+buy back ~15% of wmma peak at most — a real but bounded ceiling.
 
 ### What I learned from v6-v10 (after disasm-driven profiling)
 
