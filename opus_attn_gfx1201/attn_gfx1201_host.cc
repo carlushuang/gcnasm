@@ -25,6 +25,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v3(opus_attn_kargs); 
 template<class T> __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs);  // v4
 template<class T> __global__ void opus_attn_gfx1201_kernel_v5(opus_attn_kargs);  // v5
 template<class T> __global__ void opus_attn_gfx1201_kernel_v6(opus_attn_kargs);  // v6
+template<class T> __global__ void opus_attn_gfx1201_kernel_v7(opus_attn_kargs);  // v7
 
 template<int BM, int BN, class K>
 static void launch_(opus_attn_kargs k, K kern) {
@@ -44,6 +45,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 4: launch_<16, 16>(k, opus_attn_gfx1201_kernel_v4<opus_attn_traits<16, 16, 128>>); break;
         case 5: launch_<16, 32>(k, opus_attn_gfx1201_kernel_v5<opus_attn_traits<16, 32, 128>>); break;
         case 6: launch_<16, 16>(k, opus_attn_gfx1201_kernel_v6<opus_attn_traits<16, 16, 128>>); break;
+        case 7: launch_<16, 16>(k, opus_attn_gfx1201_kernel_v7<opus_attn_traits<16, 16, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
