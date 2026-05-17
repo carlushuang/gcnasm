@@ -19,7 +19,7 @@ KERNELS  := attn_gfx1201_kernel_v0.cc \
 KERN_OBJ := $(patsubst %.cc,$(BUILD)/%.o,$(KERNELS))
 HOST_OBJ := $(BUILD)/attn_gfx1201_host.o
 
-.PHONY: all clean run
+.PHONY: all clean run ubench
 all: $(EXE)
 
 $(BUILD):
@@ -66,6 +66,13 @@ $(EXE): $(KERN_OBJ) $(HOST_OBJ)
 
 run: $(EXE)
 	./$(EXE)
+
+
+$(BUILD)/ubench: ubench_gfx1201.cc | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) $< -o $@
+
+ubench: $(BUILD)/ubench
+	./$(BUILD)/ubench
 
 clean:
 	rm -rf $(BUILD)
