@@ -19,7 +19,7 @@
 #include <hip/hip_runtime.h>
 #include "attn_common.h"
 
-using fp16x8_t = fp16_t __attribute__((ext_vector_type(8)));
+using bf16x8_t = bf16_t __attribute__((ext_vector_type(8)));
 using fp32x8_t = fp32_t __attribute__((ext_vector_type(8)));
 
 __device__ static inline fp32_t v2_fmaxf(fp32_t a, fp32_t b) { return a > b ? a : b; }
@@ -54,23 +54,23 @@ __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs k)
     const int stride_h = k.N * k.D;
     const int stride_b = k.H * k.N * k.D;
 
-    const fp16_t* __restrict__ Qp = reinterpret_cast<const fp16_t*>(k.ptr_q) + b * stride_b + h * stride_h;
-    const fp16_t* __restrict__ Kp = reinterpret_cast<const fp16_t*>(k.ptr_k) + b * stride_b + h * stride_h;
-    const fp16_t* __restrict__ Vp = reinterpret_cast<const fp16_t*>(k.ptr_v) + b * stride_b + h * stride_h;
-    fp16_t*       __restrict__ Op = reinterpret_cast<fp16_t*>      (k.ptr_o) + b * stride_b + h * stride_h;
+    const bf16_t* __restrict__ Qp = reinterpret_cast<const bf16_t*>(k.ptr_q) + b * stride_b + h * stride_h;
+    const bf16_t* __restrict__ Kp = reinterpret_cast<const bf16_t*>(k.ptr_k) + b * stride_b + h * stride_h;
+    const bf16_t* __restrict__ Vp = reinterpret_cast<const bf16_t*>(k.ptr_v) + b * stride_b + h * stride_h;
+    bf16_t*       __restrict__ Op = reinterpret_cast<bf16_t*>      (k.ptr_o) + b * stride_b + h * stride_h;
 
     constexpr int K_SMEM_ELEMS = BLOCK_N * D;
     constexpr int V_SMEM_ELEMS = BLOCK_N * D;
     constexpr int P_SMEM_ELEMS = T::NUM_WAVES * WAVE_M * SUB_N;
-    __shared__ fp16_t s_k[K_SMEM_ELEMS];
-    __shared__ fp16_t s_v[V_SMEM_ELEMS];
-    __shared__ fp16_t s_p[P_SMEM_ELEMS];
+    __shared__ bf16_t s_k[K_SMEM_ELEMS];
+    __shared__ bf16_t s_v[V_SMEM_ELEMS];
+    __shared__ bf16_t s_p[P_SMEM_ELEMS];
 
     // ── Q load (persistent in registers) ─────────────────────────────────
     const int wave_m_base = q_block_id * BLOCK_M + wave_id * WAVE_M;
-    fp16x8_t v_q[DK];
+    bf16x8_t v_q[DK];
     {
-        const fp16_t* q_row = Qp + (wave_m_base + col16) * stride_n;
+        const bf16_t* q_row = Qp + (wave_m_base + col16) * stride_n;
         #pragma unroll
         for (int kt = 0; kt < DK; ++kt) {
             const int k_off = kt * W_K + row8;
@@ -83,7 +83,7 @@ __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs k)
     #pragma unroll
     for (int kt = 0; kt < DK; ++kt) {
         #pragma unroll
-        for (int j = 0; j < 8; ++j) v_q[kt][j] = static_cast<fp16_t>(static_cast<fp32_t>(v_q[kt][j]) * qscale);
+        for (int j = 0; j < 8; ++j) v_q[kt][j] = bf16_from_f32(bf16_to_f32(v_q[kt][j]) * qscale);
     }
 
     fp32x8_t v_o[DK];
@@ -104,8 +104,8 @@ __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs k)
         const int n_base = outer * BLOCK_N;
 
         // Cooperative copy: 128 threads × 64 fp16 = 8192 fp16 = K tile (or V tile)
-        const fp16_t* k_src = Kp + n_base * stride_n;
-        const fp16_t* v_src = Vp + n_base * stride_n;
+        const bf16_t* k_src = Kp + n_base * stride_n;
+        const bf16_t* v_src = Vp + n_base * stride_n;
         #pragma unroll
         for (int i = 0; i < FP16_PER_LD; ++i) {
             const int idx = i * T::BLOCK_SIZE + tid;
@@ -125,11 +125,11 @@ __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs k)
             fp32x8_t v_s = {0,0,0,0,0,0,0,0};
             #pragma unroll
             for (int kt = 0; kt < DK; ++kt) {
-                fp16x8_t v_k;
-                const fp16_t* k_row = s_k + (sub_n_off + col16) * D + kt * W_K;
+                bf16x8_t v_k;
+                const bf16_t* k_row = s_k + (sub_n_off + col16) * D + kt * W_K;
                 #pragma unroll
                 for (int j = 0; j < 8; ++j) v_k[j] = k_row[row8 + j];
-                v_s = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(v_q[kt], v_k, v_s);
+                v_s = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(v_q[kt], v_k, v_s);
             }
 
             // 2) Row max (16-lane DPP reduction)
@@ -169,14 +169,14 @@ __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs k)
             }
 
             // 3) Flip S → P via per-wave smem
-            fp16_t* p_wave = s_p + wave_id * (WAVE_M * SUB_N);
+            bf16_t* p_wave = s_p + wave_id * (WAVE_M * SUB_N);
             #pragma unroll
             for (int j = 0; j < 8; ++j) {
-                p_wave[(row8 + j) * SUB_N + col16] = static_cast<fp16_t>(v_s[j]);
+                p_wave[(row8 + j) * SUB_N + col16] = bf16_from_f32(v_s[j]);
             }
             __builtin_amdgcn_wave_barrier();
 
-            fp16x8_t v_p;
+            bf16x8_t v_p;
             const int p_row = col16;
             #pragma unroll
             for (int j = 0; j < 8; ++j) v_p[j] = p_wave[p_row * SUB_N + row8 + j];
@@ -185,11 +185,11 @@ __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs k)
             // 4) O += P @ V for this sub-tile
             #pragma unroll
             for (int dt = 0; dt < DK; ++dt) {
-                fp16x8_t v_v;
-                const fp16_t* v_col = s_v + (sub_n_off + row8) * D + dt * W_K + col16;
+                bf16x8_t v_v;
+                const bf16_t* v_col = s_v + (sub_n_off + row8) * D + dt * W_K + col16;
                 #pragma unroll
                 for (int j = 0; j < 8; ++j) v_v[j] = v_col[j * D];
-                v_o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(v_p, v_v, v_o[dt]);
+                v_o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(v_p, v_v, v_o[dt]);
             }
         }
 
@@ -205,7 +205,7 @@ __global__ void opus_attn_gfx1201_kernel_v2(opus_attn_kargs k)
         const int d_base = kt * W_K + col16;
         #pragma unroll
         for (int j = 0; j < 8; ++j) {
-            Op[(wave_m_base + row8 + j) * stride_n + d_base] = static_cast<fp16_t>(v_o[kt][j] * inv_l[j]);
+            Op[(wave_m_base + row8 + j) * stride_n + d_base] = bf16_from_f32(v_o[kt][j] * inv_l[j]);
         }
     }
 #else

@@ -2,7 +2,6 @@
 // opus_attn_gfx1201 — host driver + correctness check + benchmark.
 
 #include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -30,7 +29,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v8(opus_attn_kargs); 
 template<class T> __global__ void opus_attn_gfx1201_kernel_v9(opus_attn_kargs);  // v9
 template<class T> __global__ void opus_attn_gfx1201_kernel_v10(opus_attn_kargs);  // v10
 template<class T> __global__ void opus_attn_gfx1201_kernel_v11(opus_attn_kargs); // v11
-__global__ void v_transpose_kernel(const fp16_t*, fp16_t*, int, int, int, int);
+__global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
 static void launch_(opus_attn_kargs k, K kern) {
@@ -60,21 +59,21 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
 }
 
 static void cpu_reference(int B, int H, int N, int D,
-                          const fp16_t* Q, const fp16_t* K, const fp16_t* V,
-                          fp16_t* O, fp32_t scale)
+                          const bf16_t* Q, const bf16_t* K, const bf16_t* V,
+                          bf16_t* O, fp32_t scale)
 {
     std::vector<fp32_t> S(N), P(N);
     for (int b = 0; b < B; ++b)
     for (int h = 0; h < H; ++h) {
-        const fp16_t* Qbh = Q + (b * H + h) * N * D;
-        const fp16_t* Kbh = K + (b * H + h) * N * D;
-        const fp16_t* Vbh = V + (b * H + h) * N * D;
-        fp16_t*       Obh = O + (b * H + h) * N * D;
+        const bf16_t* Qbh = Q + (b * H + h) * N * D;
+        const bf16_t* Kbh = K + (b * H + h) * N * D;
+        const bf16_t* Vbh = V + (b * H + h) * N * D;
+        bf16_t*       Obh = O + (b * H + h) * N * D;
         for (int m = 0; m < N; ++m) {
             fp32_t row_max = -3.4e38f;
             for (int n = 0; n < N; ++n) {
                 fp32_t s = 0.0f;
-                for (int d = 0; d < D; ++d) s += (fp32_t)Qbh[m*D+d] * (fp32_t)Kbh[n*D+d];
+                for (int d = 0; d < D; ++d) s += bf16_to_f32(Qbh[m*D+d]) * bf16_to_f32(Kbh[n*D+d]);
                 s *= scale;
                 S[n] = s;
                 if (s > row_max) row_max = s;
@@ -87,8 +86,8 @@ static void cpu_reference(int B, int H, int N, int D,
             const fp32_t inv = (row_sum > 0.0f) ? (1.0f / row_sum) : 0.0f;
             for (int d = 0; d < D; ++d) {
                 fp32_t o = 0.0f;
-                for (int n = 0; n < N; ++n) o += P[n] * (fp32_t)Vbh[n*D+d];
-                Obh[m*D+d] = (fp16_t)(o * inv);
+                for (int n = 0; n < N; ++n) o += P[n] * bf16_to_f32(Vbh[n*D+d]);
+                Obh[m*D+d] = bf16_from_f32(o * inv);
             }
         }
     }
@@ -118,23 +117,23 @@ int main(int argc, char** argv) {
 
     fp32_t scale = 1.0f / std::sqrt((fp32_t)D);
     size_t sz_qkvo = (size_t)B * H * N * D;
-    std::vector<fp16_t> hQ(sz_qkvo), hK(sz_qkvo), hV(sz_qkvo), hO(sz_qkvo), hRef(sz_qkvo);
+    std::vector<bf16_t> hQ(sz_qkvo), hK(sz_qkvo), hV(sz_qkvo), hO(sz_qkvo), hRef(sz_qkvo);
 
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> u(-0.5f, 0.5f);
-    for (auto& x : hQ) x = (fp16_t)u(rng);
-    for (auto& x : hK) x = (fp16_t)u(rng);
-    for (auto& x : hV) x = (fp16_t)u(rng);
+    for (auto& x : hQ) x = bf16_from_f32(u(rng));
+    for (auto& x : hK) x = bf16_from_f32(u(rng));
+    for (auto& x : hV) x = bf16_from_f32(u(rng));
 
-    fp16_t *dQ, *dK, *dV, *dO, *dVT;
-    HIP_CALL(hipMalloc(&dQ, sz_qkvo * sizeof(fp16_t)));
-    HIP_CALL(hipMalloc(&dK, sz_qkvo * sizeof(fp16_t)));
-    HIP_CALL(hipMalloc(&dV, sz_qkvo * sizeof(fp16_t)));
-    HIP_CALL(hipMalloc(&dVT, sz_qkvo * sizeof(fp16_t)));
-    HIP_CALL(hipMalloc(&dO, sz_qkvo * sizeof(fp16_t)));
-    HIP_CALL(hipMemcpy(dQ, hQ.data(), sz_qkvo * sizeof(fp16_t), hipMemcpyHostToDevice));
-    HIP_CALL(hipMemcpy(dK, hK.data(), sz_qkvo * sizeof(fp16_t), hipMemcpyHostToDevice));
-    HIP_CALL(hipMemcpy(dV, hV.data(), sz_qkvo * sizeof(fp16_t), hipMemcpyHostToDevice));
+    bf16_t *dQ, *dK, *dV, *dO, *dVT;
+    HIP_CALL(hipMalloc(&dQ, sz_qkvo * sizeof(bf16_t)));
+    HIP_CALL(hipMalloc(&dK, sz_qkvo * sizeof(bf16_t)));
+    HIP_CALL(hipMalloc(&dV, sz_qkvo * sizeof(bf16_t)));
+    HIP_CALL(hipMalloc(&dVT, sz_qkvo * sizeof(bf16_t)));
+    HIP_CALL(hipMalloc(&dO, sz_qkvo * sizeof(bf16_t)));
+    HIP_CALL(hipMemcpy(dQ, hQ.data(), sz_qkvo * sizeof(bf16_t), hipMemcpyHostToDevice));
+    HIP_CALL(hipMemcpy(dK, hK.data(), sz_qkvo * sizeof(bf16_t), hipMemcpyHostToDevice));
+    HIP_CALL(hipMemcpy(dV, hV.data(), sz_qkvo * sizeof(bf16_t), hipMemcpyHostToDevice));
 
     // Pre-transpose V → V_T for v9 (one-time, not timed in bench loop)
     {
@@ -154,12 +153,12 @@ int main(int argc, char** argv) {
 
     // Verify
     if (verify) {
-        HIP_CALL(hipMemcpy(hO.data(), dO, sz_qkvo * sizeof(fp16_t), hipMemcpyDeviceToHost));
+        HIP_CALL(hipMemcpy(hO.data(), dO, sz_qkvo * sizeof(bf16_t), hipMemcpyDeviceToHost));
         cpu_reference(B, H, N, D, hQ.data(), hK.data(), hV.data(), hRef.data(), scale);
         double max_abs = 0, mean_abs = 0, max_rel = 0;
         int n_bad = 0;
         for (size_t i = 0; i < sz_qkvo; ++i) {
-            double a = (double)(fp32_t)hO[i], r = (double)(fp32_t)hRef[i];
+            double a = (double)bf16_to_f32(hO[i]), r = (double)bf16_to_f32(hRef[i]);
             double d = std::abs(a - r);
             max_abs = std::max(max_abs, d);
             mean_abs += d;

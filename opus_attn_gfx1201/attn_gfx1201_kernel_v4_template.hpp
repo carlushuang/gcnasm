@@ -17,7 +17,7 @@
 #include <hip/hip_runtime.h>
 #include "attn_common.h"
 
-using fp16x8_t = fp16_t __attribute__((ext_vector_type(8)));
+using bf16x8_t = bf16_t __attribute__((ext_vector_type(8)));
 using fp32x8_t = fp32_t __attribute__((ext_vector_type(8)));
 
 __device__ static inline fp32_t v4_fmaxf(fp32_t a, fp32_t b) { return a > b ? a : b; }
@@ -46,18 +46,18 @@ __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs k)
     const int stride_h = k.N * k.D;
     const int stride_b = k.H * k.N * k.D;
 
-    const fp16_t* __restrict__ Qp = reinterpret_cast<const fp16_t*>(k.ptr_q) + b * stride_b + h * stride_h;
-    const fp16_t* __restrict__ Kp = reinterpret_cast<const fp16_t*>(k.ptr_k) + b * stride_b + h * stride_h;
-    const fp16_t* __restrict__ Vp = reinterpret_cast<const fp16_t*>(k.ptr_v) + b * stride_b + h * stride_h;
-    fp16_t*       __restrict__ Op = reinterpret_cast<fp16_t*>      (k.ptr_o) + b * stride_b + h * stride_h;
+    const bf16_t* __restrict__ Qp = reinterpret_cast<const bf16_t*>(k.ptr_q) + b * stride_b + h * stride_h;
+    const bf16_t* __restrict__ Kp = reinterpret_cast<const bf16_t*>(k.ptr_k) + b * stride_b + h * stride_h;
+    const bf16_t* __restrict__ Vp = reinterpret_cast<const bf16_t*>(k.ptr_v) + b * stride_b + h * stride_h;
+    bf16_t*       __restrict__ Op = reinterpret_cast<bf16_t*>      (k.ptr_o) + b * stride_b + h * stride_h;
 
-    __shared__ fp16_t s_p[16 * 16];
+    __shared__ bf16_t s_p[16 * 16];
 
     // ── Q load (persistent) ─────────────────────────────────────────────
-    fp16x8_t v_q[DK];
+    bf16x8_t v_q[DK];
     {
         const int q_m_base = q_tile_id * BLOCK_M;
-        const fp16_t* q_row = Qp + (q_m_base + col16) * stride_n;
+        const bf16_t* q_row = Qp + (q_m_base + col16) * stride_n;
         #pragma unroll
         for (int kt = 0; kt < DK; ++kt) {
             const int k_off = kt * W_K + row8;
@@ -70,7 +70,7 @@ __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs k)
     #pragma unroll
     for (int kt = 0; kt < DK; ++kt) {
         #pragma unroll
-        for (int j = 0; j < 8; ++j) v_q[kt][j] = static_cast<fp16_t>(static_cast<fp32_t>(v_q[kt][j]) * qscale);
+        for (int j = 0; j < 8; ++j) v_q[kt][j] = bf16_from_f32(bf16_to_f32(v_q[kt][j]) * qscale);
     }
 
     fp32x8_t v_o[DK];
@@ -87,8 +87,8 @@ __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs k)
 
     // Prefetch helpers: load lane's K and V fragment for a given n_base.
     // Layout: lane[i].K_kt[j] = K[n=col16, k=row8+j+kt*16] = Kp[(n_base+col16)*stride_n + kt*16 + row8 + j]
-    auto load_k_tile = [&](int n_base, fp16x8_t (&v_k_buf)[DK]) {
-        const fp16_t* k_row = Kp + (n_base + col16) * stride_n;
+    auto load_k_tile = [&](int n_base, bf16x8_t (&v_k_buf)[DK]) {
+        const bf16_t* k_row = Kp + (n_base + col16) * stride_n;
         #pragma unroll
         for (int kt = 0; kt < DK; ++kt) {
             const int k_off = kt * W_K + row8;
@@ -96,18 +96,18 @@ __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs k)
             for (int j = 0; j < 8; ++j) v_k_buf[kt][j] = k_row[k_off + j];
         }
     };
-    auto load_v_tile = [&](int n_base, fp16x8_t (&v_v_buf)[DK]) {
+    auto load_v_tile = [&](int n_base, bf16x8_t (&v_v_buf)[DK]) {
         #pragma unroll
         for (int dt = 0; dt < DK; ++dt) {
-            const fp16_t* v_col = Vp + (n_base + row8) * stride_n + dt * W_K + col16;
+            const bf16_t* v_col = Vp + (n_base + row8) * stride_n + dt * W_K + col16;
             #pragma unroll
             for (int j = 0; j < 8; ++j) v_v_buf[dt][j] = v_col[j * stride_n];
         }
     };
 
     // Double-buffered K/V prefetch (two register sets)
-    fp16x8_t v_k_buf[2][DK];
-    fp16x8_t v_v_buf[2][DK];
+    bf16x8_t v_k_buf[2][DK];
+    bf16x8_t v_v_buf[2][DK];
     int cur = 0;
 
     // Prologue: load tile 0
@@ -127,7 +127,7 @@ __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs k)
         fp32x8_t v_s = {0,0,0,0,0,0,0,0};
         #pragma unroll
         for (int kt = 0; kt < DK; ++kt) {
-            v_s = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(v_q[kt], v_k_buf[cur][kt], v_s);
+            v_s = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(v_q[kt], v_k_buf[cur][kt], v_s);
         }
 
         if (n_tile + 1 < num_kv_tiles) {
@@ -158,16 +158,16 @@ __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs k)
 
         // Flip S → P via smem (single-wave: no cross-wave sync)
         #pragma unroll
-        for (int j = 0; j < 8; ++j) s_p[(row8 + j) * 16 + col16] = static_cast<fp16_t>(v_s[j]);
+        for (int j = 0; j < 8; ++j) s_p[(row8 + j) * 16 + col16] = bf16_from_f32(v_s[j]);
         __builtin_amdgcn_wave_barrier();
-        fp16x8_t v_p;
+        bf16x8_t v_p;
         #pragma unroll
         for (int j = 0; j < 8; ++j) v_p[j] = s_p[col16 * 16 + row8 + j];
 
         // 3) O += P @ V
         #pragma unroll
         for (int dt = 0; dt < DK; ++dt) {
-            v_o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(v_p, v_v_buf[cur][dt], v_o[dt]);
+            v_o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(v_p, v_v_buf[cur][dt], v_o[dt]);
         }
 
         cur = nxt;
@@ -181,7 +181,7 @@ __global__ void opus_attn_gfx1201_kernel_v4(opus_attn_kargs k)
         #pragma unroll
         for (int kt = 0; kt < DK; ++kt) {
             const int d_base = kt * W_K + col16;
-            Op[(q_m_base + row8 + j) * stride_n + d_base] = static_cast<fp16_t>(v_o[kt][j] * inv);
+            Op[(q_m_base + row8 + j) * stride_n + d_base] = bf16_from_f32(v_o[kt][j] * inv);
         }
     }
 #else

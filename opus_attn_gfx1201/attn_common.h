@@ -1,9 +1,29 @@
 // SPDX-License-Identifier: MIT
 // opus_attn_gfx1201 — shared types between device kernel and host driver.
+// bf16 variant: in/out tensors are bf16, accumulators are fp32.
 #pragma once
 
-using fp16_t = _Float16;
+// bf16 stored as raw 16-bit bits. The wmma builtin signature takes
+// `short __attribute__((ext_vector_type(8)))`, so we use `short` here too.
+using bf16_t = short;
 using fp32_t = float;
+
+// fp32 ↔ bf16 conversions (host + device). RNE rounding.
+__host__ __device__ inline bf16_t bf16_from_f32(fp32_t f) {
+    unsigned int x = __builtin_bit_cast(unsigned int, f);
+    // Preserve NaNs as quiet NaN
+    if (((x >> 23) & 0xFF) == 0xFF && (x & 0x7FFFFF)) {
+        return (bf16_t)((x >> 16) | 0x40);
+    }
+    unsigned int rb = 0x7FFF + ((x >> 16) & 1);
+    return (bf16_t)((x + rb) >> 16);
+}
+
+__host__ __device__ inline fp32_t bf16_to_f32(bf16_t b) {
+    // Zero-extend the 16 bits into the high half of a 32-bit fp32 layout.
+    unsigned int u = (unsigned int)(unsigned short)b;
+    return __builtin_bit_cast(fp32_t, u << 16);
+}
 
 // Kernel arguments. Layout: Q,K,V,O are [B, H, N, D] row-major (head_dim D
 // innermost). No GQA — H_q == H_kv.
@@ -20,10 +40,6 @@ struct opus_attn_kargs {
 };
 
 // Kernel traits.
-//
-// Each version (v0..v5) instantiates this with its own BLOCK_M / BLOCK_N to
-// describe per-workgroup geometry. NUM_WAVES is derived (each wave handles
-// WAVE_M=16 M-rows independently for softmax).
 template<int BLOCK_M_, int BLOCK_N_, int D_ = 128>
 struct opus_attn_traits {
     static constexpr int BLOCK_M    = BLOCK_M_;
