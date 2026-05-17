@@ -125,9 +125,35 @@ below is throughput only. Selectable at runtime via `--version=N`.
 | **v9** | v6 + **V pre-transposed in DRAM** (no in-kernel V flip) | 18.9 | **36.3** | **37.0** |
 | v10 | v9 + BLOCK_N=32 | 19.2 | 36.3 | 36.4 |
 
-**v9 wins** at the production-sized shapes (≥H=32, N≥2048): **37.0 TFLOPS = ~19.5% MFU**
-on the 9070 XT's ~190 TFLOPS dense fp16 peak. **v6 wins at small shapes** because it
-doesn't require a pre-transpose pass.
+**v6 is the recommended production kernel.** It's the highest-perf version
+that takes V in the standard `[B, H, N, D]` layout — i.e., works as a drop-in
+replacement for v0 without any DRAM-layout changes upstream.
+
+v9 (V pre-transposed in DRAM as `[B, H, D, N]`) reaches higher TFLOPS but is
+NOT a fair production comparison: real attention layers append V row-by-row
+during decode and consume it directly from the Wv projection output, so an
+extra DRAM transpose pass is neither free nor easily fusable. v9 is kept as
+an **upper-bound reference** — it shows what the kernel could do if the V
+layout problem were solved upstream, e.g., by emitting Wv's output directly
+in `[D, N]` layout (which most frameworks today don't).
+
+### Achieved MFU vs. measured hardware ceiling
+
+`opus_attn_gfx1201/ubench` reports the gfx1201 wmma throughput ceiling at
+**132 TFLOPS** (8-pipe wmma_f32_16x16x16_f16, ~70% of the 195 TFLOPS
+marketing spec). Achieved MFU against the measured ceiling:
+
+| version | TFLOPS | vs 132 TFLOPS wmma peak |
+|---|---:|---:|
+| v0 | 29.2 | 22% |
+| **v6** | **34.3** | **26%** |
+| v9 (upper bound, unfair) | 37.0 | 28% |
+
+The `--version=ubench` mode also reports `v_exp2_f32` peak at **~3.25 G ops/s**.
+A v6 H=32 N=2048 dispatch issues ~2.7 G exp2 calls, which would take ~0.83 ms
+at peak exp2 throughput — about 40% of v6's 2.1 ms runtime. **exp2 IS a real
+contributor at this MFU level**, contrary to the v5 round's earlier
+conclusion.
 
 ### What v6 vs v0 actually changed
 
@@ -137,19 +163,26 @@ compiler to emit 8 `global_load_u16`/`d16_hi` pairs per V tile per lane —
 `global_load_b128` per lane), then transposes the tile in smem to recover
 the B-fragment layout. Net: 10× fewer V load instructions, +15% TFLOPS.
 
-### What v9 vs v6 actually changed
+### Why v9 is not a fair production comparison
 
-v9 assumes V is already stored in DRAM as `[B, H, D, N]` (transposed from
-the standard `[B, H, N, D]`). The B-fragment access pattern is then
-naturally contiguous along N — no in-kernel transpose needed at all. Saves
-the smem store + wave_barrier + strided smem reads per V tile vs v6. Net:
-+8–14% TFLOPS over v6. The host runs a one-time transpose kernel before
-the benchmark loop; in production this is amortizable since the V projection
-output can be emitted directly in the transposed layout.
+v9 assumes V is already stored in DRAM as `[B, H, D, N]`. Skipping the
+in-kernel transpose saves the smem store + wave_barrier + strided smem
+reads per V tile. **But:**
 
-This matches CK's `MakeShuffledVRegBlockDescriptor` pattern in spirit — CK
-shuffles in registers after a row-major DRAM load; v9 takes the simpler
-path of doing the transpose once in DRAM and skipping the per-tile shuffle.
+- During decode, V is appended one row per generated token — to store it
+  as `[B, H, D, N]` would require either a per-token transposed write
+  (which costs the same scattered store) or a full re-transpose per step.
+- Wv's matmul naturally emits `[N, D]` (D is the inner dim of the
+  projection); fusing the transpose into Wv is possible but invasive.
+- For prefill, a one-time pre-transpose is feasible but framework-level
+  surgery.
+
+So v9 is the achievable upper bound for the FA kernel alone, not a
+realistic production setting. **v6 is what should be used in practice.**
+For getting closer to v9's performance without pre-transposing V, the
+right direction is in-register transpose via `permlane16_swap` /
+`permlanex16_swap` / `ds_bpermute_b32` — see "Directions a v11+ might
+explore" below.
 
 ## What I learned trying v1 → v10
 
@@ -179,9 +212,12 @@ negative results:
    The hardware OOO + waitcnt does this better than hand-rolled buffers.
 
 The one v1-v5 optimization that **didn't** regress (v5: BLOCK_N=32 with online
-softmax) tied v0. That projection ("halve softmax overhead → faster") was
-wrong because softmax was not the bottleneck — turned out the **V load
-pattern** was.
+softmax) tied v0. At the time I concluded "softmax wasn't the bottleneck" —
+that conclusion was overstated. The ubench numbers (~3.25 G exp2/s ceiling)
+show exp2 alone would take ~40% of v6's runtime if it ran fully serialized.
+At v0/v5 perf level, V load was the dominant bottleneck, so halving softmax
+didn't help much; but after v6 fixed V load, softmax becomes a real factor —
+which is why v8 (v6 + BLOCK_N=32) does pick up a bit on the H=32 N=2048 shape.
 
 ### What I learned from v6-v10 (after disasm-driven profiling)
 
@@ -200,29 +236,46 @@ bottleneck the whole time**, hidden under "we're wmma-bound" intuition.
 
 Fixes:
 - **v6**: load V along its contiguous axis, transpose in smem → **+15%** over v0.
-- **v9**: pre-transpose V in DRAM so the B-layout load is naturally contiguous,
-  drop the smem flip entirely → **+27%** over v0 (~19.5% MFU).
-- **v10** (v9 + BLOCK_N=32): tied v9 — softmax still not the bottleneck.
+- **v9**: pre-transpose V in DRAM (NOT production-realistic; see "Why v9 is
+  not a fair production comparison" above) → +27% over v0 if V is already
+  transposed, kept as upper-bound reference only.
+- **v10** (v9 + BLOCK_N=32): tied v9.
 
-## What still limits gfx1201 attention perf at ~19.5% MFU
+## What still limits v6 at ~26% wmma MFU
 
-- v9 at 37 TFLOPS / 190 TFLOPS dense = ~19.5% MFU.
 - The S → P transpose via smem still happens once per outer iter (1 store +
-  barrier + 8 strided reads). That accounts for ~10 small ds-ops per iter.
-- The fp32 v_o accumulator pins 64 VGPRs/lane (32 dwords); the compiler has
-  to keep them live across the entire V tile loop.
-- wmma issue rate: at 16 wmmas/outer iter × 128 outer × 16 cycles/wmma =
-  32K cycles of pure wmma per WG; we're running at ~2× that. The "other 50%"
-  is global load latency + smem transpose + softmax dependency chain.
+  barrier + 8 strided reads). On gfx12, eliminating this requires
+  cross-lane permute (see v11 direction below), NOT a simple cast like
+  gfx950's `mfma_adaptor_swap_ab` allows.
+- The fp32 v_o accumulator pins 64 VGPRs/lane across the V tile loop.
+- exp2 throughput: v6's ~2.7 G exp2 calls (H=32 N=2048) is ~80% of the
+  measured 3.25 G/s exp2 peak — exp2 is a real factor at this MFU level.
+
+### Why the gfx950 swap_ab trick doesn't directly work on gfx12
+
+The gfx950 `opus_attn` kernel does `v_p = opus::cast<fp16>(v_s)` — a simple
+cast with no smem flip — by using `mfma_adaptor_swap_ab` consistently on
+both mma0 and mma1. This works because MFMA's C-output and A-input layouts
+on gfx950 align under the swap.
+
+On gfx12 wmma, the C-output (`lane.0=N, regs=M`) and A-input (`lane.0=M,
+regs=K`) layouts have N and M on the lane axis respectively — they are
+TRANSPOSED relative to each other in a way that no operand-order swap can
+reconcile without actual data movement. A naive `v_p = cast<fp16>(v_s)`
+would feed `P^T` to the next mma, producing the wrong result.
+
+So gfx12 needs either: (a) the smem flip (v6 does this), or (b) cross-lane
+in-register transpose via `permlane16_swap` / `permlanex16_swap` /
+`ds_bpermute_b32` (v11 candidate, not yet implemented).
 
 ## Directions a v11+ might explore
 
-| Idea | Risk | Likely impact |
+| Idea | Risk | Likely TFLOPS impact |
 |---|---|---|
-| Causal masking (skip upper triangular) | low | up to ~2× for causal inference |
-| GQA (share K/V across query heads) | medium | high for GQA-shaped workloads (Llama 3, DeepSeek) |
+| In-register S→P transpose via permlane16_swap / ds_bpermute (eliminate smem flip without strided V load) | medium (layout machinery) | moderate — saves 1 barrier + ~8 ds-ops per outer iter |
+| Causal masking | low | **does NOT increase TFLOPS** — it halves compute, so latency drops ~2× but TFLOPS stays the same. The benefit is decode latency, not throughput. |
+| GQA (share K/V across query heads on same WG) | medium | high for GQA-shaped workloads (Llama 3, DeepSeek) — amortizes K/V load cost across more wmma work |
 | fp16 v_o accumulator with periodic fp32 rescale | high (numerics) | high — halves v_o footprint, frees scheduler |
-| Drop the S→P smem flip by computing the wmma in transposed form (compute O^T = V^T @ P^T directly, write transposed) | high (layout rework) | moderate — saves the last smem barrier |
 | `__builtin_amdgcn_global_load_lds_*` (true async global→LDS) for K | medium | only helps when K exceeds L1 (very long contexts) |
 
 The user-facing recommendation is **`--version=9`** for production (with V
