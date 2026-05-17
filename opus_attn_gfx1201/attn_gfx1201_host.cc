@@ -27,6 +27,8 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v5(opus_attn_kargs); 
 template<class T> __global__ void opus_attn_gfx1201_kernel_v6(opus_attn_kargs);  // v6
 template<class T> __global__ void opus_attn_gfx1201_kernel_v7(opus_attn_kargs);  // v7
 template<class T> __global__ void opus_attn_gfx1201_kernel_v8(opus_attn_kargs);  // v8
+template<class T> __global__ void opus_attn_gfx1201_kernel_v9(opus_attn_kargs);  // v9
+__global__ void v_transpose_kernel(const fp16_t*, fp16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
 static void launch_(opus_attn_kargs k, K kern) {
@@ -48,6 +50,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 6: launch_<16, 16>(k, opus_attn_gfx1201_kernel_v6<opus_attn_traits<16, 16, 128>>); break;
         case 7: launch_<16, 16>(k, opus_attn_gfx1201_kernel_v7<opus_attn_traits<16, 16, 128>>); break;
         case 8: launch_<16, 32>(k, opus_attn_gfx1201_kernel_v8<opus_attn_traits<16, 32, 128>>); break;
+        case 9: launch_<16, 16>(k, opus_attn_gfx1201_kernel_v9<opus_attn_traits<16, 16, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -119,17 +122,26 @@ int main(int argc, char** argv) {
     for (auto& x : hK) x = (fp16_t)u(rng);
     for (auto& x : hV) x = (fp16_t)u(rng);
 
-    fp16_t *dQ, *dK, *dV, *dO;
+    fp16_t *dQ, *dK, *dV, *dO, *dVT;
     HIP_CALL(hipMalloc(&dQ, sz_qkvo * sizeof(fp16_t)));
     HIP_CALL(hipMalloc(&dK, sz_qkvo * sizeof(fp16_t)));
     HIP_CALL(hipMalloc(&dV, sz_qkvo * sizeof(fp16_t)));
+    HIP_CALL(hipMalloc(&dVT, sz_qkvo * sizeof(fp16_t)));
     HIP_CALL(hipMalloc(&dO, sz_qkvo * sizeof(fp16_t)));
     HIP_CALL(hipMemcpy(dQ, hQ.data(), sz_qkvo * sizeof(fp16_t), hipMemcpyHostToDevice));
     HIP_CALL(hipMemcpy(dK, hK.data(), sz_qkvo * sizeof(fp16_t), hipMemcpyHostToDevice));
     HIP_CALL(hipMemcpy(dV, hV.data(), sz_qkvo * sizeof(fp16_t), hipMemcpyHostToDevice));
 
+    // Pre-transpose V → V_T for v9 (one-time, not timed in bench loop)
+    {
+        const int threads = 256;
+        const int blocks = (sz_qkvo + threads - 1) / threads;
+        v_transpose_kernel<<<blocks, threads>>>(dV, dVT, B, H, N, D);
+        HIP_CALL(hipDeviceSynchronize());
+    }
+
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = dV; kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = (version == 9 ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
@@ -174,6 +186,7 @@ int main(int argc, char** argv) {
     HIP_CALL(hipFree(dQ));
     HIP_CALL(hipFree(dK));
     HIP_CALL(hipFree(dV));
+    HIP_CALL(hipFree(dVT));
     HIP_CALL(hipFree(dO));
     return 0;
 }

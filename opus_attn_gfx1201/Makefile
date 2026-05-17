@@ -13,7 +13,8 @@ KERNELS  := attn_gfx1201_kernel_v0.cc \
             attn_gfx1201_kernel_v5.cc \
             attn_gfx1201_kernel_v6.cc \
             attn_gfx1201_kernel_v7.cc \
-            attn_gfx1201_kernel_v8.cc
+            attn_gfx1201_kernel_v8.cc \
+            attn_gfx1201_kernel_v9.cc
 KERN_OBJ := $(patsubst %.cc,$(BUILD)/%.o,$(KERNELS))
 HOST_OBJ := $(BUILD)/attn_gfx1201_host.o
 
@@ -48,6 +49,9 @@ $(BUILD)/attn_gfx1201_kernel_v7.o: attn_gfx1201_kernel_v7.cc attn_gfx1201_kernel
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/attn_gfx1201_kernel_v8.o: attn_gfx1201_kernel_v8.cc attn_gfx1201_kernel_v8_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v9.o: attn_gfx1201_kernel_v9.cc attn_gfx1201_kernel_v9_template.hpp attn_common.h | $(BUILD)
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
 
 $(HOST_OBJ): attn_gfx1201_host.cc attn_common.h | $(BUILD)
