@@ -36,7 +36,16 @@ KERNELS  := attn_gfx1201_kernel_v0.cc \
             attn_gfx1201_kernel_v28.cc \
             attn_gfx1201_kernel_v29.cc \
             attn_gfx1201_kernel_v30.cc \
-            attn_gfx1201_kernel_v31.cc
+            attn_gfx1201_kernel_v31.cc \
+            attn_gfx1201_kernel_v32.cc \
+            attn_gfx1201_kernel_v33.cc \
+            attn_gfx1201_kernel_v34.cc \
+    attn_gfx1201_kernel_v35.cc \
+    attn_gfx1201_kernel_v36.cc \
+    attn_gfx1201_kernel_v37.cc \
+    attn_gfx1201_kernel_v38.cc \
+    attn_gfx1201_kernel_v39.cc \
+    attn_gfx1201_kernel_v40.cc
 KERN_OBJ := $(patsubst %.cc,$(BUILD)/%.o,$(KERNELS))
 HOST_OBJ := $(BUILD)/attn_gfx1201_host.o
 
@@ -159,4 +168,48 @@ $(BUILD)/attn_gfx1201_kernel_v30.o: attn_gfx1201_kernel_v30.cc attn_gfx1201_kern
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/attn_gfx1201_kernel_v31.o: attn_gfx1201_kernel_v31.cc attn_gfx1201_kernel_v31_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v34.o: attn_gfx1201_kernel_v34.cc \
+    attn_gfx1201_kernel_v35.cc \
+    attn_gfx1201_kernel_v36.cc \
+    attn_gfx1201_kernel_v37.cc \
+    attn_gfx1201_kernel_v38.cc \
+    attn_gfx1201_kernel_v39.cc \
+    attn_gfx1201_kernel_v40.cc attn_gfx1201_kernel_v34_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v33.o: attn_gfx1201_kernel_v33.cc attn_gfx1201_kernel_v33_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v32.o: attn_gfx1201_kernel_v32.cc attn_gfx1201_kernel_v32_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v35.o: attn_gfx1201_kernel_v35.cc \
+    attn_gfx1201_kernel_v36.cc \
+    attn_gfx1201_kernel_v37.cc \
+    attn_gfx1201_kernel_v38.cc \
+    attn_gfx1201_kernel_v39.cc \
+    attn_gfx1201_kernel_v40.cc attn_gfx1201_kernel_v35_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v36.o: attn_gfx1201_kernel_v36.cc attn_gfx1201_kernel_v36_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v37.o: attn_gfx1201_kernel_v37.cc \
+    attn_gfx1201_kernel_v38.cc \
+    attn_gfx1201_kernel_v39.cc \
+    attn_gfx1201_kernel_v40.cc attn_gfx1201_kernel_v37_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v38.o: attn_gfx1201_kernel_v38.cc \
+    attn_gfx1201_kernel_v39.cc \
+    attn_gfx1201_kernel_v40.cc attn_gfx1201_kernel_v38_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v39.o: attn_gfx1201_kernel_v39.cc \
+    attn_gfx1201_kernel_v40.cc attn_gfx1201_kernel_v39_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v40.o: attn_gfx1201_kernel_v40.cc attn_gfx1201_kernel_v40_template.hpp attn_common.h | $(BUILD)
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@

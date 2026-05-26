@@ -49,6 +49,15 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v28(opus_attn_kargs);
 template<class T> __global__ void opus_attn_gfx1201_kernel_v29(opus_attn_kargs); // v29
 template<class T> __global__ void opus_attn_gfx1201_kernel_v30(opus_attn_kargs); // v30
 template<class T> __global__ void opus_attn_gfx1201_kernel_v31(opus_attn_kargs); // v31
+template<class T> __global__ void opus_attn_gfx1201_kernel_v32(opus_attn_kargs); // v32
+__global__ void opus_attn_gfx1201_kernel_v33(opus_attn_kargs); // v33
+template<class T> __global__ void opus_attn_gfx1201_kernel_v34(opus_attn_kargs);  // v34
+template<class T> __global__ void opus_attn_gfx1201_kernel_v35(opus_attn_kargs);  // v35
+template<class T> __global__ void opus_attn_gfx1201_kernel_v36(opus_attn_kargs);  // v36
+template<class T> __global__ void opus_attn_gfx1201_kernel_v37(opus_attn_kargs);  // v37
+template<class T> __global__ void opus_attn_gfx1201_kernel_v38(opus_attn_kargs);  // v38
+template<class T> __global__ void opus_attn_gfx1201_kernel_v39(opus_attn_kargs);  // v39
+template<class T> __global__ void opus_attn_gfx1201_kernel_v40(opus_attn_kargs);  // v40 // v34
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -94,6 +103,15 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 29: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v29<opus_attn_traits<128, 16, 128>>); break;
         case 30: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v30<opus_attn_traits<128, 32, 128>>); break;
         case 31: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v31<opus_attn_traits<128, 16, 128>>); break;
+        case 32: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v32<opus_attn_traits<128, 16, 128>>); break;
+        case 33: { const int nb = k.N / 128; hipLaunchKernelGGL(opus_attn_gfx1201_kernel_v33, dim3(nb,k.H,k.B), dim3(512), 0, 0, k); } break;
+        case 34: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v34<opus_attn_traits<128, 16, 128>>); break;
+        case 35: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v35<opus_attn_traits<128, 16, 128>>); break;
+        case 36: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v36<opus_attn_traits<128, 16, 128>>); break;
+        case 37: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v37<opus_attn_traits<128, 16, 128>>); break;
+        case 38: launch_<128, 16>(k, opus_attn_gfx1201_kernel_v38<opus_attn_traits<128, 16, 128>>); break;
+        case 39: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v39<opus_attn_traits<128, 32, 128>>); break;
+        case 40: launch_<128, 64>(k, opus_attn_gfx1201_kernel_v40<opus_attn_traits<128, 64, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -184,7 +202,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
