@@ -448,22 +448,14 @@ v88_kernel:
 	global_load_b128 v[121:124], v[129:130], off offset:32
 	global_load_b128 v[125:128], v[131:132], off offset:32
 .L_n_loop:
-	v_mov_b32_e32 v97, 0
-	v_mov_b32_e32 v105, 0
-	v_mov_b32_e32 v98, 0
-	v_mov_b32_e32 v106, 0
-	v_mov_b32_e32 v99, 0
-	v_mov_b32_e32 v107, 0
-	v_mov_b32_e32 v100, 0
-	v_mov_b32_e32 v108, 0
-	v_mov_b32_e32 v101, 0
-	v_mov_b32_e32 v109, 0
-	v_mov_b32_e32 v102, 0
-	v_mov_b32_e32 v110, 0
-	v_mov_b32_e32 v103, 0
-	v_mov_b32_e32 v111, 0
-	v_mov_b32_e32 v104, 0
-	v_mov_b32_e32 v112, 0
+	v_dual_mov_b32 v97, 0 :: v_dual_mov_b32 v98, 0
+	v_dual_mov_b32 v99, 0 :: v_dual_mov_b32 v100, 0
+	v_dual_mov_b32 v101, 0 :: v_dual_mov_b32 v102, 0
+	v_dual_mov_b32 v103, 0 :: v_dual_mov_b32 v104, 0
+	v_dual_mov_b32 v105, 0 :: v_dual_mov_b32 v106, 0
+	v_dual_mov_b32 v107, 0 :: v_dual_mov_b32 v108, 0
+	v_dual_mov_b32 v109, 0 :: v_dual_mov_b32 v110, 0
+	v_dual_mov_b32 v111, 0 :: v_dual_mov_b32 v112, 0
 	s_wait_loadcnt 0x2
 	v_wmma_f32_16x16x16_bf16 v[97:104], v[113:116], v[65:68], v[97:104]
 	v_wmma_f32_16x16x16_bf16 v[105:112], v[117:120], v[65:68], v[105:112]
@@ -570,21 +562,29 @@ v88_kernel:
 	s_wait_alu 0x1
 	v_mul_f32_e32 v136, v137, v136
 	s_wait_alu 0x1
+	v_perm_b32 v144, v98, v97, 0x7060302
+	v_perm_b32 v145, v100, v99, 0x7060302
 	v_add_f32_e32 v186, v97, v98
 	v_add_f32_e32 v187, v99, v100
+	v_perm_b32 v146, v102, v101, 0x7060302
+	v_perm_b32 v147, v104, v103, 0x7060302
 	v_add_f32_e32 v188, v101, v102
 	v_add_f32_e32 v189, v103, v104
 	s_delay_alu instid0(VALU_DEP_4) | instskip(NEXT) | instid1(VALU_DEP_4)
 	v_add_f32_e32 v186, v186, v187
 	v_add_f32_e32 v188, v188, v189
+	v_perm_b32 v148, v106, v105, 0x7060302
+	v_perm_b32 v149, v108, v107, 0x7060302
 	v_add_f32_e32 v187, v105, v106
 	v_add_f32_e32 v189, v107, v108
-	s_delay_alu instid0(VALU_DEP_4) | instskip(NEXT) | instid1(VALU_DEP_4)
+	s_delay_alu instid0(VALU_DEP_4)
 	v_add_f32_e32 v186, v186, v188
 	v_add_f32_e32 v187, v187, v189
+	v_perm_b32 v150, v110, v109, 0x7060302
+	v_perm_b32 v151, v112, v111, 0x7060302
 	v_add_f32_e32 v188, v109, v110
 	v_add_f32_e32 v189, v111, v112
-	s_delay_alu instid0(VALU_DEP_4) | instskip(NEXT) | instid1(VALU_DEP_4)
+	s_delay_alu instid0(VALU_DEP_4)
 	v_add_f32_e32 v186, v186, v187
 	v_add_f32_e32 v188, v188, v189
 	s_delay_alu instid0(VALU_DEP_2)
@@ -594,70 +594,6 @@ v88_kernel:
 	v_add_f32_e32 v186, v186, v187
 	s_delay_alu instid0(VALU_DEP_1)
 	v_add_f32_e32 v136, v136, v186
-	v_bfe_u32 v186, v97, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v97, v97, v186, 0x7fff
-	v_bfe_u32 v186, v98, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v98, v98, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v144, v98, v97, 0x7060302
-	v_bfe_u32 v186, v99, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v99, v99, v186, 0x7fff
-	v_bfe_u32 v186, v100, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v100, v100, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v145, v100, v99, 0x7060302
-	v_bfe_u32 v186, v101, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v101, v101, v186, 0x7fff
-	v_bfe_u32 v186, v102, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v102, v102, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v146, v102, v101, 0x7060302
-	v_bfe_u32 v186, v103, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v103, v103, v186, 0x7fff
-	v_bfe_u32 v186, v104, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v104, v104, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v147, v104, v103, 0x7060302
-	v_bfe_u32 v186, v105, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v105, v105, v186, 0x7fff
-	v_bfe_u32 v186, v106, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v106, v106, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v148, v106, v105, 0x7060302
-	v_bfe_u32 v186, v107, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v107, v107, v186, 0x7fff
-	v_bfe_u32 v186, v108, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v108, v108, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v149, v108, v107, 0x7060302
-	v_bfe_u32 v186, v109, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v109, v109, v186, 0x7fff
-	v_bfe_u32 v186, v110, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v110, v110, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v150, v110, v109, 0x7060302
-	v_bfe_u32 v186, v111, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v111, v111, v186, 0x7fff
-	v_bfe_u32 v186, v112, 16, 1
-	s_delay_alu instid0(VALU_DEP_1)
-	v_add3_u32 v112, v112, v186, 0x7fff
-	s_delay_alu instid0(VALU_DEP_1)
-	v_perm_b32 v151, v112, v111, 0x7060302
 	v_cmp_neq_f32_e32 vcc_lo, 1.0, v137
 	s_wait_alu 0xfffd
 	s_and_saveexec_b32 s31, vcc_lo
