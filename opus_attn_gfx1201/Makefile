@@ -255,3 +255,12 @@ $(BUILD)/attn_gfx1201_kernel_v45.o: attn_gfx1201_kernel_v45.cc attn_gfx1201_kern
 
 $(BUILD)/attn_gfx1201_kernel_v48.o: attn_gfx1201_kernel_v48.cc attn_gfx1201_kernel_v48_template.hpp attn_common.h | $(BUILD)
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+# v49: hand-scheduled ASM kernel, loaded as HSACO at runtime
+LLVM_BIN := /opt/rocm/lib/llvm/bin
+$(BUILD)/attn_v49.hsaco: attn_gfx1201_kernel_v49.s | $(BUILD)
+	$(LLVM_BIN)/clang-offload-bundler --type=s --input=$< --output=$(BUILD)/v49_device.s --output=/dev/null --targets=hip-amdgcn-amd-amdhsa--gfx1201,host-x86_64-unknown-linux-gnu- --unbundle
+	$(LLVM_BIN)/clang++ -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx1201 $(BUILD)/v49_device.s -o $@
+
+# Make exe depend on HSACO so it's built before running
+$(EXE): | $(BUILD)/attn_v49.hsaco

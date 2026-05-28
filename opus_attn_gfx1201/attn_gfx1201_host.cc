@@ -75,6 +75,25 @@ static void launch_(opus_attn_kargs k, K kern) {
     kern<<<grid, block, 0, 0>>>(k);
 }
 
+
+static void launch_v49_asm(opus_attn_kargs k) {
+    static hipModule_t   s_mod  = nullptr;
+    static hipFunction_t s_func = nullptr;
+    if (!s_mod) {
+        HIP_CALL(hipModuleLoad(&s_mod, "build/attn_v49.hsaco"));
+        HIP_CALL(hipModuleGetFunction(&s_func, s_mod,
+            "_Z28opus_attn_gfx1201_kernel_v49I16opus_attn_traitsILi128ELi32ELi128EEEv15opus_attn_kargs"));
+    }
+    using T = opus_attn_traits<128, 32, 128>;
+    const int n_blocks = k.N / T::BLOCK_M;
+    void* kptr = &k;
+    HIP_CALL(hipModuleLaunchKernel(
+        s_func,
+        n_blocks, k.H, k.B,
+        T::BLOCK_SIZE, 1, 1,
+        0, 0, &kptr, NULL));
+}
+
 static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
     switch (version) {
         case 0: launch_<16, 16>(k, opus_attn_gfx1201_kernel   <opus_attn_traits<16, 16, 128>>); break;
@@ -124,6 +143,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 44: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v44<opus_attn_traits<128, 32, 128>>); break;
         case 45: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v45<opus_attn_traits<128, 32, 128>>); break;
         case 48: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v48<opus_attn_traits<128, 32, 128>>); break;
+        case 49: launch_v49_asm(k); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -214,7 +234,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
