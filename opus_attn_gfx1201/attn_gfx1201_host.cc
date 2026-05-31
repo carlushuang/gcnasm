@@ -104,6 +104,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v136(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v137(opus_attn_kargs); // v137: v132 champion + round-20 reviewer lever #3 -- per-tile LOAD-BEFORE-RESCALE PV schedule (issue tile's V global load, then its O-accumulator rescale FMAs hide the V-load latency, then the two PV WMMAs) with ZERO added V liveness (no ring/snapshot -> v132 VGPR footprint, no occupancy cliff). Uniform prio2 PV region preserved (lever #1). bit-exact, dVT-wired
 template<class T> __global__ void opus_attn_gfx1201_kernel_v138(opus_attn_kargs); // v138: v132 champion + round-20 reviewer NEXT-FOCUS -- CHUNK=2 EARLY-V-LOAD PV schedule (all 4 chunk V loads first, chunk rescale FMAs as latency cover, then compact 4-WMMA burst). Per-CHUNK (not per-tile like the failed v137) -> 4 WMMA-window transitions, one chunk's 4 V frags live (v123 proven-safe, no occupancy cliff). Uniform prio2 PV preserved. bit-exact, dVT-wired
 template<class T> __global__ void opus_attn_gfx1201_kernel_v139(opus_attn_kargs); // v139: v132 champion + round-21 reviewer NEXT-FOCUS -- MINIMAL single-tile (dt0-only) V preload at top of PV, hidden under chunk-0 rescale FMAs; tiles 1..7 keep v132's exact in-loop load cadence -> only 2 transient V frags live, v132's 7-wave footprint preserved (no occupancy cliff). Isolates the head-of-PV bubble probe that v137/v138 confounded with multi-tile liveness. bit-exact, dVT-wired
+template<class T> __global__ void opus_attn_gfx1201_kernel_v140(opus_attn_kargs); // v140: v132 champion + ONE zero-liveness scheduling change -- split the softmax island into HEAD (cross-lane reductions, prio0) and TAIL (16 bulk exp2 transcendentals + row-sum + P-pack, raised to the UNTRIED middle prio1). exp2 is on the transcendental pipe (co-executes w/ WMMA); at v132's prio0 it loses issue arbitration to other waves' prio2 matrix work, stretching this wave's QK->PV gap. prio1 unstarves it WITHOUT stealing matrix slots (avoids v134's prio2-feeder mistake). PV stays prio2. bit-exact, dVT-wired
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -254,6 +255,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 137: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v137<opus_attn_traits<128, 32, 128>>); break;
         case 138: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v138<opus_attn_traits<128, 32, 128>>); break;
         case 139: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v139<opus_attn_traits<128, 32, 128>>); break;
+        case 140: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v140<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -344,7 +346,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 110 || version == 126 || version == 127 || version == 128 || version == 129 || version == 130 || version == 131 || version == 132 || version == 133 || version == 134 || version == 135 || version == 136 || version == 137 || version == 138 || version == 139) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 110 || version == 126 || version == 127 || version == 128 || version == 129 || version == 130 || version == 131 || version == 132 || version == 133 || version == 134 || version == 135 || version == 136 || version == 137 || version == 138 || version == 139 || version == 140) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
