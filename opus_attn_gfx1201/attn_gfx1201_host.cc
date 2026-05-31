@@ -72,6 +72,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v104(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v105(opus_attn_kargs); // v105: v104 + interleaved dt=0 prologue (load v0 -> WMMA0 -> load v1 -> WMMA1)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v106(opus_attn_kargs); // v106: v100 + QKT accumulator split (even/odd D-tiles) -> 4-way matrix-pipe ILP in QKT
 template<class T> __global__ void opus_attn_gfx1201_kernel_v107(opus_attn_kargs); // v107: v100 + distance-2 QKT K-prefetch (2-slot rotating buffer, same 2 score accumulators)
+template<class T> __global__ void opus_attn_gfx1201_kernel_v108(opus_attn_kargs); // v108: v100 + cross-tile head-K prefetch across PV->QKT boundary (+8 VGPR, hides the one exposed head load)
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -160,6 +161,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 105: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v105<opus_attn_traits<128, 32, 128>>); break;
         case 106: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v106<opus_attn_traits<128, 32, 128>>); break;
         case 107: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v107<opus_attn_traits<128, 32, 128>>); break;
+        case 108: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v108<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
