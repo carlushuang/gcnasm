@@ -76,6 +76,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v108(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v109(opus_attn_kargs); // v109: v100 MINUS QKT K double-buffer (-8 VGPR, occupancy play; HW scoreboard hides K loads)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v110(opus_attn_kargs); // v110: v100 + split two-pass PV (8 independent WMMAs/pass, no RAW stall) + deferred s1/sum overlap
 template<class T> __global__ void opus_attn_gfx1201_kernel_v111(opus_attn_kargs); // v111: v100 + chunked (2-D-tile) pre-PV rescale interleaved with PV (tighter O live ranges, bit-identical)
+template<class T> __global__ void opus_attn_gfx1201_kernel_v112(opus_attn_kargs); // v112: v100 + two-pass PV split (8 independent WMMAs/pass, breaks per-accum RAW hazard, bit-exact)
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -168,6 +169,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 109: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v109<opus_attn_traits<128, 32, 128>>); break;
         case 110: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v110<opus_attn_traits<128, 32, 128>>); break;
         case 111: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v111<opus_attn_traits<128, 32, 128>>); break;
+        case 112: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v112<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
