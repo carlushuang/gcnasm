@@ -101,6 +101,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v133(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v134(opus_attn_kargs); // v134: v132 uniform-prio2 schedule + HOIST the PV prio-2 raise ABOVE the bf16 P-pack (which gates the first PV WMMA), mirroring v132's QK^T hoist-above-K-preloads fix; zero register cost (no prefetch -> stays at v132's 7-wave footprint, unlike v133/v129's occupancy-cliff regressions); bit-exact, dVT-wired
 template<class T> __global__ void opus_attn_gfx1201_kernel_v135(opus_attn_kargs); // v135: v132 champion with the O-accumulator RESCALE HOISTED OUT of the prio-2 PV burst into the prio-0 softmax island (v100's monolithic placement) -> PV is a PURE load+WMMA matrix burst; rescale VALU stays yieldable at prio0, prio-2 matrix arbitration no longer punctuated by rescale FMAs (round-17 reviewer lever #2); zero register cost, bit-exact, dVT-wired
 template<class T> __global__ void opus_attn_gfx1201_kernel_v136(opus_attn_kargs); // v136: v132 champion with ONLY the per-chunk O-rescale FMAs demoted to prio0 via COARSE per-CHUNK=2 toggle pairs, while chunk V loads + PV WMMAs stay prio2 -> keeps v132's chunked early-PV-start overlap (v135's monolithic prio0 placement lost it) AND de-punctuates the prio2 matrix burst (round-19 reviewer NEXT lever #1); zero register cost, bit-exact, dVT-wired
+template<class T> __global__ void opus_attn_gfx1201_kernel_v137(opus_attn_kargs); // v137: v132 champion + round-20 reviewer lever #3 -- per-tile LOAD-BEFORE-RESCALE PV schedule (issue tile's V global load, then its O-accumulator rescale FMAs hide the V-load latency, then the two PV WMMAs) with ZERO added V liveness (no ring/snapshot -> v132 VGPR footprint, no occupancy cliff). Uniform prio2 PV region preserved (lever #1). bit-exact, dVT-wired
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -248,6 +249,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 134: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v134<opus_attn_traits<128, 32, 128>>); break;
         case 135: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v135<opus_attn_traits<128, 32, 128>>); break;
         case 136: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v136<opus_attn_traits<128, 32, 128>>); break;
+        case 137: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v137<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -338,7 +340,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 110 || version == 126 || version == 127 || version == 128 || version == 129 || version == 130 || version == 131 || version == 132 || version == 133 || version == 134 || version == 135 || version == 136) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 110 || version == 126 || version == 127 || version == 128 || version == 129 || version == 130 || version == 131 || version == 132 || version == 133 || version == 134 || version == 135 || version == 136 || version == 137) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
