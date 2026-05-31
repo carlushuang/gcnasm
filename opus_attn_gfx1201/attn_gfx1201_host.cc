@@ -82,6 +82,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v114(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v115(opus_attn_kargs); // v115: v104 generalized -> uniform branch-free interleaved PV loop (load v0->WMMA0->load v1->WMMA1 every D-tile)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v116(opus_attn_kargs); // v116: v111 + KV-block SW pipeline (next-tile QKT WMMAs overlap current-tile exp2 softmax; matrix pipe fed during the transcendental storm)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v117(opus_attn_kargs); // v117: v100 + cross-tile head-K prefetch issued in the softmax VALU window (idle memory pipe; +8 VGPR, bit-exact)
+template<class T> __global__ void opus_attn_gfx1201_kernel_v118(opus_attn_kargs); // v118: v100 + distance-2 LATE QKT K-prefetch (kt+2 loads after both WMMAs, in-place slot recycle, v100 footprint)
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -180,6 +181,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 115: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v115<opus_attn_traits<128, 32, 128>>); break;
         case 116: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v116<opus_attn_traits<128, 32, 128>>); break;
         case 117: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v117<opus_attn_traits<128, 32, 128>>); break;
+        case 118: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v118<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
