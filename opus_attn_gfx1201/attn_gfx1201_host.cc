@@ -64,6 +64,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v43(opus_attn_kargs);
 template<class T> __global__ void opus_attn_gfx1201_kernel_v44(opus_attn_kargs);
 template<class T> __global__ void opus_attn_gfx1201_kernel_v45(opus_attn_kargs);
 template<class T> __global__ void opus_attn_gfx1201_kernel_v48(opus_attn_kargs);
+template<class T> __global__ void opus_attn_gfx1201_kernel_v100(opus_attn_kargs);  // v100
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -143,6 +144,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 44: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v44<opus_attn_traits<128, 32, 128>>); break;
         case 45: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v45<opus_attn_traits<128, 32, 128>>); break;
         case 48: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v48<opus_attn_traits<128, 32, 128>>); break;
+        case 100: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v100<opus_attn_traits<128, 32, 128>>); break;
         case 49: launch_v49_asm(k); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
@@ -234,7 +236,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
