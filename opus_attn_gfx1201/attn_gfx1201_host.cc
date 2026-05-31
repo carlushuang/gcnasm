@@ -86,6 +86,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v118(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v119(opus_attn_kargs); // v119: v100 with SINGLE-FRAGMENT QKT K prefetch (only k0 prefetched, k1 in-loop) -> halves K double-buffer VGPR, bit-exact
 template<class T> __global__ void opus_attn_gfx1201_kernel_v120(opus_attn_kargs); // v120: byte-for-byte v100 body + __launch_bounds__(256,2) min-2-WG/CU hint -> lower VGPR target, 7->8 waves/SIMD, bit-exact
 template<class T> __global__ void opus_attn_gfx1201_kernel_v121(opus_attn_kargs); // v121: v100 + symmetric V software-pipeline in PV phase (mirror of QKT K-prefetch), arithmetically byte-identical to v100
+template<class T> __global__ void opus_attn_gfx1201_kernel_v122(opus_attn_kargs); // v122: v111's fast chunked-rescale PV schedule + #pragma clang fp contract(off) -> recover v111 speed BIT-EXACT vs v100
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -188,6 +189,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 119: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v119<opus_attn_traits<128, 32, 128>>); break;
         case 120: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v120<opus_attn_traits<128, 32, 128>>); break;
         case 121: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v121<opus_attn_traits<128, 32, 128>>); break;
+        case 122: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v122<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
