@@ -68,6 +68,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v100(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v101(opus_attn_kargs); // v101: v63 K-prefetch + full V SW-pipeline (REGRESSED 85.66)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v102(opus_attn_kargs); // v102: v100 + asymmetric dt=0 V-load hoist under softmax
 template<class T> __global__ void opus_attn_gfx1201_kernel_v103(opus_attn_kargs); // v103: v100 + LATE single-fragment dt=0 V hoist before bf16 pack
+template<class T> __global__ void opus_attn_gfx1201_kernel_v104(opus_attn_kargs); // v104: v100 + dt=0 PV prologue (both V operands loaded, dt=0 WMMAs fire before dt>=1 loads)
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -152,6 +153,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 101: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v101<opus_attn_traits<128, 32, 128>>); break;
         case 102: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v102<opus_attn_traits<128, 32, 128>>); break;
         case 103: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v103<opus_attn_traits<128, 32, 128>>); break;
+        case 104: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v104<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
