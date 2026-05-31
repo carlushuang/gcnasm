@@ -51,7 +51,8 @@ KERNELS  := attn_gfx1201_kernel_v0.cc \
     attn_gfx1201_kernel_v43.cc \
     attn_gfx1201_kernel_v44.cc \
     attn_gfx1201_kernel_v45.cc \
-    attn_gfx1201_kernel_v48.cc
+    attn_gfx1201_kernel_v48.cc \
+    attn_gfx1201_kernel_v100.cc
 KERN_OBJ := $(patsubst %.cc,$(BUILD)/%.o,$(KERNELS))
 HOST_OBJ := $(BUILD)/attn_gfx1201_host.o
 
@@ -254,6 +255,9 @@ $(BUILD)/attn_gfx1201_kernel_v45.o: attn_gfx1201_kernel_v45.cc attn_gfx1201_kern
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/attn_gfx1201_kernel_v48.o: attn_gfx1201_kernel_v48.cc attn_gfx1201_kernel_v48_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/attn_gfx1201_kernel_v100.o: attn_gfx1201_kernel_v100.cc attn_gfx1201_kernel_v100_template.hpp attn_common.h | $(BUILD)
 	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
 
 # v49: hand-scheduled ASM kernel, loaded as HSACO at runtime
