@@ -74,6 +74,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v106(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v107(opus_attn_kargs); // v107: v100 + distance-2 QKT K-prefetch (2-slot rotating buffer, same 2 score accumulators)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v108(opus_attn_kargs); // v108: v100 + cross-tile head-K prefetch across PV->QKT boundary (+8 VGPR, hides the one exposed head load)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v109(opus_attn_kargs); // v109: v100 MINUS QKT K double-buffer (-8 VGPR, occupancy play; HW scoreboard hides K loads)
+template<class T> __global__ void opus_attn_gfx1201_kernel_v110(opus_attn_kargs); // v110: v100 + split two-pass PV (8 independent WMMAs/pass, no RAW stall) + deferred s1/sum overlap
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -164,6 +165,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 107: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v107<opus_attn_traits<128, 32, 128>>); break;
         case 108: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v108<opus_attn_traits<128, 32, 128>>); break;
         case 109: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v109<opus_attn_traits<128, 32, 128>>); break;
+        case 110: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v110<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -254,7 +256,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 110) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
