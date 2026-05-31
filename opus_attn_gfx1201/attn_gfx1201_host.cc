@@ -93,6 +93,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v125(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v126(opus_attn_kargs); // v126: v111 fast chunked-rescale PV schedule REGISTERED IN dVT ALLOW-LIST (root-cause: v111-v125's 0.0360 was wrong-V-buffer wiring, NOT FMA contraction) -> bit-exact 92 TFLOPS
 template<class T> __global__ void opus_attn_gfx1201_kernel_v127(opus_attn_kargs); // v127: v126 fast chunked-rescale PV + CHUNK=2 double-buffered V SW-pipeline (prefetch next chunk's V under this chunk's PV WMMAs, hide head-of-chunk VMEM bubble), bit-exact, dVT-wired
 template<class T> __global__ void opus_attn_gfx1201_kernel_v128(opus_attn_kargs); // v128: v126 + MINIMAL single-buffer V SW-pipeline in PV (mirror of QKT K ring; only 1 extra V pair live -> avoids v127's register blow-up), bit-exact, dVT-wired
+template<class T> __global__ void opus_attn_gfx1201_kernel_v129(opus_attn_kargs); // v129: PERSISTENT-WG KV-streaming -- machine-sized grid, contiguous m-tile-fastest work partition keeps a head's K/V hot in L2 across its m-tiles; per-work-item body byte-identical to v126 (bit-exact), dVT-wired
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -100,6 +101,36 @@ static void launch_(opus_attn_kargs k, K kern) {
     using T = opus_attn_traits<BM, BN, 128>;
     const int n_blocks = k.N / T::BLOCK_M;
     const dim3 grid(n_blocks, k.H, k.B);
+    const dim3 block(T::BLOCK_SIZE);
+    kern<<<grid, block, 0, 0>>>(k);
+}
+
+// Persistent-WG launcher (v129): size the grid to exactly fill the GPU so each
+// resident WG processes a contiguous run of (b,h,m-tile) work items (m-tile
+// fastest) and keeps its head's K/V hot in L2 across m-tiles. Grid is capped at
+// the natural total-tile count so we never launch idle WGs.
+template<int BM, int BN, class K>
+static void launch_persistent_(opus_attn_kargs k, K kern) {
+    using T = opus_attn_traits<BM, BN, 128>;
+    const int num_m_tiles = k.N / T::BLOCK_M;
+    const int total_tiles = k.B * k.H * num_m_tiles;
+
+    int dev = 0;
+    HIP_CALL(hipGetDevice(&dev));
+    hipDeviceProp_t prop;
+    HIP_CALL(hipGetDeviceProperties(&prop, dev));
+
+    int max_blocks_per_cu = 0;
+    HIP_CALL(hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        &max_blocks_per_cu, reinterpret_cast<const void*>(kern),
+        T::BLOCK_SIZE, 0));
+    if (max_blocks_per_cu < 1) max_blocks_per_cu = 1;
+
+    int grid_blocks = prop.multiProcessorCount * max_blocks_per_cu;
+    if (grid_blocks > total_tiles) grid_blocks = total_tiles;
+    if (grid_blocks < 1) grid_blocks = 1;
+
+    const dim3 grid(grid_blocks, 1, 1);
     const dim3 block(T::BLOCK_SIZE);
     kern<<<grid, block, 0, 0>>>(k);
 }
@@ -202,6 +233,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 126: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v126<opus_attn_traits<128, 32, 128>>); break;
         case 127: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v127<opus_attn_traits<128, 32, 128>>); break;
         case 128: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v128<opus_attn_traits<128, 32, 128>>); break;
+        case 129: launch_persistent_<128, 32>(k, opus_attn_gfx1201_kernel_v129<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -292,7 +324,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 110 || version == 126 || version == 127 || version == 128) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 110 || version == 126 || version == 127 || version == 128 || version == 129) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
