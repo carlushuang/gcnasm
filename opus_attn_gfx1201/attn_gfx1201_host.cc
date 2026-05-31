@@ -103,6 +103,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v135(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v136(opus_attn_kargs); // v136
 template<class T> __global__ void opus_attn_gfx1201_kernel_v137(opus_attn_kargs); // v137
 template<class T> __global__ void opus_attn_gfx1201_kernel_v138(opus_attn_kargs); // v138
+template<class T> __global__ void opus_attn_gfx1201_kernel_v139(opus_attn_kargs); // v139
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -222,6 +223,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 136: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v136<opus_attn_traits<128, 32, 128>>); break;
         case 137: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v137<opus_attn_traits<128, 32, 128>>); break;
         case 138: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v138<opus_attn_traits<128, 32, 128>>); break;
+        case 139: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v139<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
@@ -312,7 +314,7 @@ int main(int argc, char** argv) {
     }
 
     opus_attn_kargs kargs{};
-    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 108 || version == 109 || version == 110 || version == 111 || version == 114 || version == 115 || version == 116 || version == 117 || version == 118 || version == 119 || version == 120 || version == 121 || version == 122 || version == 123 || version == 124 || version == 125 || version == 126 || version == 127 || version == 128 || version == 129 || version == 130 || version == 131 || version == 132 || version == 133 || version == 134 || version == 135 || version == 136 || version == 137 || version == 138) ? dVT : dV); kargs.ptr_o = dO;
+    kargs.ptr_q = dQ; kargs.ptr_k = dK; kargs.ptr_v = ((version == 9 || version == 10 || version == 34 || version == 35 || version == 36 || version == 37 || version == 38 || version == 39 || version == 40 || version == 41 || version == 42 || version == 43 || version == 44 || version == 45 || version == 48 || version == 49 || version == 100 || version == 101 || version == 102 || version == 103 || version == 104 || version == 105 || version == 106 || version == 107 || version == 108 || version == 109 || version == 110 || version == 111 || version == 114 || version == 115 || version == 116 || version == 117 || version == 118 || version == 119 || version == 120 || version == 121 || version == 122 || version == 123 || version == 124 || version == 125 || version == 126 || version == 127 || version == 128 || version == 129 || version == 130 || version == 131 || version == 132 || version == 133 || version == 134 || version == 135 || version == 136 || version == 137 || version == 138 || version == 139) ? dVT : dV); kargs.ptr_o = dO;
     kargs.B = B; kargs.H = H; kargs.N = N; kargs.D = D; kargs.scale = scale;
 
     // Warmup
