@@ -79,6 +79,7 @@ template<class T> __global__ void opus_attn_gfx1201_kernel_v111(opus_attn_kargs)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v112(opus_attn_kargs); // v112: v100 + two-pass PV split (8 independent WMMAs/pass, breaks per-accum RAW hazard, bit-exact)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v113(opus_attn_kargs); // v113: v111 with CHUNK=1 (per-fragment rescale interleaved with PV WMMAs, finest-grained VALU-in-shadow)
 template<class T> __global__ void opus_attn_gfx1201_kernel_v114(opus_attn_kargs); // v114: v111 CHUNK=2 + per-chunk V-load prefetch (issue all chunk V loads, then rescale, then WMMAs)
+template<class T> __global__ void opus_attn_gfx1201_kernel_v115(opus_attn_kargs); // v115: v104 generalized -> uniform branch-free interleaved PV loop (load v0->WMMA0->load v1->WMMA1 every D-tile)
 __global__ void v_transpose_kernel(const bf16_t*, bf16_t*, int, int, int, int);
 
 template<int BM, int BN, class K>
@@ -174,6 +175,7 @@ static void run_opus_attn_gfx1201(int version, opus_attn_kargs k) {
         case 112: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v112<opus_attn_traits<128, 32, 128>>); break;
         case 113: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v113<opus_attn_traits<128, 32, 128>>); break;
         case 114: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v114<opus_attn_traits<128, 32, 128>>); break;
+        case 115: launch_<128, 32>(k, opus_attn_gfx1201_kernel_v115<opus_attn_traits<128, 32, 128>>); break;
         default: fprintf(stderr, "unknown --version=%d\n", version); std::exit(1);
     }
 }
