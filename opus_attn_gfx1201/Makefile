@@ -51,7 +51,8 @@ KERNELS  := attn_gfx1201_kernel_v0.cc \
     attn_gfx1201_kernel_v43.cc \
     attn_gfx1201_kernel_v44.cc \
     attn_gfx1201_kernel_v45.cc \
-    attn_gfx1201_kernel_v48.cc
+    attn_gfx1201_kernel_v48.cc \
+            attn_gfx1201_kernel_v139.cc
 KERN_OBJ := $(patsubst %.cc,$(BUILD)/%.o,$(KERNELS))
 HOST_OBJ := $(BUILD)/attn_gfx1201_host.o
 
@@ -263,4 +264,8 @@ $(BUILD)/attn_v49.hsaco: attn_gfx1201_kernel_v49.s | $(BUILD)
 	$(LLVM_BIN)/clang++ -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx1201 $(BUILD)/v49_device.s -o $@
 
 # Make exe depend on HSACO so it's built before running
-$(EXE): | $(BUILD)/attn_v49.hsaco
+# [fix] v49.s source is absent in #24 — drop the forced HSACO dep so `make` builds the .cc kernels
+#$(EXE): | $(BUILD)/attn_v49.hsaco
+
+$(BUILD)/attn_gfx1201_kernel_v139.o: attn_gfx1201_kernel_v139.cc attn_gfx1201_kernel_v139_template.hpp attn_common.h | $(BUILD)
+	$(HIPCC) -x hip $(CXXFLAGS) -c $< -o $@
