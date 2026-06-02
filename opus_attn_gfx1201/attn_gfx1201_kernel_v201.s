@@ -442,15 +442,13 @@ v88_kernel:
 	v_mov_b32_e32 v135, 0xff7fffff
 	v_mov_b32_e32 v136, 0
 	s_mov_b32 s30, 0
-	s_clause 0x7
+	s_clause 0x5
 	global_load_b128 v[113:116], v[129:130], off
 	global_load_b128 v[117:120], v[131:132], off
 	global_load_b128 v[121:124], v[129:130], off offset:32
 	global_load_b128 v[125:128], v[131:132], off offset:32
 	global_load_b128 v[152:155], v[129:130], off offset:64
 	global_load_b128 v[156:159], v[131:132], off offset:64
-	global_load_b128 v[160:163], v[129:130], off offset:96
-	global_load_b128 v[164:167], v[131:132], off offset:96
 .L_n_loop:
 	v_dual_mov_b32 v97, 0 :: v_dual_mov_b32 v98, 0
 	v_dual_mov_b32 v99, 0 :: v_dual_mov_b32 v100, 0
@@ -460,42 +458,45 @@ v88_kernel:
 	v_dual_mov_b32 v107, 0 :: v_dual_mov_b32 v108, 0
 	v_dual_mov_b32 v109, 0 :: v_dual_mov_b32 v110, 0
 	v_dual_mov_b32 v111, 0 :: v_dual_mov_b32 v112, 0
-	s_wait_loadcnt 0x6
+	s_wait_loadcnt 0x4
 	v_wmma_f32_16x16x16_bf16 v[97:104], v[113:116], v[65:68], v[97:104]
 	v_wmma_f32_16x16x16_bf16 v[105:112], v[117:120], v[65:68], v[105:112]
 	s_clause 0x1
-	global_load_b128 v[113:116], v[129:130], off offset:128
-	global_load_b128 v[117:120], v[131:132], off offset:128
-	s_wait_loadcnt 0x6
+	global_load_b128 v[113:116], v[129:130], off offset:96
+	global_load_b128 v[117:120], v[131:132], off offset:96
+	s_wait_loadcnt 0x4
 	v_wmma_f32_16x16x16_bf16 v[97:104], v[121:124], v[69:72], v[97:104]
 	v_wmma_f32_16x16x16_bf16 v[105:112], v[125:128], v[69:72], v[105:112]
 	s_clause 0x1
-	global_load_b128 v[121:124], v[129:130], off offset:160
-	global_load_b128 v[125:128], v[131:132], off offset:160
-	s_wait_loadcnt 0x6
+	global_load_b128 v[121:124], v[129:130], off offset:128
+	global_load_b128 v[125:128], v[131:132], off offset:128
+	s_wait_loadcnt 0x4
 	v_wmma_f32_16x16x16_bf16 v[97:104], v[152:155], v[73:76], v[97:104]
 	v_wmma_f32_16x16x16_bf16 v[105:112], v[156:159], v[73:76], v[105:112]
 	s_clause 0x1
-	global_load_b128 v[152:155], v[129:130], off offset:192
-	global_load_b128 v[156:159], v[131:132], off offset:192
-	s_wait_loadcnt 0x6
-	v_wmma_f32_16x16x16_bf16 v[97:104], v[160:163], v[77:80], v[97:104]
-	v_wmma_f32_16x16x16_bf16 v[105:112], v[164:167], v[77:80], v[105:112]
-	s_clause 0x1
-	global_load_b128 v[160:163], v[129:130], off offset:224
-	global_load_b128 v[164:167], v[131:132], off offset:224
-	s_wait_loadcnt 0x6
-	v_wmma_f32_16x16x16_bf16 v[97:104], v[113:116], v[81:84], v[97:104]
-	v_wmma_f32_16x16x16_bf16 v[105:112], v[117:120], v[81:84], v[105:112]
+	global_load_b128 v[152:155], v[129:130], off offset:160
+	global_load_b128 v[156:159], v[131:132], off offset:160
 	s_wait_loadcnt 0x4
-	v_wmma_f32_16x16x16_bf16 v[97:104], v[121:124], v[85:88], v[97:104]
-	v_wmma_f32_16x16x16_bf16 v[105:112], v[125:128], v[85:88], v[105:112]
+	v_wmma_f32_16x16x16_bf16 v[97:104], v[113:116], v[77:80], v[97:104]
+	v_wmma_f32_16x16x16_bf16 v[105:112], v[117:120], v[77:80], v[105:112]
+	s_clause 0x1
+	global_load_b128 v[113:116], v[129:130], off offset:192
+	global_load_b128 v[117:120], v[131:132], off offset:192
+	s_wait_loadcnt 0x4
+	v_wmma_f32_16x16x16_bf16 v[97:104], v[121:124], v[81:84], v[97:104]
+	v_wmma_f32_16x16x16_bf16 v[105:112], v[125:128], v[81:84], v[105:112]
+	s_clause 0x1
+	global_load_b128 v[121:124], v[129:130], off offset:224
+	global_load_b128 v[125:128], v[131:132], off offset:224
+	s_wait_loadcnt 0x4
+	v_wmma_f32_16x16x16_bf16 v[97:104], v[152:155], v[85:88], v[97:104]
+	v_wmma_f32_16x16x16_bf16 v[105:112], v[156:159], v[85:88], v[105:112]
 	s_wait_loadcnt 0x2
-	v_wmma_f32_16x16x16_bf16 v[97:104], v[152:155], v[89:92], v[97:104]
-	v_wmma_f32_16x16x16_bf16 v[105:112], v[156:159], v[89:92], v[105:112]
+	v_wmma_f32_16x16x16_bf16 v[97:104], v[113:116], v[89:92], v[97:104]
+	v_wmma_f32_16x16x16_bf16 v[105:112], v[117:120], v[89:92], v[105:112]
 	s_wait_loadcnt 0x0
-	v_wmma_f32_16x16x16_bf16 v[97:104], v[160:163], v[93:96], v[97:104]
-	v_wmma_f32_16x16x16_bf16 v[105:112], v[164:167], v[93:96], v[105:112]
+	v_wmma_f32_16x16x16_bf16 v[97:104], v[121:124], v[93:96], v[97:104]
+	v_wmma_f32_16x16x16_bf16 v[105:112], v[125:128], v[93:96], v[105:112]
 	v_add_co_u32 v142, vcc_lo, v140, s29
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
@@ -705,15 +706,13 @@ v88_kernel:
 	s_wait_alu 0xfffe
 	s_cmp_lt_u32 s30, s24
 	s_cbranch_scc0 .L_n_done
-	s_clause 0x7
+	s_clause 0x5
 	global_load_b128 v[113:116], v[129:130], off
 	global_load_b128 v[117:120], v[131:132], off
 	global_load_b128 v[121:124], v[129:130], off offset:32
 	global_load_b128 v[125:128], v[131:132], off offset:32
 	global_load_b128 v[152:155], v[129:130], off offset:64
 	global_load_b128 v[156:159], v[131:132], off offset:64
-	global_load_b128 v[160:163], v[129:130], off offset:96
-	global_load_b128 v[164:167], v[131:132], off offset:96
 	s_branch .L_n_loop
 .L_n_done:
 	v_rcp_f32_e32 v136, v136
