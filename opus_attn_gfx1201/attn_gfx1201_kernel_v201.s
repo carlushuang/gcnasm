@@ -495,12 +495,12 @@ v88_kernel:
 	s_wait_loadcnt 0x2
 	v_wmma_f32_16x16x16_bf16 v[97:104], v[113:116], v[89:92], v[97:104]
 	v_wmma_f32_16x16x16_bf16 v[105:112], v[117:120], v[89:92], v[105:112]
-	s_wait_loadcnt 0x0
-	v_wmma_f32_16x16x16_bf16 v[97:104], v[121:124], v[93:96], v[97:104]
-	v_wmma_f32_16x16x16_bf16 v[105:112], v[125:128], v[93:96], v[105:112]
 	v_add_co_u32 v142, vcc_lo, v140, s29
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
+	s_wait_loadcnt 0x0
+	v_wmma_f32_16x16x16_bf16 v[97:104], v[121:124], v[93:96], v[97:104]
+	v_wmma_f32_16x16x16_bf16 v[105:112], v[125:128], v[93:96], v[105:112]
 	s_clause 0x3
 	global_load_b128 v[113:116], v[140:141], off
 	global_load_b128 v[117:120], v[140:141], off offset:32
