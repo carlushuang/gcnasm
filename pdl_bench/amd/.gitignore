@@ -1,0 +1,9 @@
+# build artifacts
+pdl_bench_amd.exe
+trace_test
+*.o
+*.exe
+# rocprofv3 trace output
+tr_*/
+# python
+__pycache__/
