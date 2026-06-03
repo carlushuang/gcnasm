@@ -459,6 +459,7 @@ v88_kernel:
 	v_dual_mov_b32 v109, 0 :: v_dual_mov_b32 v110, 0
 	v_dual_mov_b32 v111, 0 :: v_dual_mov_b32 v112, 0
 	s_wait_loadcnt 0x4
+	s_setprio 1
 	v_wmma_f32_16x16x16_bf16 v[97:104], v[113:116], v[65:68], v[97:104]
 	v_wmma_f32_16x16x16_bf16 v[105:112], v[117:120], v[65:68], v[105:112]
 	s_clause 0x1
@@ -497,6 +498,7 @@ v88_kernel:
 	s_wait_loadcnt 0x0
 	v_wmma_f32_16x16x16_bf16 v[97:104], v[121:124], v[93:96], v[97:104]
 	v_wmma_f32_16x16x16_bf16 v[105:112], v[125:128], v[93:96], v[105:112]
+	s_setprio 0
 	v_add_co_u32 v142, vcc_lo, v140, s29
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
@@ -634,6 +636,7 @@ v88_kernel:
 .L_skip_rescale:
 	s_or_b32 exec_lo, exec_lo, s31
 	s_wait_loadcnt 0x2
+	s_setprio 1
 	v_wmma_f32_16x16x16_bf16 v[1:8], v[113:116], v[144:147], v[1:8]
 	v_wmma_f32_16x16x16_bf16 v[1:8], v[117:120], v[148:151], v[1:8]
 	v_add_co_u32 v142, vcc_lo, v140, s34
@@ -693,6 +696,7 @@ v88_kernel:
 	s_wait_loadcnt 0x0
 	v_wmma_f32_16x16x16_bf16 v[57:64], v[121:124], v[144:147], v[57:64]
 	v_wmma_f32_16x16x16_bf16 v[57:64], v[125:128], v[148:151], v[57:64]
+	s_setprio 0
 	v_add_co_u32 v129, vcc_lo, v129, 0x2000
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v130, null, v130, 0, vcc_lo
