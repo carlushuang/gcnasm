@@ -508,6 +508,12 @@ v88_kernel:
 	global_load_b128 v[121:124], v[142:143], off
 	global_load_b128 v[125:128], v[142:143], off offset:32
 	s_mul_i32 s34, 2, s29
+	v_add_co_u32 v142, vcc_lo, v140, s34
+	s_wait_alu 0xfffd
+	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
+	s_clause 0x1
+	global_load_b128 v[152:155], v[142:143], off
+	global_load_b128 v[156:159], v[142:143], off offset:32
 	s_mul_i32 s35, 3, s29
 	s_lshl_b32 s36, s29, 2
 	s_mul_i32 s37, 5, s29
@@ -635,61 +641,55 @@ v88_kernel:
 	v_dual_mul_f32 v63, s33, v63 :: v_dual_mul_f32 v64, s33, v64
 .L_skip_rescale:
 	s_or_b32 exec_lo, exec_lo, s31
-	s_wait_loadcnt 0x2
+	s_wait_loadcnt 0x4
 	s_setprio 1
 	v_wmma_f32_16x16x16_bf16 v[1:8], v[113:116], v[144:147], v[1:8]
 	v_wmma_f32_16x16x16_bf16 v[1:8], v[117:120], v[148:151], v[1:8]
-	v_add_co_u32 v142, vcc_lo, v140, s34
-	s_wait_alu 0xfffd
-	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
-	s_clause 0x1
-	global_load_b128 v[113:116], v[142:143], off
-	global_load_b128 v[117:120], v[142:143], off offset:32
-	s_wait_loadcnt 0x2
-	v_wmma_f32_16x16x16_bf16 v[9:16], v[121:124], v[144:147], v[9:16]
-	v_wmma_f32_16x16x16_bf16 v[9:16], v[125:128], v[148:151], v[9:16]
 	v_add_co_u32 v142, vcc_lo, v140, s35
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
 	s_clause 0x1
-	global_load_b128 v[121:124], v[142:143], off
-	global_load_b128 v[125:128], v[142:143], off offset:32
-	s_wait_loadcnt 0x2
-	v_wmma_f32_16x16x16_bf16 v[17:24], v[113:116], v[144:147], v[17:24]
-	v_wmma_f32_16x16x16_bf16 v[17:24], v[117:120], v[148:151], v[17:24]
+	global_load_b128 v[113:116], v[142:143], off
+	global_load_b128 v[117:120], v[142:143], off offset:32
+	s_wait_loadcnt 0x4
+	v_wmma_f32_16x16x16_bf16 v[9:16], v[121:124], v[144:147], v[9:16]
+	v_wmma_f32_16x16x16_bf16 v[9:16], v[125:128], v[148:151], v[9:16]
 	v_add_co_u32 v142, vcc_lo, v140, s36
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
 	s_clause 0x1
-	global_load_b128 v[113:116], v[142:143], off
-	global_load_b128 v[117:120], v[142:143], off offset:32
-	s_wait_loadcnt 0x2
-	v_wmma_f32_16x16x16_bf16 v[25:32], v[121:124], v[144:147], v[25:32]
-	v_wmma_f32_16x16x16_bf16 v[25:32], v[125:128], v[148:151], v[25:32]
+	global_load_b128 v[121:124], v[142:143], off
+	global_load_b128 v[125:128], v[142:143], off offset:32
+	s_wait_loadcnt 0x4
+	v_wmma_f32_16x16x16_bf16 v[17:24], v[152:155], v[144:147], v[17:24]
+	v_wmma_f32_16x16x16_bf16 v[17:24], v[156:159], v[148:151], v[17:24]
 	v_add_co_u32 v142, vcc_lo, v140, s37
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
 	s_clause 0x1
-	global_load_b128 v[121:124], v[142:143], off
-	global_load_b128 v[125:128], v[142:143], off offset:32
-	s_wait_loadcnt 0x2
-	v_wmma_f32_16x16x16_bf16 v[33:40], v[113:116], v[144:147], v[33:40]
-	v_wmma_f32_16x16x16_bf16 v[33:40], v[117:120], v[148:151], v[33:40]
+	global_load_b128 v[152:155], v[142:143], off
+	global_load_b128 v[156:159], v[142:143], off offset:32
+	s_wait_loadcnt 0x4
+	v_wmma_f32_16x16x16_bf16 v[25:32], v[113:116], v[144:147], v[25:32]
+	v_wmma_f32_16x16x16_bf16 v[25:32], v[117:120], v[148:151], v[25:32]
 	v_add_co_u32 v142, vcc_lo, v140, s38
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
 	s_clause 0x1
 	global_load_b128 v[113:116], v[142:143], off
 	global_load_b128 v[117:120], v[142:143], off offset:32
-	s_wait_loadcnt 0x2
-	v_wmma_f32_16x16x16_bf16 v[41:48], v[121:124], v[144:147], v[41:48]
-	v_wmma_f32_16x16x16_bf16 v[41:48], v[125:128], v[148:151], v[41:48]
+	s_wait_loadcnt 0x4
+	v_wmma_f32_16x16x16_bf16 v[33:40], v[121:124], v[144:147], v[33:40]
+	v_wmma_f32_16x16x16_bf16 v[33:40], v[125:128], v[148:151], v[33:40]
 	v_add_co_u32 v142, vcc_lo, v140, s39
 	s_wait_alu 0xfffd
 	v_add_co_ci_u32_e64 v143, null, v141, 0, vcc_lo
 	s_clause 0x1
 	global_load_b128 v[121:124], v[142:143], off
 	global_load_b128 v[125:128], v[142:143], off offset:32
+	s_wait_loadcnt 0x4
+	v_wmma_f32_16x16x16_bf16 v[41:48], v[152:155], v[144:147], v[41:48]
+	v_wmma_f32_16x16x16_bf16 v[41:48], v[156:159], v[148:151], v[41:48]
 	s_wait_loadcnt 0x2
 	v_wmma_f32_16x16x16_bf16 v[49:56], v[113:116], v[144:147], v[49:56]
 	v_wmma_f32_16x16x16_bf16 v[49:56], v[117:120], v[148:151], v[49:56]
