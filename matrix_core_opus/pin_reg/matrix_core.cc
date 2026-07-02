@@ -106,7 +106,10 @@ L31 |v0___|v1___|v0___|v1___|   _|15|15|15|15|15|15|15|15|15|15|15|15|15|15|15|1
                 |
 */
 template<int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int TILE_M, int TILE_N, int TILE_K, int WAVE_M, int WAVE_N, int WAVE_K>
-__global__ void matrix_core_kernel_block_v2(const void* __restrict__ ptr_a,
+// __launch_bounds__ caps occupancy so the VGPR accumulator (A/B pinned to AGPR)
+// stays resident: without it the freed VGPRs let the compiler raise occupancy,
+// shrinking the per-wave budget until the accumulator spills/rotates into AGPRs.
+__global__ void __launch_bounds__(256, 1) matrix_core_kernel_block_v2(const void* __restrict__ ptr_a,
                                          const void* __restrict__ ptr_b,
                                          void* __restrict__ ptr_c,
                                          int k,
@@ -159,7 +162,7 @@ __global__ void matrix_core_kernel_block_v2(const void* __restrict__ ptr_a,
     // start of kernel
     int loops = (k + BLOCK_K - 1) / BLOCK_K;
 #if 1
-    __attribute__((amdgpu_pin_vgpr(0))) typename decltype(mma)::vtype_c v_c;  // pin at declaration
+    typename decltype(mma)::vtype_c v_c;  // accumulator stays in VGPR naturally
     opus::clear(v_c);
 
     for(auto i = 0; i < loops; i++ ) {
@@ -276,8 +279,8 @@ void gemm_rcr(
 
 void block_run()
 {
-    int m = 256 * 2;
-    int n = 192 * 2;
+    int m = 192 * 4;
+    int n = 128 * 3;
     int k = 8 * 8;
 
     int lda = k;
@@ -319,8 +322,8 @@ void block_run()
     gemm_rcr(host_a, host_b, host_c, m,n,k,lda,ldb,ldc);
 
     {
-        constexpr int BLOCK_M = 256;
-        constexpr int BLOCK_N = 192;
+        constexpr int BLOCK_M = 192;
+        constexpr int BLOCK_N = 128;
         constexpr int BLOCK_K = 16;
         constexpr int TILE_M = 2;
         constexpr int TILE_N = 2;
