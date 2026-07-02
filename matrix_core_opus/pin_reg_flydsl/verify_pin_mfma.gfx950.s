@@ -10,14 +10,14 @@ pin_mfma2:                              ; @pin_mfma2
 	s_load_dwordx2 s[6:7], s[4:5], 0x10
 	v_and_b32_e32 v0, 0x3ff, v0
 	v_lshlrev_b32_e32 v1, 3, v0
-	v_lshlrev_b32_e32 v0, 4, v0
+	v_lshlrev_b32_e32 v4, 4, v0
 	s_waitcnt lgkmcnt(0)
 	global_load_dwordx2 a[0:1], v1, s[0:1]
 	global_load_dwordx2 a[8:9], v1, s[2:3]
 	s_waitcnt vmcnt(0)
-	v_mfma_f32_16x16x16_f16 a[0:3], a[0:1], a[8:9], 0
+	v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[8:9], 0
 	s_nop 7
-	global_store_dwordx4 v0, a[0:3], s[6:7]
+	global_store_dwordx4 v4, v[0:3], s[6:7]
 	s_endpgm
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
@@ -40,9 +40,9 @@ pin_mfma2:                              ; @pin_mfma2
 		.amdhsa_system_sgpr_workgroup_id_z 1
 		.amdhsa_system_sgpr_workgroup_info 0
 		.amdhsa_system_vgpr_workitem_id 2
-		.amdhsa_next_free_vgpr 14
+		.amdhsa_next_free_vgpr 18
 		.amdhsa_next_free_sgpr 8
-		.amdhsa_accum_offset 4
+		.amdhsa_accum_offset 8
 		.amdhsa_reserve_vcc 0
 		.amdhsa_float_round_mode_32 0
 		.amdhsa_float_round_mode_16_64 0
@@ -64,9 +64,10 @@ pin_mfma2:                              ; @pin_mfma2
 .Lfunc_end0:
 	.size	pin_mfma2, .Lfunc_end0-pin_mfma2
                                         ; -- End function
-	.set pin_mfma2.num_vgpr, 2
+	.set pin_mfma2.num_vgpr, 5
 	.set pin_mfma2.num_agpr, 10
 	.set pin_mfma2.numbered_sgpr, 8
+	.set pin_mfma2.num_named_barrier, 0
 	.set pin_mfma2.private_seg_size, 0
 	.set pin_mfma2.uses_vcc, 0
 	.set pin_mfma2.uses_flat_scratch, 0
@@ -77,19 +78,19 @@ pin_mfma2:                              ; @pin_mfma2
 ; Kernel info:
 ; codeLenInByte = 80
 ; TotalNumSgprs: 14
-; NumVgprs: 2
+; NumVgprs: 5
 ; NumAgprs: 10
-; TotalNumVgprs: 14
+; TotalNumVgprs: 18
 ; ScratchSize: 0
 ; MemoryBound: 0
 ; FloatMode: 240
 ; IeeeMode: 1
 ; LDSByteSize: 0 bytes/workgroup (compile time only)
 ; SGPRBlocks: 1
-; VGPRBlocks: 1
+; VGPRBlocks: 2
 ; NumSGPRsForWavesPerEU: 14
-; NumVGPRsForWavesPerEU: 14
-; AccumOffset: 4
+; NumVGPRsForWavesPerEU: 18
+; AccumOffset: 8
 ; Occupancy: 8
 ; WaveLimiterHint : 0
 ; COMPUTE_PGM_RSRC2:SCRATCH_EN: 0
@@ -99,7 +100,7 @@ pin_mfma2:                              ; @pin_mfma2
 ; COMPUTE_PGM_RSRC2:TGID_Y_EN: 1
 ; COMPUTE_PGM_RSRC2:TGID_Z_EN: 1
 ; COMPUTE_PGM_RSRC2:TIDIG_COMP_CNT: 2
-; COMPUTE_PGM_RSRC3_GFX90A:ACCUM_OFFSET: 0
+; COMPUTE_PGM_RSRC3_GFX90A:ACCUM_OFFSET: 1
 ; COMPUTE_PGM_RSRC3_GFX90A:TG_SPLIT: 0
 	.text
 	.p2alignl 6, 3212836864
@@ -108,6 +109,7 @@ pin_mfma2:                              ; @pin_mfma2
 	.set amdgpu.max_num_vgpr, 0
 	.set amdgpu.max_num_agpr, 0
 	.set amdgpu.max_num_sgpr, 0
+	.set amdgpu.max_num_named_barrier, 0
 	.text
 	.section	".note.GNU-stack","",@progbits
 	.amdgpu_metadata
@@ -195,7 +197,7 @@ amdhsa.kernels:
     .symbol:         pin_mfma2.kd
     .uniform_work_group_size: 1
     .uses_dynamic_stack: false
-    .vgpr_count:     14
+    .vgpr_count:     18
     .vgpr_spill_count: 0
     .wavefront_size: 64
 amdhsa.target:   amdgcn-amd-amdhsa--gfx950

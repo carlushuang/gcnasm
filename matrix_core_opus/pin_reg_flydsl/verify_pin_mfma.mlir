@@ -17,8 +17,8 @@ module attributes {llvm.target_triple = "amdgcn-amd-amdhsa"} {
     %bp = llvm.call_intrinsic "llvm.amdgcn.pin.agpr"(%bi, %r8) : (vector<2xi32>, i32) -> vector<2xi32>
     %af = llvm.bitcast %ap : vector<2xi32> to vector<4xf16>
     %bf = llvm.bitcast %bp : vector<2xi32> to vector<4xf16>
-    %d = rocdl.mfma.f32.16x16x16f16 %af, %bf, %c0, %r0, %r0, %r0 :
-        (vector<4xf16>, vector<4xf16>, vector<4xf32>, i32, i32, i32) -> vector<4xf32>
+    %d = rocdl.mfma.f32.16x16x16f16 %af, %bf, %c0, 0, 0, 0 :
+        (vector<4xf16>, vector<4xf16>, vector<4xf32>) -> vector<4xf32>
     llvm.store %d, %pci : vector<4xf32>, !llvm.ptr<1>
     llvm.return
   }

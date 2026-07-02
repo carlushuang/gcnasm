@@ -1,110 +1,93 @@
 # pin_reg_flydsl — register pinning in FlyDSL (A/B -> AGPR, C -> VGPR)
 
-FlyDSL (MLIR Python DSL) analog of `../pin_reg` (the C++/HIP version). The A/B
-MFMA input fragments are pinned to the AGPR file and the accumulator stays in
-VGPR, producing `v_mfma v[C], a[A], a[B]` with the inputs loaded directly into
-AGPR — no inline asm.
+FlyDSL (MLIR Python DSL) analog of `../pin_reg`. A/B MFMA input fragments are
+pinned to the AGPR file and the accumulator stays in VGPR — `v_mfma v[C], a[A],
+a[B]` with the inputs loaded directly into AGPR, no inline asm.
 
 Files:
-- `pin.py` — `pin_agpr(value, regno)` / `pin_vgpr(value, regno)` helpers; they
-  emit `llvm.amdgcn.pin.{agpr,vgpr}` via `llvm.call_intrinsic` (the same path
-  FlyDSL already uses for `llvm.amdgcn.s.setreg`).
+- `pin.py` — `pin_agpr(value, regno)` / `pin_vgpr(value, regno)`; emit
+  `llvm.amdgcn.pin.{agpr,vgpr}` via `llvm.call_intrinsic` (the path FlyDSL
+  already uses for `llvm.amdgcn.s.setreg`).
 - `gemm_pin.py` — tiled MMA GEMM (from FlyDSL `examples/03-tiledMma.py`) with the
-  pins applied to the A/B fragments.
-- `flydsl-llvm-pin.patch` — the LLVM half of the pin patch (git-apply-able).
+  pins on the A/B fragments.
+- `flydsl-llvm-pin.patch` — the pin patch **rebased onto FlyDSL's pinned LLVM**
+  (`ROCm/llvm-project @ 7f77ca0dbda...`, from FlyDSL `thirdparty/llvm-hash.txt`).
+  `git apply`-clean on that commit; 11 LLVM files, no clang.
+- `verify_pin_mfma.mlir` / `verify_pin_mfma.gfx950.s` — the FlyDSL emission
+  pattern reduced to MLIR, and its verified ISA (below).
 
-## Why a patched LLVM is required
+## Verified end-to-end on FlyDSL's LLVM
 
-FlyDSL does AMDGPU codegen **in-process** (`gpu-module-to-binary{format=fatbin}`)
-against the LLVM it was built with. Register pinning is an LLVM intrinsic plus a
-target codegen pass, so that LLVM must carry the patch:
-- the `llvm.amdgcn.pin.*` intrinsics (else `call_intrinsic` rejects the name), and
-- the `SIPreColorPins` pass + `SIFoldOperands` AGPR-load fold (they run
-  automatically inside `gpu-module-to-binary`).
-
-The patch touches only AMDGPU/LLVM files (no clang), so it is independent of the
-FlyDSL front end.
-
-## Workflow (inside a recent aiter / FlyDSL container)
-
-FlyDSL's LLVM is `AlexAUT/llvm-project @ ee8c4b0f5db` (per the FlyDSL playbook).
-
-```bash
-# 1. patch FlyDSL's LLVM
-git clone https://github.com/AlexAUT/llvm-project.git
-cd llvm-project && git checkout ee8c4b0f5db
-git apply /path/to/flydsl-llvm-pin.patch          # or: git apply --3way
-#   SIPreColorPins.cpp is a new file (clean); the edited AMDGPU files may need a
-#   small context fixup if this LLVM has drifted from ROCm 27682a1 -- resolve and
-#   record the delta to sync back to carlushuang/llvm-project.
-
-# 2. build it (mlir + lld, as FlyDSL needs)
-cmake ../llvm -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_ENABLE_PROJECTS="mlir;clang;lld" \
-  -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
-  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-  -DCMAKE_INSTALL_PREFIX=$HOME/llvm-pin-install \
-  -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_INSTALL_UTILS=ON \
-  -DPython3_EXECUTABLE=$(which python3)
-ninja -j$(nproc) && ninja install
-
-# 3. get FlyDSL and rebuild it against the patched LLVM
-pip install flydsl        # or build from source (FlyDSL build guide, Issue #22)
-#   Point FlyDSL's LLVM at the patched install and rebuild libFlyPythonCAPI +
-#   the _mlir bindings so call_intrinsic resolves llvm.amdgcn.pin.*:
-#     -DLLVM_DIR / -DMLIR_DIR = $HOME/llvm-pin-install/lib/cmake/{llvm,mlir}
-#   (also symlink the patched ld.lld into /opt/rocm/llvm/bin, per the playbook).
-
-# 4. run the example
-export LD_LIBRARY_PATH=<flydsl>/_mlir/_mlir_libs:$LD_LIBRARY_PATH
-python gemm_pin.py                                 # "Result correct: True"
-```
-
-## Verified: the MLIR hint path works with the patched backend
-
-`verify_pin_mfma.mlir` is the FlyDSL emission pattern reduced to MLIR: per-lane
-loads of the A/B fragments, each pinned via
-`llvm.call_intrinsic "llvm.amdgcn.pin.agpr"`, fed to `rocdl.mfma`. Lowered with a
-pin-patched toolchain:
+Built `mlir-translate` + `llc` from `ROCm/llvm-project @ 7f77ca0db` with the patch
+applied, then:
 
 ```bash
 mlir-translate --mlir-to-llvmir verify_pin_mfma.mlir -o pin.ll
 llc -mcpu=gfx950 -O3 pin.ll -o verify_pin_mfma.gfx950.s
 ```
 
-Measured ISA (gfx950), see `verify_pin_mfma.gfx950.s`:
+`verify_pin_mfma.mlir` pins the A/B fragments with
+`llvm.call_intrinsic "llvm.amdgcn.pin.agpr"` and feeds `rocdl.mfma`. Result ISA:
 
 ```
 global_load_dwordx2 a[0:1], v1, s[0:1]      ; A born in AGPR at pin 0
 global_load_dwordx2 a[8:9], v1, s[2:3]      ; B born in AGPR at pin 8
-v_mfma_f32_16x16x16_f16 a[0:3], a[0:1], a[8:9], 0
+v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[8:9], 0   ; v[C], a[A], a[B]
 ```
 
 2 AGPR loads, **0 v_accvgpr**: `call_intrinsic("llvm.amdgcn.pin.agpr")` →
 `mlir-translate` (resolves the intrinsic from the patched LLVM) → `llc`
 (SIPreColorPins + SIFoldOperands) places A/B directly in AGPR at the pinned
-numbers and the MFMA reads them. This confirms the FlyDSL mechanism end-to-end;
-the accumulator here is AGPR because no C pin is applied (add a `pin_vgpr` on the
-C fragment, or rely on the vgprcd conversion, for `v_mfma v[C], a[A], a[B]`).
+registers and the MFMA reads them; the accumulator is VGPR. This is the FlyDSL
+mechanism proven on FlyDSL's own LLVM.
 
-For a full FlyDSL kernel, dump the module's assembly and check the inner MMA the
-same way.
+## Workflow (aiter / FlyDSL container)
 
-## Known open point (expected in-container iteration)
+```bash
+# 1. FlyDSL's LLVM (per thirdparty/llvm-hash.txt), patched
+git clone https://github.com/ROCm/llvm-project.git
+cd llvm-project && git checkout 7f77ca0dbda4abbf9af06537b2c475f20ccd6007
+git apply /path/to/flydsl-llvm-pin.patch
+
+# 2. build MLIR (+python bindings) as FlyDSL's scripts/build_llvm.sh does, or:
+cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_PROJECTS="mlir;clang;lld" -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON -DLLVM_INSTALL_UTILS=ON \
+  -DCMAKE_INSTALL_PREFIX=$PWD/mlir_install
+ninja -C build -j$(nproc) install       # SIPreColorPins runs in gpu-module-to-binary
+
+# 3. FlyDSL against the patched MLIR, then run
+export MLIR_PATH=$PWD/mlir_install       # FlyDSL build.sh honors this
+pip install flydsl   # or FlyDSL scripts/build.sh
+python gemm_pin.py
+```
+
+## Deltas from the upstreamed carlushuang patch (LLVM churn)
+
+The public patch (carlushuang/llvm-project#1) targets `roc-7.1.1` (27682a1).
+FlyDSL's commit (7f77ca0db) is newer; the rebase needed three real adjustments,
+already folded into `flydsl-llvm-pin.patch`:
+
+1. `getMFMASrcCVDstVGPROp(uint16_t)` -> `(uint32_t)` — tablegen widened the
+   InstrMapping opcode type.
+2. The `amdgpu-no-agpr` inference was replaced by the `amdgpu-agpr-alloc`
+   attribute (`AAAMDGPUMinAGPRAlloc`); `pin_agpr` now adds a
+   `case Intrinsic::amdgcn_pin_agpr` in `CheckForMinAGPRAllocs` (requires
+   `regno + numRegs` AGPRs) instead of `CheckForNoAGPRs` returning false.
+3. `getOccupancyWithNumVGPRs` gained a `DynamicVGPRBlockSize` argument.
+
+(Also `rocdl.mfma` MLIR syntax in this LLVM uses literal immargs and a 3-operand
+type signature — reflected in `verify_pin_mfma.mlir`.)
+
+## Known open point (in-container)
 
 FlyDSL fragments are register-backed tensors, not single SSA values. `pin.py`
 pins a fragment's underlying value; if a fragment lowers to several register
 values, pin each (`for i, v in enumerate(frag.__extract_to_ir_values__()):
-pin_agpr(v, base + i*width)`). The exact hook (fragment value vs per-register,
-and whether it survives the copy→mma dataflow) is the thing to validate/adjust
-in-container. Any backend change needed to make it land cleanly is a fix to the
-LLVM patch — sync it back to `carlushuang/llvm-project` (branch
-`carhuang/amdgpu_pin_reg`, PR #1).
+pin_agpr(v, base + i*width)`). Validate the exact hook when running `gemm_pin.py`.
 
 ## Caveats (same as the C++ path)
-
-- The accumulator must fit the per-wave VGPR budget for the mixed form; if not,
-  cap occupancy via the FlyDSL launch config / `amdgpu-waves-per-eu` (the analog
-  of `__launch_bounds__`).
+- The accumulator must fit the per-wave VGPR budget for the mixed form; else cap
+  occupancy via the FlyDSL launch config / `amdgpu-waves-per-eu`.
 - A pin whose value is a sub-slice of a shared load (one `ds_read2` feeding two
-  fragments) is handled as a no-op by the backend — already fixed in the patch.
+  fragments) is a no-op in the backend — already handled by the patch.

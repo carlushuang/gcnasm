@@ -1,10 +1,10 @@
 diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
-index 964501837..f207da3bc 100644
+index 3331072a1..9efefae24 100644
 --- a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
 +++ b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
-@@ -2361,6 +2361,21 @@ def int_amdgcn_readfirstlane :
+@@ -2483,6 +2483,21 @@ def int_amdgcn_readfirstlane :
    Intrinsic<[llvm_any_ty], [LLVMMatchType<0>],
-             [IntrNoMem, IntrConvergent, IntrWillReturn, IntrNoCallback, IntrNoFree]>;
+             [IntrNoMem, IntrConvergent, IntrWillReturn, IntrNoCallback, IntrNoFree, IntrNoCreateUndefOrPoison]>;
  
 +// Register-pinning hint. Requests that the value operand be kept in the physical
 +// VGPR (int_amdgcn_pin_vgpr) or AGPR (int_amdgcn_pin_agpr) tuple starting at the
@@ -25,18 +25,18 @@ index 964501837..f207da3bc 100644
  // current wave. Otherwise, the result is undefined.
  def int_amdgcn_readlane :
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPU.h b/llvm/lib/Target/AMDGPU/AMDGPU.h
-index 25a861530..9c434c7cd 100644
+index 878f37411..759260cab 100644
 --- a/llvm/lib/Target/AMDGPU/AMDGPU.h
 +++ b/llvm/lib/Target/AMDGPU/AMDGPU.h
-@@ -51,6 +51,7 @@ FunctionPass *createSIMemoryLegalizerPass();
+@@ -51,6 +51,7 @@ FunctionPass *createSIFixSGPRCopiesLegacyPass();
+ FunctionPass *createLowerWWMCopiesPass();
+ FunctionPass *createSIMemoryLegalizerPass();
  FunctionPass *createSIInsertWaitcntsPass();
- FunctionPass *createSIPreAllocateWWMRegsLegacyPass();
- FunctionPass *createSIFormMemoryClausesPass();
 +FunctionPass *createSIPreColorPinsPass();
+ FunctionPass *createSIPreAllocateWWMRegsLegacyPass();
+ FunctionPass *createSIFormMemoryClausesLegacyPass();
  
- FunctionPass *createSIPostRABundlerPass();
- FunctionPass *createAMDGPUImageIntrinsicOptimizerPass(const TargetMachine *);
-@@ -223,6 +224,9 @@ extern char &SIOptimizeExecMaskingLegacyID;
+@@ -235,6 +236,9 @@ extern char &SIOptimizeExecMaskingLegacyID;
  void initializeSIPreAllocateWWMRegsLegacyPass(PassRegistry &);
  extern char &SIPreAllocateWWMRegsLegacyID;
  
@@ -47,35 +47,40 @@ index 25a861530..9c434c7cd 100644
  extern char &AMDGPUImageIntrinsicOptimizerID;
  
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPUAttributor.cpp b/llvm/lib/Target/AMDGPU/AMDGPUAttributor.cpp
-index 76811980a..c0d4ebcda 100644
+index 7178abe8b..181274d94 100644
 --- a/llvm/lib/Target/AMDGPU/AMDGPUAttributor.cpp
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUAttributor.cpp
-@@ -1258,6 +1258,12 @@ struct AAAMDGPUNoAGPR
-         return false;
-       }
- 
-+      // llvm.amdgcn.pin.agpr is an explicit request to keep a value in an AGPR,
-+      // so it forces the function to use AGPRs (otherwise the MFMA accumulator
-+      // would be lowered to the VGPR form and the pin could not be honored).
-+      if (Callee->getIntrinsicID() == Intrinsic::amdgcn_pin_agpr)
-+        return false;
-+
-       // Some intrinsics may use AGPRs, but if we have a choice, we are not
-       // required to use AGPRs.
-       if (Callee->isIntrinsic())
+@@ -1325,6 +1325,17 @@ struct AAAMDGPUMinAGPRAlloc
+       switch (CB.getIntrinsicID()) {
+       case Intrinsic::not_intrinsic:
+         break;
++      case Intrinsic::amdgcn_pin_agpr: {
++        // Explicit request to hold a value in AGPRs starting at a given
++        // register; require at least that range so the function keeps AGPRs
++        // and the AGPR MFMA form stays available for the pin to be honored.
++        unsigned RegNo =
++            cast<ConstantInt>(CB.getArgOperand(1))->getZExtValue();
++        unsigned NumRegs = divideCeil(
++            CB.getArgOperand(0)->getType()->getPrimitiveSizeInBits(), 32);
++        Maximum.takeAssumedMaximum(std::min(RegNo + NumRegs, 256u));
++        return true;
++      }
+       case Intrinsic::write_register:
+       case Intrinsic::read_register:
+       case Intrinsic::read_volatile_register: {
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp b/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
-index 2174db5e1..a95485474 100644
+index 9356b785c..cf61dbda9 100644
 --- a/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
-@@ -535,6 +535,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeAMDGPUTarget() {
-   initializeSIMemoryLegalizerPass(*PR);
-   initializeSIOptimizeExecMaskingLegacyPass(*PR);
-   initializeSIPreAllocateWWMRegsLegacyPass(*PR);
+@@ -611,6 +611,7 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeAMDGPUTarget() {
+   RegisterTargetMachine<GCNTargetMachine> Y(getTheGCNTarget());
+ 
+   PassRegistry *PR = PassRegistry::getPassRegistry();
 +  initializeSIPreColorPinsPass(*PR);
-   initializeSIFormMemoryClausesPass(*PR);
-   initializeSIPostRABundlerPass(*PR);
-   initializeGCNCreateVOPDPass(*PR);
-@@ -1542,6 +1543,10 @@ bool GCNPassConfig::addGlobalInstructionSelect() {
+   initializeR600ClauseMergePassPass(*PR);
+   initializeR600ControlFlowFinalizerPass(*PR);
+   initializeR600PacketizerPass(*PR);
+@@ -1657,6 +1658,10 @@ bool GCNPassConfig::addGlobalInstructionSelect() {
  }
  
  void GCNPassConfig::addFastRegAlloc() {
@@ -86,7 +91,7 @@ index 2174db5e1..a95485474 100644
    // FIXME: We have to disable the verifier here because of PHIElimination +
    // TwoAddressInstructions disabling it.
  
-@@ -1556,6 +1561,10 @@ void GCNPassConfig::addFastRegAlloc() {
+@@ -1676,6 +1681,10 @@ void GCNPassConfig::addPreRegAlloc() {
  }
  
  void GCNPassConfig::addOptimizedRegAlloc() {
@@ -98,10 +103,10 @@ index 2174db5e1..a95485474 100644
      insertPass(&DetectDeadLanesID, &DeadMachineInstructionElimID);
  
 diff --git a/llvm/lib/Target/AMDGPU/CMakeLists.txt b/llvm/lib/Target/AMDGPU/CMakeLists.txt
-index ba8930e40..3c42f5cc3 100644
+index ae684a58c..0050b0a7d 100644
 --- a/llvm/lib/Target/AMDGPU/CMakeLists.txt
 +++ b/llvm/lib/Target/AMDGPU/CMakeLists.txt
-@@ -177,6 +177,7 @@ add_llvm_target(AMDGPUCodeGen
+@@ -181,6 +181,7 @@ add_llvm_target(AMDGPUCodeGen
    SIPeepholeSDWA.cpp
    SIPostRABundler.cpp
    SIPreAllocateWWMRegs.cpp
@@ -110,10 +115,10 @@ index ba8930e40..3c42f5cc3 100644
    SIProgramInfo.cpp
    SIRegisterInfo.cpp
 diff --git a/llvm/lib/Target/AMDGPU/SIFoldOperands.cpp b/llvm/lib/Target/AMDGPU/SIFoldOperands.cpp
-index cccccfdc0..2a363b2a5 100644
+index a2fe31bd8..fd138056a 100644
 --- a/llvm/lib/Target/AMDGPU/SIFoldOperands.cpp
 +++ b/llvm/lib/Target/AMDGPU/SIFoldOperands.cpp
-@@ -2175,9 +2175,15 @@ bool SIFoldOperandsImpl::tryFoldLoad(MachineInstr &MI) {
+@@ -2633,9 +2633,15 @@ bool SIFoldOperandsImpl::tryFoldLoad(MachineInstr &MI) {
      return false;
  
    // Check that all uses a copy to an agpr or a reg_sequence producing an agpr.
@@ -131,26 +136,26 @@ index cccccfdc0..2a363b2a5 100644
      Register DstReg = I->getOperand(0).getReg();
      // Physical registers may have more than one instruction definitions
 diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.h b/llvm/lib/Target/AMDGPU/SIInstrInfo.h
-index 558c6fb13..59737269f 100644
+index 87d51ffe8..832631c34 100644
 --- a/llvm/lib/Target/AMDGPU/SIInstrInfo.h
 +++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.h
-@@ -1610,6 +1610,11 @@ namespace AMDGPU {
+@@ -1816,6 +1816,11 @@ namespace AMDGPU {
    LLVM_READONLY
-   int getMFMASrcCVDstAGPROp(uint16_t Opcode);
+   int32_t getMFMASrcCVDstAGPROp(uint32_t Opcode);
  
 +  /// \returns the VGPR (vgprcd) form of an MFMA that uses AGPRs for srcC/vdst,
 +  /// or -1. Lets an accumulator be pinned into VGPRs with AGPR inputs.
 +  LLVM_READONLY
-+  int getMFMASrcCVDstVGPROp(uint16_t Opcode);
++  int getMFMASrcCVDstVGPROp(uint32_t Opcode);
 +
    /// \returns v_cmpx version of a v_cmp instruction.
    LLVM_READONLY
-   int getVCMPXOpFromVCMP(uint16_t Opcode);
+   int32_t getVCMPXOpFromVCMP(uint32_t Opcode);
 diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.td b/llvm/lib/Target/AMDGPU/SIInstrInfo.td
-index 0d89b1270..349b9e5a5 100644
+index d9b40beaf..f2e017836 100644
 --- a/llvm/lib/Target/AMDGPU/SIInstrInfo.td
 +++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.td
-@@ -3220,6 +3220,16 @@ def getMFMASrcCVDstAGPROp : InstrMapping {
+@@ -3497,6 +3497,16 @@ def getMFMASrcCVDstAGPROp : InstrMapping {
    let ValueCols = [["AGPR"]];
  }
  
@@ -168,11 +173,11 @@ index 0d89b1270..349b9e5a5 100644
  def getVCMPXOpFromVCMP : InstrMapping {
    let FilterClass = "VCMPVCMPXTable";
 diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/SIInstructions.td
-index ea3f1374f..6b7691151 100644
+index 2846398c4..ba85ca1f9 100644
 --- a/llvm/lib/Target/AMDGPU/SIInstructions.td
 +++ b/llvm/lib/Target/AMDGPU/SIInstructions.td
-@@ -266,6 +266,39 @@ let usesCustomInserter = 1, hasSideEffects = 0, mayLoad = 0, mayStore = 0, Uses
-   }
+@@ -410,6 +410,39 @@ foreach Op = Operations in {
+                                                       Op.VT, Op.RetReg, Op.Reg>;
  }
  
 +// Register-pinning hints. Lowered by EmitInstrWithCustomInserter into a COPY
@@ -210,12 +215,12 @@ index ea3f1374f..6b7691151 100644
 +
  let usesCustomInserter = 1, Defs = [VCC] in {
  def V_ADD_U64_PSEUDO : VPseudoInstSI <
-   (outs VReg_64:$vdst), (ins VSrc_b64:$src0, VSrc_b64:$src1),
+   (outs VReg_64_AlignTarget:$vdst), (ins VSrc_b64:$src0, VSrc_b64:$src1),
 diff --git a/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h b/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h
-index 2373bd5d1..15730cb20 100644
+index 617862db8..593042e46 100644
 --- a/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h
 +++ b/llvm/lib/Target/AMDGPU/SIMachineFunctionInfo.h
-@@ -1086,6 +1086,10 @@ public:
+@@ -1165,6 +1165,10 @@ public:
      return WavesPerEU;
    }
  
@@ -228,7 +233,7 @@ index 2373bd5d1..15730cb20 100644
      return WavesPerEU.first;
 diff --git a/llvm/lib/Target/AMDGPU/SIPreColorPins.cpp b/llvm/lib/Target/AMDGPU/SIPreColorPins.cpp
 new file mode 100644
-index 000000000..45423b977
+index 000000000..c9f6d2789
 --- /dev/null
 +++ b/llvm/lib/Target/AMDGPU/SIPreColorPins.cpp
 @@ -0,0 +1,610 @@
@@ -829,7 +834,7 @@ index 000000000..45423b977
 +  if (Req) {
 +    // Occupancy achievable while reserving `Req` registers per wave; cap the
 +    // waves-per-EU (and hence the RA's VGPR budget) so the pinned range fits.
-+    unsigned Occ = ST.getOccupancyWithNumVGPRs(Req);
++    unsigned Occ = ST.getOccupancyWithNumVGPRs(Req, MFI->getDynamicVGPRBlockSize());
 +    auto WPE = MFI->getWavesPerEU();
 +    unsigned NewMax = WPE.second ? std::min(WPE.second, Occ) : Occ;
 +    // Only cap the *max* occupancy; keep the min low (1 unless the function
