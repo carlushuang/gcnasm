@@ -102,12 +102,33 @@ already folded into `flydsl-llvm-pin.patch`:
 (Also `rocdl.mfma` MLIR syntax in this LLVM uses literal immargs and a 3-operand
 type signature — reflected in `verify_pin_mfma.mlir`.)
 
-## Known open point (in-container)
+## Status: FlyDSL stack unblocked and running (verified in-container)
 
-FlyDSL fragments are register-backed tensors, not single SSA values. `pin.py`
-pins a fragment's underlying value; if a fragment lowers to several register
-values, pin each (`for i, v in enumerate(frag.__extract_to_ir_values__()):
-pin_agpr(v, base + i*width)`). Validate the exact hook when running `gemm_pin.py`.
+FlyDSL was built against the pin-patched LLVM and runs end-to-end on gfx950:
+
+- Patched LLVM/MLIR built + installed (`MLIR_ENABLE_BINDINGS_PYTHON=ON`,
+  `MLIR_PATH=.../mlir_install`), FlyDSL built against it.
+- Baseline `examples/03-tiledMma.py`: **Result correct: True** in a
+  `rocm/atom:...pytorch...` container (torch 2.10/rocm7.2.2, gfx950).
+- `gemm_pin_rocdl.py` (this dir): a low-level `rocdl.mfma` kernel with `pin_agpr`
+  on the A/B vectors **runs and is correct** (pinned == unpinned, diff 0).
+
+Remaining, honestly: emitting the pin from FlyDSL *python* into a kernel does not
+yet take effect. FlyDSL's trace/lowering (`fly_promote_regmem_to_vectorssa` /
+`convert_fly_to_rocdl`) reconstructs the MFMA operand dataflow, and a raw
+`llvm.call_intrinsic` threaded onto an MFMA input is dropped before it reaches
+LLVM IR (the emitted `rocdl.mfma` reads the loads directly). Making the pin stick
+needs FlyDSL-side support: a `@traced_op`/`fly`-dialect pin op that the promotion
+and fly->rocdl passes preserve and thread into the MFMA (the same way FlyDSL
+keeps `rocdl.s.setreg`). That is a FlyDSL-repo change, not an LLVM one.
+
+The LLVM half is proven: `verify_pin_mfma.mlir` / `verify_gemm_loop.ll` fed
+through FlyDSL's own patched `mlir-translate` + `llc` give
+`v_mfma v[C], a[A], a[B]` with A/B in AGPR (above). So once a FlyDSL pin op emits
+`llvm.amdgcn.pin.agpr` into the module, the backend already does the rest.
+
+High-level `tiled_mma` fragments are additionally register-space `fly.memref`s
+(not SSA values at trace time), so they specifically need the fly-dialect pin op.
 
 ## Caveats (same as the C++ path)
 - The accumulator must fit the per-wave VGPR budget for the mixed form; else cap

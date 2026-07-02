@@ -22,29 +22,60 @@ from flydsl._mlir import ir
 import flydsl.expr as fx
 
 
-def _to_value(x):
-    """Best-effort extraction of the underlying MLIR ir.Value from a FlyDSL SSA
-    wrapper / fragment. FlyDSL exposes either a bare ir.Value, a `.value`, or
-    `__extract_to_ir_values__()`."""
-    if isinstance(x, ir.Value):
-        return x
-    if hasattr(x, "value") and isinstance(x.value, ir.Value):
-        return x.value
-    if hasattr(x, "__extract_to_ir_values__"):
-        vs = x.__extract_to_ir_values__()
-        if len(vs) == 1:
-            return vs[0]
-        raise ValueError("pin: multi-value fragment; pin each register value")
-    raise TypeError(f"pin: cannot get an ir.Value from {type(x)}")
+def _unwrap(x):
+    return x.value if hasattr(x, "value") and isinstance(x.value, ir.Value) else x
 
 
-def _pin(value, regno, agpr):
-    v = _to_value(value)
+def _pin_value(v, regno, agpr):
+    """Pin one LLVM-typed SSA vector value; returns the pinned value.
+
+    The pin intrinsic is only selectable for i32-based widths (i32/v2i32/...), so
+    bitcast to <dwords x i32> around the pin (a float/half base would need
+    v2f32/v4f16, which have no pattern)."""
+    from flydsl._mlir.ir import IntegerType, VectorType
     n = fx.arith.unwrap(fx.arith.constant(int(regno), type=fx.typing.T.i32))
     name = "llvm.amdgcn.pin.agpr" if agpr else "llvm.amdgcn.pin.vgpr"
-    # call_intrinsic mangles the overload from v.type; if the binding needs an
-    # explicit suffix, pass e.g. name + ".v4i32".
-    return _llvm.call_intrinsic(v.type, name, [v, n], [], [])
+    ty = v.type
+    vt = _cast(VectorType, ty)
+    bits = vt.shape[0] * _bitwidth(vt.element_type) if vt else _bitwidth(ty)
+    dwords = bits // 32
+    i32 = IntegerType.get_signless(32)
+    i32ty = i32 if dwords == 1 else VectorType.get([dwords], i32)
+    vi = _llvm.bitcast(i32ty, v)
+    pinned = _llvm.call_intrinsic(i32ty, name, [vi, n], [], [])
+    return _llvm.bitcast(ty, pinned)
+
+
+def _cast(TypeCls, t):
+    try:
+        return TypeCls(t)
+    except (ValueError, TypeError):
+        return None
+
+
+def _bitwidth(t):
+    from flydsl._mlir.ir import IntegerType, F16Type, F32Type, BF16Type
+    it = _cast(IntegerType, t)
+    if it:
+        return it.width
+    for T, w in ((F16Type, 16), (BF16Type, 16), (F32Type, 32)):
+        if _cast(T, t):
+            return w
+    raise TypeError(f"pin: unknown element type width for {t}")
+
+
+def _pin(frag_or_value, regno, agpr):
+    # Bare SSA value: pin directly.
+    if isinstance(frag_or_value, ir.Value):
+        return _pin_value(frag_or_value, regno, agpr)
+    # FlyDSL fragment = a register-space memref/tile, not an SSA value. Load its
+    # register vector, pin it, and store it back, then hand the same fragment to
+    # the MMA. load->pin->store is value-identical but routes the tile's contents
+    # through the pin so the backend places them in the requested register file.
+    frag = frag_or_value
+    v = _unwrap(frag.load())
+    frag.store(_pin_value(v, regno, agpr))
+    return frag
 
 
 def pin_agpr(value, regno):
