@@ -8,8 +8,13 @@ Files:
 - `pin.py` — `pin_agpr(value, regno)` / `pin_vgpr(value, regno)`; emit
   `llvm.amdgcn.pin.{agpr,vgpr}` via `llvm.call_intrinsic` (the path FlyDSL
   already uses for `llvm.amdgcn.s.setreg`).
-- `gemm_pin.py` — tiled MMA GEMM (from FlyDSL `examples/03-tiledMma.py`) with the
-  pins on the A/B fragments.
+- `gemm_pin.py` — small tiled MMA GEMM (from FlyDSL `examples/03-tiledMma.py`).
+- `gemm_pin_large.py` — complex GEMM (128x128x64, double-buffered LDS K-loop,
+  4-wave, 16x16x16 f16 MFMA), modeled on FlyDSL `examples/04-preshuffle_gemm.py`;
+  the opus-scale analog. A/B fragments pinned to AGPR, accumulator in VGPR.
+- `verify_gemm_loop.{ll,gfx950.s}` — the backend shape of the large tile (a
+  loop-carried 4-tile VGPR accumulator with A/B pinned to AGPR) and its verified
+  ISA (below).
 - `flydsl-llvm-pin.patch` — the pin patch **rebased onto FlyDSL's pinned LLVM**
   (`ROCm/llvm-project @ 7f77ca0dbda...`, from FlyDSL `thirdparty/llvm-hash.txt`).
   `git apply`-clean on that commit; 11 LLVM files, no clang.
@@ -40,6 +45,24 @@ v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[8:9], 0   ; v[C], a[A], a[B]
 (SIPreColorPins + SIFoldOperands) places A/B directly in AGPR at the pinned
 registers and the MFMA reads them; the accumulator is VGPR. This is the FlyDSL
 mechanism proven on FlyDSL's own LLVM.
+
+### Larger tile verified (loop-carried accumulator)
+
+`verify_gemm_loop.ll` is the backend shape of `gemm_pin_large.py`'s inner loop: a
+K-loop with a loop-carried 4-tile VGPR accumulator, A and 4 B tiles pinned to
+AGPR each iteration. Through the patched FlyDSL `llc` (`-mcpu=gfx950`,
+`verify_gemm_loop.gfx950.s`):
+
+```
+global_load_dwordx2 a[0:1] a[64:65] a[66:67] a[68:69] a[70:71]  ; A + 4 B -> AGPR
+v_mfma_f32_16x16x16_f16 v[14:17], a[0:1], a[64:65], v[14:17]    ; v[C], a[A], a[B]
+... (4 MFMAs, all v[C], a[A], a[B]) ...
+```
+
+Loop-carried accumulator in VGPR, A/B in AGPR at the pinned numbers, **0
+v_accvgpr in the loop, no spill**, `-verify-machineinstrs` clean — the mixed form
+at scale. (The 27682a1 patch keeps the accumulator in AGPR here; FlyDSL's newer
+LLVM plus the `amdgpu-agpr-alloc` budget delta yields the v[C] form.)
 
 ## Workflow (aiter / FlyDSL container)
 
