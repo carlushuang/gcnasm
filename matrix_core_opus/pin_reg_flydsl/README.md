@@ -60,16 +60,35 @@ export LD_LIBRARY_PATH=<flydsl>/_mlir/_mlir_libs:$LD_LIBRARY_PATH
 python gemm_pin.py                                 # "Result correct: True"
 ```
 
-## Verifying the ISA
+## Verified: the MLIR hint path works with the patched backend
 
-Dump the kernel's assembly (FlyDSL can emit the module; or inspect the fatbin)
-and check the inner MMA:
+`verify_pin_mfma.mlir` is the FlyDSL emission pattern reduced to MLIR: per-lane
+loads of the A/B fragments, each pinned via
+`llvm.call_intrinsic "llvm.amdgcn.pin.agpr"`, fed to `rocdl.mfma`. Lowered with a
+pin-patched toolchain:
+
+```bash
+mlir-translate --mlir-to-llvmir verify_pin_mfma.mlir -o pin.ll
+llc -mcpu=gfx950 -O3 pin.ll -o verify_pin_mfma.gfx950.s
+```
+
+Measured ISA (gfx950), see `verify_pin_mfma.gfx950.s`:
 
 ```
-buffer_load_... a[...]                     # A/B loaded directly into AGPR
-v_mfma_f32_16x16x4_f32 v[C], a[A], a[B]    # inputs AGPR, accumulator VGPR
-# no v_accvgpr shuffles in the loop
+global_load_dwordx2 a[0:1], v1, s[0:1]      ; A born in AGPR at pin 0
+global_load_dwordx2 a[8:9], v1, s[2:3]      ; B born in AGPR at pin 8
+v_mfma_f32_16x16x16_f16 a[0:3], a[0:1], a[8:9], 0
 ```
+
+2 AGPR loads, **0 v_accvgpr**: `call_intrinsic("llvm.amdgcn.pin.agpr")` →
+`mlir-translate` (resolves the intrinsic from the patched LLVM) → `llc`
+(SIPreColorPins + SIFoldOperands) places A/B directly in AGPR at the pinned
+numbers and the MFMA reads them. This confirms the FlyDSL mechanism end-to-end;
+the accumulator here is AGPR because no C pin is applied (add a `pin_vgpr` on the
+C fragment, or rely on the vgprcd conversion, for `v_mfma v[C], a[A], a[B]`).
+
+For a full FlyDSL kernel, dump the module's assembly and check the inner MMA the
+same way.
 
 ## Known open point (expected in-container iteration)
 
