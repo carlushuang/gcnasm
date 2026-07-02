@@ -163,8 +163,8 @@ __global__ void matrix_core_kernel_block_v2(const void* __restrict__ ptr_a,
     opus::clear(v_c);
 
     for(auto i = 0; i < loops; i++ ) {
-        auto v_a = g_a.load<4>(u_a);  u_a += BLOCK_K;
-        auto v_b = g_b.load<4>(u_b);  u_b += BLOCK_K;
+        __attribute__((amdgpu_pin_agpr(0)))  auto v_a = g_a.load<4>(u_a);  u_a += BLOCK_K;
+        __attribute__((amdgpu_pin_agpr(64))) auto v_b = g_b.load<4>(u_b);  u_b += BLOCK_K;
         v_c = mma(v_a, v_b, v_c);
     }
 
