@@ -102,6 +102,34 @@ already folded into `flydsl-llvm-pin.patch`:
 (Also `rocdl.mfma` MLIR syntax in this LLVM uses literal immargs and a 3-operand
 type signature — reflected in `verify_pin_mfma.mlir`.)
 
+## Do we need a FlyDSL source change? YES — analyzed and (partly) done
+
+Confirmed by experiment. A raw `llvm.call_intrinsic` pin emitted from Python into
+a kernel does not work: high-level `tiled_mma` fragments are register-space
+`fly.memref`s (not SSA values) at trace time, and even a pin on a materialized
+vector is dropped/broken by FlyDSL's `promote_regmem_to_vectorssa` /
+`convert_fly_to_rocdl` lowering. The pin must be applied on the *lowered*
+`rocdl.mfma`, as a FlyDSL-side transform.
+
+FlyDSL change implemented (see `flydsl_patch/`): `compiler/pin_mfma.py` +
+a hook in `compiler/jit_function.py`. With `FLYDSL_PIN_MFMA_AGPR=1` it wraps every
+`rocdl.mfma` src0/src1 with `llvm.amdgcn.pin.agpr` just before
+`gpu-module-to-binary`. Verified: the pin lands in FlyDSL's device LLVM IR and
+kernels stay correct (`pinned == unpinned`), for both the low-level
+`gemm_pin_rocdl.py` and the high-level `examples/03-tiledMma.py`.
+
+Backend proven on FlyDSL's own IR: feeding FlyDSL's emitted `20_llvm_ir.ll`
+(with the pin) through the patched `llc`/`opt -O3 -> llc` gives
+`v_mfma v[C], a[A], a[B]` with A/B in AGPR at the pinned numbers, 0 v_accvgpr.
+
+Remaining item (a further FlyDSL change): FlyDSL's in-process device codegen
+(`gpu-module-to-binary`, the MLIR ROCDL serializer) codegens the *same* IR
+differently from `llc` and drops the AGPR placement (final ISA reads VGPR),
+independent of opt level. The proven fix is to route FlyDSL device codegen
+through `llc`+`lld` (or match the serializer's codegen config to `llc`), since
+that path pins correctly. Until then the pin is present in the IR but the
+in-process serializer does not honor it.
+
 ## Status: FlyDSL stack unblocked and running (verified in-container)
 
 FlyDSL was built against the pin-patched LLVM and runs end-to-end on gfx950:

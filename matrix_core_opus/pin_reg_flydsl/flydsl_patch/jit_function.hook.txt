@@ -1,0 +1,19 @@
+# FlyDSL source change #2: hook the pin transform into the compile loop.
+# In python/flydsl/compiler/jit_function.py, in MlirCompiler.compile()'s
+# per-fragment dump loop, replace:
+#
+#     if frag.strip().startswith("gpu-module-to-binary"):
+#         llir = _extract_llvm_ir(module)
+#
+# with:
+#
+#     if frag.strip().startswith("gpu-module-to-binary"):
+#         if os.environ.get("FLYDSL_PIN_MFMA_AGPR"):
+#             from .pin_mfma import pin_all_mfma_agpr
+#             _npin = pin_all_mfma_agpr(module)
+#             print(f"[flydsl.compile] pinned {_npin} rocdl.mfma A/B -> AGPR")
+#         llir = _extract_llvm_ir(module)
+#
+# (pin_mfma.py goes in python/flydsl/compiler/. For the non-dump path, add the
+# same pin_all_mfma_agpr(module) call before the gpu-module-to-binary fragment
+# in _run_pipeline.)
