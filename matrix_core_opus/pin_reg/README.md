@@ -38,3 +38,19 @@ whose accumulator exceeds the VGPR file cannot keep C in VGPR (use a smaller til
 
 Requires a pin-enabled clang (`amdgpu_pin_vgpr`/`amdgpu_pin_agpr` + the
 `llvm.amdgcn.pin.*` intrinsics are not upstream). Reuses `../half.hpp`.
+
+## Reproduced + hardware-validated on gfx950 and gfx942
+
+`matrix_core.gfx950.s` / `matrix_core.gfx942.s` are the dumped ISA for
+`matrix_core_kernel_block_v2` (192x128) with A/B pinned to AGPR and the
+accumulator in VGPR: 24/24 `v_mfma_f32_16x16x16_f16 v[C], a[A], a[B]`, A/B born
+in AGPR (`buffer_load_dwordx2 a[..]`), 0 `v_accvgpr`. Run-validated on hardware
+(pinned result vs CPU GEMM, nrms 2.4e-4): **gfx950 (MI355) VALID, gfx942 VALID**.
+
+Build recipe (pin-enabled clang from carlushuang/llvm-project PR #1, on a ROCm
+matching the clang's version so device libs load — do NOT use `-nogpulib`, whose
+different scheduling splits the K loop across blocks and defeats the AGPR fold):
+```
+clang++ -x hip --cuda-device-only -S -O3 --offload-arch=gfx950 \
+  --rocm-path=/opt/rocm -I<aiter>/csrc/include -std=c++17 matrix_core.cc
+```
