@@ -1,68 +1,73 @@
 # pin_reg_flydsl — register pinning in FlyDSL (A/B -> AGPR, C -> VGPR)
 
-FlyDSL (MLIR Python DSL) analog of `../pin_reg`. A/B MFMA input fragments are
+FlyDSL (MLIR Python DSL) analog of `../pin_reg`. The A/B MFMA input fragments are
 pinned to the AGPR file and the accumulator stays in VGPR — `v_mfma v[C], a[A],
-a[B]` with the inputs loaded directly into AGPR, no inline asm.
+a[B]` with the inputs loaded directly into AGPR, no inline asm — the same
+instruction the C++ opus kernel emits.
 
-Files:
+## Achieved end-to-end on gfx950
+
+Verified in a `rocm/atom` pytorch container (torch 2.10 / rocm7.2.2, gfx950). The
+FlyDSL kernel's executed ISA matches the C++ opus impl:
+
+```
+buffer_load_dwordx2 a[0:1], ...                        # A -> AGPR
+buffer_load_dwordx2 a[64:65], ...                      # B -> AGPR
+v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[64:65], 0    # v[C], a[A], a[B]
+Result correct: True
+```
+
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_PIN_MFMA_AGPR=1 FLYDSL_PIN_CODEGEN_LLC=1 \
+FLYDSL_PATCHED_LLC=<flydsl-llvm>/build/bin/llc  python gemm_pin_rocdl.py
+```
+
+Works for the low-level `gemm_pin_rocdl.py` (clean `v[C], a[A], a[B]`) and the
+high-level `examples/03-tiledMma.py` (accumulator VGPR + AGPR inputs; some
+operands fall back to VGPR because all MFMAs share fixed AGPR bases 0/64 — a
+per-MFMA base assignment would fill them). Correct in both.
+
+## Files
+
 - `pin.py` — `pin_agpr(value, regno)` / `pin_vgpr(value, regno)`; emit
   `llvm.amdgcn.pin.{agpr,vgpr}` via `llvm.call_intrinsic` (the path FlyDSL
   already uses for `llvm.amdgcn.s.setreg`).
+- `gemm_pin_rocdl.py` — low-level `rocdl.mfma` GEMM (16x16x16 f16) with `pin_agpr`
+  on the A/B vectors; the one that produces the clean opus instruction above.
 - `gemm_pin.py` — small tiled MMA GEMM (from FlyDSL `examples/03-tiledMma.py`).
 - `gemm_pin_large.py` — complex GEMM (128x128x64, double-buffered LDS K-loop,
   4-wave, 16x16x16 f16 MFMA), modeled on FlyDSL `examples/04-preshuffle_gemm.py`;
   the opus-scale analog. A/B fragments pinned to AGPR, accumulator in VGPR.
-- `verify_gemm_loop.{ll,gfx950.s}` — the backend shape of the large tile (a
-  loop-carried 4-tile VGPR accumulator with A/B pinned to AGPR) and its verified
-  ISA (below).
-- `flydsl-llvm-pin.patch` — the pin patch **rebased onto FlyDSL's pinned LLVM**
-  (`ROCm/llvm-project @ 7f77ca0dbda...`, from FlyDSL `thirdparty/llvm-hash.txt`).
-  `git apply`-clean on that commit; 11 LLVM files, no clang.
-- `verify_pin_mfma.mlir` / `verify_pin_mfma.gfx950.s` — the FlyDSL emission
-  pattern reduced to MLIR, and its verified ISA (below).
+- `flydsl_patch/` — the two FlyDSL source changes (see below).
+- `flydsl-llvm-pin.patch` — the LLVM pin patch **rebased onto FlyDSL's pinned
+  LLVM** (`ROCm/llvm-project @ 7f77ca0dbda...`, from FlyDSL
+  `thirdparty/llvm-hash.txt`). `git apply`-clean on that commit; 11 LLVM files,
+  no clang.
 
-## Verified end-to-end on FlyDSL's LLVM
+## Two FlyDSL source changes (`flydsl_patch/`)
 
-Built `mlir-translate` + `llc` from `ROCm/llvm-project @ 7f77ca0db` with the patch
-applied, then:
+Both in `python/flydsl/compiler/`:
 
-```bash
-mlir-translate --mlir-to-llvmir verify_pin_mfma.mlir -o pin.ll
-llc -mcpu=gfx950 -O3 pin.ll -o verify_pin_mfma.gfx950.s
-```
+1. `pin_mfma.py::pin_all_mfma_agpr` — walks the lowered module and wraps every
+   `rocdl.mfma` src0/src1 with `llvm.amdgcn.pin.agpr` just before device codegen.
+   (Emitting the pin from FlyDSL *python* into a kernel does not survive
+   trace/lowering — high-level `tiled_mma` fragments are register-space
+   `fly.memref`s, not SSA values, and `promote_regmem_to_vectorssa` /
+   `convert_fly_to_rocdl` reconstruct the MFMA dataflow — so the pin must be
+   applied on the *lowered* `rocdl.mfma`.)
+2. `pin_mfma.py::codegen_via_llc` + a hook in `jit_function.py` — codegen the
+   device module with the patched **`llc`+`lld`** instead of the in-process
+   `gpu-module-to-binary` serializer. Required: the serializer's `optimizeLlvm`
+   step *drops* the pin (confirmed by disassembling its bitcode: pin count 0),
+   whereas `llc` / `opt -O3 -> llc` on the identical IR keep it and place A/B in
+   AGPR. `codegen_via_llc` loads the resulting raw HSA code object via a minimal
+   `gpu.binary` (HIP's `hipModuleLoadData` accepts it).
 
-`verify_pin_mfma.mlir` pins the A/B fragments with
-`llvm.call_intrinsic "llvm.amdgcn.pin.agpr"` and feeds `rocdl.mfma`. Result ISA:
-
-```
-global_load_dwordx2 a[0:1], v1, s[0:1]      ; A born in AGPR at pin 0
-global_load_dwordx2 a[8:9], v1, s[2:3]      ; B born in AGPR at pin 8
-v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[8:9], 0   ; v[C], a[A], a[B]
-```
-
-2 AGPR loads, **0 v_accvgpr**: `call_intrinsic("llvm.amdgcn.pin.agpr")` →
-`mlir-translate` (resolves the intrinsic from the patched LLVM) → `llc`
-(SIPreColorPins + SIFoldOperands) places A/B directly in AGPR at the pinned
-registers and the MFMA reads them; the accumulator is VGPR. This is the FlyDSL
-mechanism proven on FlyDSL's own LLVM.
-
-### Larger tile verified (loop-carried accumulator)
-
-`verify_gemm_loop.ll` is the backend shape of `gemm_pin_large.py`'s inner loop: a
-K-loop with a loop-carried 4-tile VGPR accumulator, A and 4 B tiles pinned to
-AGPR each iteration. Through the patched FlyDSL `llc` (`-mcpu=gfx950`,
-`verify_gemm_loop.gfx950.s`):
-
-```
-global_load_dwordx2 a[0:1] a[64:65] a[66:67] a[68:69] a[70:71]  ; A + 4 B -> AGPR
-v_mfma_f32_16x16x16_f16 v[14:17], a[0:1], a[64:65], v[14:17]    ; v[C], a[A], a[B]
-... (4 MFMAs, all v[C], a[A], a[B]) ...
-```
-
-Loop-carried accumulator in VGPR, A/B in AGPR at the pinned numbers, **0
-v_accvgpr in the loop, no spill**, `-verify-machineinstrs` clean — the mixed form
-at scale. (The 27682a1 patch keeps the accumulator in AGPR here; FlyDSL's newer
-LLVM plus the `amdgpu-agpr-alloc` budget delta yields the v[C] form.)
+Enabled by env vars: `FLYDSL_PIN_MFMA_AGPR=1` (`FLYDSL_PIN_A_AGPR`/
+`FLYDSL_PIN_B_AGPR` set the bases), `FLYDSL_PIN_CODEGEN_LLC=1`,
+`FLYDSL_PATCHED_LLC=<flydsl-llvm>/build/bin/llc`. The hook currently lives in
+FlyDSL's dump path (`FLYDSL_DUMP_IR=1`); for production the same call belongs
+before the `gpu-module-to-binary` fragment in the non-dump `_run_pipeline`.
 
 ## Workflow (aiter / FlyDSL container)
 
@@ -77,12 +82,13 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_PROJECTS="mlir;clang;lld" -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
   -DMLIR_ENABLE_BINDINGS_PYTHON=ON -DLLVM_INSTALL_UTILS=ON \
   -DCMAKE_INSTALL_PREFIX=$PWD/mlir_install
-ninja -C build -j$(nproc) install       # SIPreColorPins runs in gpu-module-to-binary
+ninja -C build -j$(nproc) install
 
-# 3. FlyDSL against the patched MLIR, then run
+# 3. FlyDSL against the patched MLIR, apply flydsl_patch/, then run
 export MLIR_PATH=$PWD/mlir_install       # FlyDSL build.sh honors this
-pip install flydsl   # or FlyDSL scripts/build.sh
-python gemm_pin.py
+pip install flydsl                       # or FlyDSL scripts/build.sh
+FLYDSL_DUMP_IR=1 FLYDSL_PIN_MFMA_AGPR=1 FLYDSL_PIN_CODEGEN_LLC=1 \
+FLYDSL_PATCHED_LLC=$PWD/build/bin/llc  python gemm_pin_rocdl.py
 ```
 
 ## Deltas from the upstreamed carlushuang patch (LLVM churn)
@@ -100,101 +106,7 @@ already folded into `flydsl-llvm-pin.patch`:
 3. `getOccupancyWithNumVGPRs` gained a `DynamicVGPRBlockSize` argument.
 
 (Also `rocdl.mfma` MLIR syntax in this LLVM uses literal immargs and a 3-operand
-type signature — reflected in `verify_pin_mfma.mlir`.)
-
-## ACHIEVED: FlyDSL kernel emits the opus instruction (v[C], a[A], a[B]) on GPU
-
-End-to-end, verified on gfx950 in a `rocm/atom` pytorch container. The FlyDSL
-kernel's executed ISA matches the C++ opus impl:
-
-```
-buffer_load_dwordx2 a[0:1], ...                        # A -> AGPR
-buffer_load_dwordx2 a[64:65], ...                      # B -> AGPR
-v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[64:65], 0    # v[C], a[A], a[B]
-Result correct: True
-```
-
-How (two FlyDSL source changes in `flydsl_patch/`, both in
-`python/flydsl/compiler/`):
-1. `pin_mfma.py::pin_all_mfma_agpr` — wraps every `rocdl.mfma` src0/src1 with
-   `llvm.amdgcn.pin.agpr` just before device codegen.
-2. `pin_mfma.py::codegen_via_llc` + a `jit_function.py` hook — codegens the
-   device module with the patched **`llc`+`lld`** instead of the in-process
-   `gpu-module-to-binary` serializer. This was required: the serializer's
-   `optimizeLlvm` step *drops* the pin (confirmed by disassembling its bitcode:
-   pin count 0), whereas `llc`/`opt -O3 -> llc` on the identical IR keep it and
-   place A/B in AGPR.
-
-Run:
-```bash
-FLYDSL_DUMP_IR=1 FLYDSL_PIN_MFMA_AGPR=1 FLYDSL_PIN_CODEGEN_LLC=1 \
-FLYDSL_PATCHED_LLC=<flydsl-llvm>/build/bin/llc  python gemm_pin_rocdl.py
-```
-Works for the low-level `gemm_pin_rocdl.py` (clean `v[C],a[A],a[B]`) and the
-high-level `examples/03-tiledMma.py` (accumulator VGPR + AGPR inputs; some
-operands fall back to VGPR because all MFMAs share fixed AGPR bases 0/64 — a
-per-MFMA base assignment would fill them). Correct in both.
-
-Notes: the hook currently runs in FlyDSL's dump path (`FLYDSL_DUMP_IR=1`); the
-same call belongs before the `gpu-module-to-binary` fragment in the non-dump
-`_run_pipeline` for production. `codegen_via_llc` loads a raw HSA code object via
-a minimal `gpu.binary` (HIP's `hipModuleLoadData` accepts it).
-
-## Background: why a FlyDSL source change is needed
-
-Confirmed by experiment. A raw `llvm.call_intrinsic` pin emitted from Python into
-a kernel does not work: high-level `tiled_mma` fragments are register-space
-`fly.memref`s (not SSA values) at trace time, and even a pin on a materialized
-vector is dropped/broken by FlyDSL's `promote_regmem_to_vectorssa` /
-`convert_fly_to_rocdl` lowering. The pin must be applied on the *lowered*
-`rocdl.mfma`, as a FlyDSL-side transform.
-
-FlyDSL change implemented (see `flydsl_patch/`): `compiler/pin_mfma.py` +
-a hook in `compiler/jit_function.py`. With `FLYDSL_PIN_MFMA_AGPR=1` it wraps every
-`rocdl.mfma` src0/src1 with `llvm.amdgcn.pin.agpr` just before
-`gpu-module-to-binary`. Verified: the pin lands in FlyDSL's device LLVM IR and
-kernels stay correct (`pinned == unpinned`), for both the low-level
-`gemm_pin_rocdl.py` and the high-level `examples/03-tiledMma.py`.
-
-Backend proven on FlyDSL's own IR: feeding FlyDSL's emitted `20_llvm_ir.ll`
-(with the pin) through the patched `llc`/`opt -O3 -> llc` gives
-`v_mfma v[C], a[A], a[B]` with A/B in AGPR at the pinned numbers, 0 v_accvgpr.
-
-Remaining item (a further FlyDSL change): FlyDSL's in-process device codegen
-(`gpu-module-to-binary`, the MLIR ROCDL serializer) codegens the *same* IR
-differently from `llc` and drops the AGPR placement (final ISA reads VGPR),
-independent of opt level. The proven fix is to route FlyDSL device codegen
-through `llc`+`lld` (or match the serializer's codegen config to `llc`), since
-that path pins correctly. Until then the pin is present in the IR but the
-in-process serializer does not honor it.
-
-## Status: FlyDSL stack unblocked and running (verified in-container)
-
-FlyDSL was built against the pin-patched LLVM and runs end-to-end on gfx950:
-
-- Patched LLVM/MLIR built + installed (`MLIR_ENABLE_BINDINGS_PYTHON=ON`,
-  `MLIR_PATH=.../mlir_install`), FlyDSL built against it.
-- Baseline `examples/03-tiledMma.py`: **Result correct: True** in a
-  `rocm/atom:...pytorch...` container (torch 2.10/rocm7.2.2, gfx950).
-- `gemm_pin_rocdl.py` (this dir): a low-level `rocdl.mfma` kernel with `pin_agpr`
-  on the A/B vectors **runs and is correct** (pinned == unpinned, diff 0).
-
-Remaining, honestly: emitting the pin from FlyDSL *python* into a kernel does not
-yet take effect. FlyDSL's trace/lowering (`fly_promote_regmem_to_vectorssa` /
-`convert_fly_to_rocdl`) reconstructs the MFMA operand dataflow, and a raw
-`llvm.call_intrinsic` threaded onto an MFMA input is dropped before it reaches
-LLVM IR (the emitted `rocdl.mfma` reads the loads directly). Making the pin stick
-needs FlyDSL-side support: a `@traced_op`/`fly`-dialect pin op that the promotion
-and fly->rocdl passes preserve and thread into the MFMA (the same way FlyDSL
-keeps `rocdl.s.setreg`). That is a FlyDSL-repo change, not an LLVM one.
-
-The LLVM half is proven: `verify_pin_mfma.mlir` / `verify_gemm_loop.ll` fed
-through FlyDSL's own patched `mlir-translate` + `llc` give
-`v_mfma v[C], a[A], a[B]` with A/B in AGPR (above). So once a FlyDSL pin op emits
-`llvm.amdgcn.pin.agpr` into the module, the backend already does the rest.
-
-High-level `tiled_mma` fragments are additionally register-space `fly.memref`s
-(not SSA values at trace time), so they specifically need the fly-dialect pin op.
+type signature.)
 
 ## Caveats (same as the C++ path)
 - The accumulator must fit the per-wave VGPR budget for the mixed form; else cap
