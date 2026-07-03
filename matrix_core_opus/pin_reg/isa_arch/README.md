@@ -1,42 +1,39 @@
-# Per-arch matrix-core pinned ISA (gfx942 / gfx950 / gfx1201)
+# Per-arch opus tiled-MMA pinned ISA (gfx942 / gfx950 / gfx1201)
 
-Dumped from `../matrix_core_arch.cpp`, which has one `__global__` per target
-(`matrix_core_gfx942`, `matrix_core_gfx950`, `matrix_core_gfx1201`), each a
-16x16x16 f16 matrix-core tile with the opus register plan applied via the
-`amdgpu_pin_{vgpr,agpr}` attributes.
+Dumped from `../matrix_core_arch.cpp` — one `__global__` per target, each built on
+`opus::make_tiled_mma` (the high-level opus path, same as the
+`op_tests/opus/device` tiled tests) with the register plan applied via the
+`amdgpu_pin_{vgpr,agpr}` attributes:
+
+- gfx942/gfx950: `make_tiled_mma<..>(.., opus::mfma_adaptor_swap_ab{})`, `pin_agpr` A/B.
+- gfx1201: `make_tiled_mma(opus::make_wmma<..>(.., opus::wmma_adaptor_swap_ab{}), ..)`, `pin_vgpr` A/B.
+
+16x16x16 f16, one wave, BLOCK == WAVE (single tile per thread).
 
 | arch | family | pinned instruction |
 |------|--------|--------------------|
-| gfx942  | CDNA3 (MFMA) | `v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[2:3]`  — A/B born in AGPR, C in VGPR |
-| gfx950  | CDNA3 (MFMA) | `v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[2:3]`  — A/B born in AGPR, C in VGPR |
-| gfx1201 | RDNA4 (WMMA) | `v_wmma_f32_16x16x16_f16 v[20:27], v[8:11], v[12:15]` — no AGPR file, A/B/C in VGPR |
+| gfx942  | CDNA3 (MFMA) | `v_mfma_f32_16x16x16_f16 v[0:3], a[8:9], a[0:1]` — A/B born in AGPR, C in VGPR |
+| gfx950  | CDNA3 (MFMA) | `v_mfma_f32_16x16x16_f16 v[0:3], a[8:9], a[0:1]` — A/B born in AGPR, C in VGPR |
+| gfx1201 | RDNA4 (WMMA) | `v_wmma_f32_16x16x16_f16 v[0:7], v[12:15], v[8:11]` — no AGPR file, A/B/C in VGPR |
 
-Loaded straight into the pinned registers (`global_load ... a[..]` / `v[..]`),
-no `v_accvgpr`.
-
-Run-verified on real hardware (pinned code object executes correctly):
-**gfx942 PASS**, **gfx1201 PASS** (pinned kernel bit-identical to the unpinned
-reference). gfx950 is ISA here (CDNA3, identical MFMA to gfx942).
+(A/B are swapped by `*_adaptor_swap_ab`.) On CDNA the A/B fragment is loaded
+straight into the pinned AGPRs (`buffer_load_dwordx2 a[0:1]` / `a[8:9]`), 0
+`v_accvgpr`; on RDNA4 into the pinned VGPRs (`buffer_load_b128 v[8:11]` /
+`v[12:15]`).
 
 Regenerate:
 ```bash
-clang++ -x hip --cuda-device-only -S -O3 --offload-arch=<arch> \
-  -nogpulib --rocm-path=/opt/rocm matrix_core_arch.cpp -o matrix_core.<arch>.s
+clang++ -x hip --cuda-device-only -S -O3 --offload-arch=<arch> -nogpulib \
+  --rocm-path=/opt/rocm -I<aiter/csrc/include> -std=c++20 \
+  matrix_core_arch.cpp -o matrix_core.<arch>.s
 ```
-with a pin-enabled clang (carlushuang/llvm-project PR #1).
+with a pin-enabled clang (carlushuang/llvm-project PR #1) and an opus that has the
+WMMA tiled_mma path (aiter `csrc/include/opus`).
 
-## Note on the full opus tiled kernel (`../matrix_core.cc`, `block_v2`)
+## Note on the larger tiled kernel (`../matrix_core.cc`, block_v2)
 
-`block_v2` uses opus `make_tiled_mma`, whose A/B fragments are wide (>=256-bit,
-assembled from several `buffer_load_dwordx2`). Two constraints made the full tiled
-kernel unsuitable for a clean per-arch pinned dump here:
-
-1. opus `tiled_mma` dispatches only to MFMA, so it is CDNA-only — it cannot be
-   compiled for gfx1201 (RDNA4/WMMA).
-2. The wide multi-load AGPR fold for `block_v2`'s fragments did not reproduce in
-   this build environment (A/B stayed in VGPR), independent of the pin pass
-   version — an environment difference from the original MI355X validation.
-
-These single-tile per-arch kernels use the foldable matrix-core form so the
-AGPR/VGPR pins take effect deterministically and identically across gfx942 /
-gfx950 / gfx1201.
+`block_v2` (BLOCK_M=192) makes each thread's A/B fragment wide (>=256-bit,
+assembled from several `buffer_load_dwordx2`); that wide multi-load AGPR fold did
+not reproduce in this build environment. These single-tile (BLOCK == WAVE) opus
+tiled_mma kernels use a one-load fragment, so the AGPR/VGPR pins fold directly and
+deterministically into the requested registers across all three arches.
