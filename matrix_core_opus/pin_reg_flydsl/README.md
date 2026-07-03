@@ -102,7 +102,45 @@ already folded into `flydsl-llvm-pin.patch`:
 (Also `rocdl.mfma` MLIR syntax in this LLVM uses literal immargs and a 3-operand
 type signature — reflected in `verify_pin_mfma.mlir`.)
 
-## Do we need a FlyDSL source change? YES — analyzed and (partly) done
+## ACHIEVED: FlyDSL kernel emits the opus instruction (v[C], a[A], a[B]) on GPU
+
+End-to-end, verified on gfx950 in a `rocm/atom` pytorch container. The FlyDSL
+kernel's executed ISA matches the C++ opus impl:
+
+```
+buffer_load_dwordx2 a[0:1], ...                        # A -> AGPR
+buffer_load_dwordx2 a[64:65], ...                      # B -> AGPR
+v_mfma_f32_16x16x16_f16 v[0:3], a[0:1], a[64:65], 0    # v[C], a[A], a[B]
+Result correct: True
+```
+
+How (two FlyDSL source changes in `flydsl_patch/`, both in
+`python/flydsl/compiler/`):
+1. `pin_mfma.py::pin_all_mfma_agpr` — wraps every `rocdl.mfma` src0/src1 with
+   `llvm.amdgcn.pin.agpr` just before device codegen.
+2. `pin_mfma.py::codegen_via_llc` + a `jit_function.py` hook — codegens the
+   device module with the patched **`llc`+`lld`** instead of the in-process
+   `gpu-module-to-binary` serializer. This was required: the serializer's
+   `optimizeLlvm` step *drops* the pin (confirmed by disassembling its bitcode:
+   pin count 0), whereas `llc`/`opt -O3 -> llc` on the identical IR keep it and
+   place A/B in AGPR.
+
+Run:
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_PIN_MFMA_AGPR=1 FLYDSL_PIN_CODEGEN_LLC=1 \
+FLYDSL_PATCHED_LLC=<flydsl-llvm>/build/bin/llc  python gemm_pin_rocdl.py
+```
+Works for the low-level `gemm_pin_rocdl.py` (clean `v[C],a[A],a[B]`) and the
+high-level `examples/03-tiledMma.py` (accumulator VGPR + AGPR inputs; some
+operands fall back to VGPR because all MFMAs share fixed AGPR bases 0/64 — a
+per-MFMA base assignment would fill them). Correct in both.
+
+Notes: the hook currently runs in FlyDSL's dump path (`FLYDSL_DUMP_IR=1`); the
+same call belongs before the `gpu-module-to-binary` fragment in the non-dump
+`_run_pipeline` for production. `codegen_via_llc` loads a raw HSA code object via
+a minimal `gpu.binary` (HIP's `hipModuleLoadData` accepts it).
+
+## Background: why a FlyDSL source change is needed
 
 Confirmed by experiment. A raw `llvm.call_intrinsic` pin emitted from Python into
 a kernel does not work: high-level `tiled_mma` fragments are register-space

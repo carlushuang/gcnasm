@@ -97,3 +97,55 @@ def pin_all_mfma_agpr(module):
         _pin_operand(o, 0, a_base)
         _pin_operand(o, 1, b_base)
     return len(found)
+
+
+# ---------------------------------------------------------------------------
+# Codegen the device module via llc+lld (which honors the pin) instead of the
+# in-process gpu-module-to-binary serializer (whose optimizeLlvm drops the pin).
+# Enabled by FLYDSL_PIN_CODEGEN_LLC=1; tools from FLYDSL_PATCHED_LLC (patched llc)
+# and ROCm's ld.lld. Builds a gpu.binary with the raw code object and splices it.
+# ---------------------------------------------------------------------------
+import subprocess, tempfile, os as _os
+from pathlib import Path
+
+
+def _single(module, name):
+    for op in module.body.operations:
+        if op.operation.name == name:
+            return op
+    raise RuntimeError(f"no top-level {name}")
+
+
+def codegen_via_llc(module, llir, chip="gfx950"):
+    llc = _os.environ.get("FLYDSL_PATCHED_LLC",
+                          "/home/carhuang/llvm-pin/flydsl-llvm/build/bin/llc")
+    lld = _os.environ.get("FLYDSL_LLD", "/opt/rocm/llvm/bin/ld.lld")
+    gpu_mod = _single(module, "gpu.module")
+    sym = ir.SymbolTable.get_symbol_name(gpu_mod.operation)  # e.g. @kernels
+    name = str(sym).lstrip("@").strip('"')
+    with tempfile.TemporaryDirectory(prefix="flydsl_llc_") as d:
+        d = Path(d)
+        (d / "dev.ll").write_text(llir)
+        subprocess.run([llc, "-O3", "-mtriple=amdgcn-amd-amdhsa", f"-mcpu={chip}",
+                        "-filetype=obj", str(d / "dev.ll"), "-o", str(d / "dev.o")],
+                       check=True, capture_output=True, text=True)
+        subprocess.run([lld, "-shared", str(d / "dev.o"), "-o", str(d / "dev.hsaco")],
+                       check=True, capture_output=True, text=True)
+        obj = (d / "dev.hsaco").read_bytes()
+        if _os.environ.get("FLYDSL_PIN_DUMP_HSACO"):
+            objdump = _os.path.join(_os.path.dirname(llc), "llvm-objdump")
+            try:
+                dis = subprocess.run([objdump, "-d", f"--mcpu={chip}", str(d / "dev.hsaco")],
+                                     capture_output=True, text=True).stdout
+                for ln in dis.splitlines():
+                    if "v_mfma" in ln or "buffer_load" in ln or "v_accvgpr" in ln:
+                        print("[flydsl.compile][ISA]", ln.strip().split("//")[0].strip())
+            except Exception as _e:
+                print("objdump failed:", _e)
+    esc = "".join("\\%02X" % b for b in obj)
+    text = ('module attributes {gpu.container_module} { gpu.binary @%s '
+            '[#gpu.object<#rocdl.target<chip = "%s">, "%s">] }' % (name, chip, esc))
+    ext = ir.Module.parse(text, module.context)
+    ext_bin = _single(ext, "gpu.binary")
+    ir.InsertionPoint(gpu_mod).insert(ext_bin.operation.clone())
+    gpu_mod.operation.erase()
