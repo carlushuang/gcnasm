@@ -35,8 +35,11 @@ template<typename DType, typename SType, int VEC_SIZE>
 __global__ void cast_kernel_with_f4(DType* __restrict__ dst,  const SType* __restrict__ src,  
                     size_t N) {
     using opus::operator""_I;
-    using D_VEC_T = opus::array<DType, VEC_SIZE / opus::num_packs_v<DType>>;
-    using S_VEC_T = opus::array<SType, VEC_SIZE / opus::num_packs_v<SType>>;
+    // opus::array now takes the logical element count directly and bit-packs sub-byte types
+    // (fp4_t is one 4-bit value; cutlass float_e2m1_t convention). VEC_SIZE values -> array<T, VEC_SIZE>
+    // occupying ceil(VEC_SIZE*bits/8) bytes; no /num_packs_v (that was the old fp4x2-per-element model).
+    using D_VEC_T = opus::array<DType, VEC_SIZE>;
+    using S_VEC_T = opus::array<SType, VEC_SIZE>;
 
     // opus::bool_constant<std::is_same_v<opus::get_value_t<S_VEC_T>, opus::fp4_t>>{}.zzz();
     // opus::tuple_array<opus::fp4_t, 4>{}.uuu();
