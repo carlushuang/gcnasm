@@ -16,6 +16,10 @@ using namespace mori::cco;
 #if !defined(HIP_INCLUDE_HIP_HIP_RUNTIME_API_H)
 extern "C" hipError_t hipGetDeviceCount(int* count);
 extern "C" hipError_t hipSetDevice(int deviceId);
+enum hipDeviceAttribute_t {
+    hipDeviceAttributeMultiprocessorCount = 63,
+};
+extern "C" hipError_t hipDeviceGetAttribute(int* pi, hipDeviceAttribute_t attr, int deviceId);
 #endif
 
 #define CHECK_HIP(call)                                                                                   \
@@ -135,9 +139,11 @@ int main(int argc, char** argv) {
     bf16_t* d_a = nullptr;
     bf16_t* d_b = nullptr;
     bf16_t* d_tail = nullptr;
+    unsigned int* d_tile_counter = nullptr;
     CHECK_HIP(hipMalloc(&d_a, a_elems * sizeof(bf16_t)));
     CHECK_HIP(hipMalloc(&d_b, b_elems * sizeof(bf16_t)));
     CHECK_HIP(hipMalloc(&d_tail, local_c_elems * sizeof(bf16_t)));
+    CHECK_HIP(hipMalloc(&d_tile_counter, sizeof(unsigned int)));
     CHECK_HIP(hipMemcpy(d_a, h_a.get(), a_elems * sizeof(bf16_t), hipMemcpyHostToDevice));
     CHECK_HIP(hipMemcpy(d_b, h_b.get(), b_elems * sizeof(bf16_t), hipMemcpyHostToDevice));
 
@@ -149,6 +155,7 @@ int main(int argc, char** argv) {
     kargs.ptr_a = d_a;
     kargs.ptr_b = d_b;
     kargs.ptr_c = d_tail;        // non-scattered tail columns land here
+    kargs.tile_counter = d_tile_counter;
     kargs.cco_c_win = win;       // scattered shard columns land directly in peer LSA
     kargs.a2a_n_shard = shard_n;
     kargs.a2a_M = M;
@@ -165,9 +172,13 @@ int main(int argc, char** argv) {
     kargs.stride_b_batch = N * K;
     kargs.stride_c_batch = M * N;
 
+    int cu_count = 0;
+    CHECK_HIP(hipDeviceGetAttribute(&cu_count, hipDeviceAttributeMultiprocessorCount, rank % ndev));
     const int num_tiles_m = ceil_div(M, Traits::B_M);
     const int num_tiles_n = ceil_div(N, Traits::B_N);
-    dim3 grid(num_tiles_m * num_tiles_n, 1, 1);
+    const int total_tiles = num_tiles_m * num_tiles_n * kargs.batch;
+    const int persistent_wgs = total_tiles < cu_count ? total_tiles : cu_count;
+    dim3 grid(persistent_wgs, 1, 1);
     dim3 block(Traits::BLOCK_SIZE);
 
     auto clear_buffers = [&]() {
@@ -178,6 +189,7 @@ int main(int argc, char** argv) {
     };
 
     auto launch = [&]() {
+        CHECK_HIP(hipMemset(d_tile_counter, 0, sizeof(unsigned int)));
         gemm_a16w16_quad_subtile_kernel<Traits><<<grid, block>>>(kargs);
         CHECK_HIP(hipGetLastError());
     };
@@ -236,6 +248,7 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipFree(d_a));
     CHECK_HIP(hipFree(d_b));
     CHECK_HIP(hipFree(d_tail));
+    CHECK_HIP(hipFree(d_tile_counter));
     MPI_Finalize();
     return total_mism == 0 ? 0 : 1;
 }

@@ -39,6 +39,7 @@ struct opus_gemm_kargs {
     const void* __restrict__ ptr_a;
     const void* __restrict__ ptr_b;
     void* __restrict__ ptr_c;
+    unsigned int* tile_counter = nullptr;
     int m;
     int n;
     int k;
