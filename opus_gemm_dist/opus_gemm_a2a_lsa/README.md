@@ -25,6 +25,14 @@ cd ../opus_gemm_a2a_lsa
 make MORI_LIB_DIR=$SP
 ```
 
+Build the persistent and non-persistent tile schedulers into separate
+directories so Make does not reuse objects compiled with the other mode:
+
+```bash
+make BUILD=build_persistent PERSISTENT=1 MORI_LIB_DIR=$SP
+make BUILD=build_nonpersistent PERSISTENT=0 MORI_LIB_DIR=$SP
+```
+
 ## Run
 
 Use four visible GPUs, preferably idle ones:
@@ -37,3 +45,24 @@ export LD_LIBRARY_PATH=$SP:${LD_LIBRARY_PATH:-}
 mpirun --allow-run-as-root -n 4 ./build/quad_lsa_direct.exe \
   -m 2048 -n 18432 -k 8192 --shard-n 2560 --warmup 3 --iters 20
 ```
+
+## Persistent tail-balance sweep
+
+With `M=2048`, `K=8192`, four ranks, and 256 CUs, varying N changes the
+remainder after full 256-CTA scheduling batches. A stable run with
+`--warmup 5 --iters 100` measured:
+
+- 512 tiles, remainder 0: 0.5207 ms non-persistent vs 0.5198 ms persistent (+0.17%).
+- 520 tiles, remainder 8: 0.6187 ms vs 0.5626 ms (+9.97%).
+- 544 tiles, remainder 32: 0.6264 ms vs 0.5778 ms (+8.41%).
+- 576 tiles, remainder 64: 0.6294 ms vs 0.6051 ms (+4.02%).
+- 640 tiles, remainder 128: 0.6417 ms vs 0.6391 ms (+0.41%).
+- 704 tiles, remainder 192: 0.6675 ms vs 0.6624 ms (+0.77%).
+- 760 tiles, remainder 248: 0.6953 ms vs 0.6827 ms (+1.85%).
+- 768 tiles, remainder 0: 0.7010 ms vs 0.6912 ms (+1.42%).
+
+The strongest persistent benefit occurs just after an exact scheduling batch:
+only a small subset of CUs would receive an additional static CTA, creating a
+long tail. Dynamic tile assignment lets the first available CUs consume those
+remaining tiles. As the remainder approaches a full 256-CTA batch, the static
+work becomes more evenly distributed and the advantage mostly disappears.

@@ -28,6 +28,10 @@
 #define OPUS_TILE_ORDER 1
 #endif
 
+#ifndef OPUS_PERSISTENT
+#define OPUS_PERSISTENT 1
+#endif
+
 namespace gemm_quad_subtile {
 
 using opus::operator""_I;
@@ -263,13 +267,16 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
     const int num_tiles_n = ceil_div(kargs.n, T::B_N);
     const int tile_count = num_tiles_m * num_tiles_n;
     const int total_tiles = tile_count * kargs.batch;
+#if OPUS_PERSISTENT
     __shared__ unsigned int next_tile_id;
 #if OPUS_STORE_PIPELINE == 2
     int carried_tile_id = -1;
     bool have_carried_tile = false;
     bool carried_initial_loads = false;
 #endif
+#endif
 
+#if OPUS_PERSISTENT
     while (true) {
         int tile_id = -1;
         bool initial_loads_prefetched = false;
@@ -289,6 +296,11 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
 
         tile_id = static_cast<int>(next_tile_id);
         }
+#else
+    {
+        const int tile_id = static_cast<int>(opus::block_id_x());
+        constexpr bool initial_loads_prefetched = false;
+#endif
         if (tile_id >= total_tiles) {
             return;
         }
@@ -671,7 +683,7 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
 
     if (wave_id_m == 0) __builtin_amdgcn_s_barrier();
 
-#if OPUS_STORE_PIPELINE == 2
+#if OPUS_STORE_PIPELINE == 2 && OPUS_PERSISTENT
     // Look ahead one persistent tile: issue its first A/B loads before storing
     // this tile's C so the following compute can absorb part of store latency.
     bool lookahead_valid = false;
@@ -718,7 +730,7 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
 #if OPUS_STORE_PIPELINE != 3
     __builtin_amdgcn_s_barrier();
 #endif
-#if OPUS_STORE_PIPELINE == 2
+#if OPUS_STORE_PIPELINE == 2 && OPUS_PERSISTENT
     if (!lookahead_valid) {
         return;
     }
