@@ -54,8 +54,10 @@ struct opus_gemm_kargs {
     // Optional cco LSA peer-put target for the output C. When cco_c_win != nullptr
     // the kernel resolves the C base via ccoGetLsaPeerPtr(cco_c_win, peer_lsa_rank)
     // — i.e. it stores directly into the peer rank's window slot instead of ptr_c.
-    // Stored as void* to keep this header free of any cco/opus dependency; the
-    // kernel TU reinterprets it as ccoWindow_t. nullptr => use ptr_c (local).
+    // Stored as void* to keep this header free of any cco/opus dependency. The
+    // direct kernel reinterprets it as ccoWindow_t; the LocalStaging template
+    // variant instead treats it as a raw [dst, M, shard_n] local base pointer.
+    // nullptr => use ptr_c (local).
     void* cco_c_win = nullptr;
     int peer_lsa_rank = 0;
 

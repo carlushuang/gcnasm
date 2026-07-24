@@ -249,7 +249,7 @@ inline __device__ auto make_layout_gc(int lane_id, int wave_id_m, int wave_id_n,
 
 } // namespace gemm_quad_subtile
 
-template<typename UserTraits>
+template<typename UserTraits, bool LocalStaging = false>
 __global__ __launch_bounds__(UserTraits::BLOCK_SIZE, 2)
 void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
     using namespace opus;
@@ -345,11 +345,20 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
     // stay in the local full-width [M,N] buffer (ptr_c).
     if (kargs.a2a_n_shard && col < kargs.a2a_span) {
         int dst = col / kargs.a2a_n_shard;
-        int my  = cco_lsa_rank(kargs.cco_c_win);
         eff_stride_c = kargs.a2a_n_shard;
-        eff_row      = my * kargs.a2a_M + row;    // this rank's row-block in the receiver
         eff_col_bias = dst * kargs.a2a_n_shard;   // map global col -> local col (col%n_shard)
-        c_base = reinterpret_cast<D_C*>(cco_lsa_peer_c(kargs.cco_c_win, dst));
+        if constexpr (LocalStaging) {
+            // SDMA source layout: one contiguous [M, n_shard] slab per
+            // destination. The later bulk PUT maps this slab to this rank's
+            // row-block in the destination receive window.
+            eff_row = row;
+            c_base = reinterpret_cast<D_C*>(kargs.cco_c_win) +
+                     static_cast<size_t>(dst) * kargs.a2a_M * kargs.a2a_n_shard;
+        } else {
+            int my = cco_lsa_rank(kargs.cco_c_win);
+            eff_row = my * kargs.a2a_M + row;
+            c_base = reinterpret_cast<D_C*>(cco_lsa_peer_c(kargs.cco_c_win, dst));
+        }
     } else if (kargs.a2a_n_shard) {
         // non-scattered tail cols -> local full-width buffer at the true column.
         c_base = reinterpret_cast<D_C*>(kargs.ptr_c);
@@ -717,11 +726,11 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
 #endif
 
 #if OPUS_STORE_PIPELINE == 1
-    stagger_store_phase();
+    if constexpr (!LocalStaging) stagger_store_phase();
     store_c(v_c[1][0], 1, 0);
     store_c(v_c[1][1], 1, 1);
 #else
-    stagger_store_phase();
+    if constexpr (!LocalStaging) stagger_store_phase();
     store_c(v_c[0][0], 0, 0);
     store_c(v_c[0][1], 0, 1);
     store_c(v_c[1][0], 1, 0);
