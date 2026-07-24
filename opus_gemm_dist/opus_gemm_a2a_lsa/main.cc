@@ -48,7 +48,7 @@ extern "C" hipError_t hipDeviceGetAttribute(int* pi, hipDeviceAttribute_t attr, 
         }                                                                                  \
     } while (0)
 
-template<typename Traits, bool LocalStaging>
+template<typename Traits, bool LocalStaging, bool ChunkFused = false>
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs);
 __global__ void opus_sdma_a2a_post_kernel(
     ccoWindow_t, ccoWindow_t, ccoDevComm, size_t, size_t);
@@ -62,6 +62,7 @@ enum class OutputMode {
     Direct,
     Local,
     Sdma,
+    ChunkSdma,
 };
 
 static float a_value(int src_rank, int row, int k, int variant = 0) {
@@ -131,8 +132,9 @@ int main(int argc, char** argv) {
             if (std::strcmp(value, "direct") == 0) output_mode = OutputMode::Direct;
             else if (std::strcmp(value, "local") == 0) output_mode = OutputMode::Local;
             else if (std::strcmp(value, "sdma") == 0) output_mode = OutputMode::Sdma;
+            else if (std::strcmp(value, "chunk-sdma") == 0) output_mode = OutputMode::ChunkSdma;
             else {
-                if (rank == 0) fprintf(stderr, "--output-mode must be direct, local, or sdma\n");
+                if (rank == 0) fprintf(stderr, "--output-mode must be direct, local, sdma, or chunk-sdma\n");
                 MPI_Abort(MPI_COMM_WORLD, 1);
             }
         }
@@ -144,7 +146,9 @@ int main(int argc, char** argv) {
     }
     const bool local_staging = output_mode == OutputMode::Local;
     const bool sdma_pipeline = output_mode == OutputMode::Sdma;
-    if (sdma_pipeline) {
+    const bool chunk_fused = output_mode == OutputMode::ChunkSdma;
+    const bool uses_sdma = sdma_pipeline || chunk_fused;
+    if (uses_sdma) {
         const char* value = std::getenv("MORI_ENABLE_SDMA");
         if (!value || std::strcmp(value, "1") != 0) {
             if (rank == 0) fprintf(stderr, "SDMA mode requires MORI_ENABLE_SDMA=1 before launch\n");
@@ -179,7 +183,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<bf16_t[]> h_a_alt;
     auto h_b = std::make_unique<bf16_t[]>(b_elems);
     fill_a(h_a.get(), rank, M, K);
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         h_a_alt = std::make_unique<bf16_t[]>(a_elems);
         fill_a(h_a_alt.get(), rank, M, K, 1);
     }
@@ -191,7 +195,7 @@ int main(int argc, char** argv) {
     bf16_t* d_tail = nullptr;
     unsigned int* d_tile_counter = nullptr;
     CHECK_HIP(hipMalloc(&d_a, a_elems * sizeof(bf16_t)));
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         CHECK_HIP(hipMalloc(&d_a_alt, a_elems * sizeof(bf16_t)));
     }
     CHECK_HIP(hipMalloc(&d_b, b_elems * sizeof(bf16_t)));
@@ -200,7 +204,7 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipMalloc(&d_tile_counter, sizeof(unsigned int)));
 #endif
     CHECK_HIP(hipMemcpy(d_a, h_a.get(), a_elems * sizeof(bf16_t), hipMemcpyHostToDevice));
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         CHECK_HIP(hipMemcpy(
             d_a_alt, h_a_alt.get(), a_elems * sizeof(bf16_t),
             hipMemcpyHostToDevice));
@@ -218,7 +222,7 @@ int main(int argc, char** argv) {
     }
     ccoWindow_t sdma_ready_win = nullptr;
     void* sdma_ready_local = nullptr;
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         CHECK_CCO(ccoWindowRegister(
             comm, static_cast<size_t>(nranks) * sizeof(uint64_t),
             &sdma_ready_win, &sdma_ready_local));
@@ -226,7 +230,7 @@ int main(int argc, char** argv) {
     ccoWindow_t sdma_staging_win = nullptr, sdma_recv_win = nullptr;
     void* sdma_staging_local = nullptr;
     void* sdma_recv_local = nullptr;
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         CHECK_CCO(ccoWindowRegister(
             comm, 2 * staging_elems * sizeof(bf16_t),
             &sdma_staging_win, &sdma_staging_local));
@@ -242,7 +246,10 @@ int main(int argc, char** argv) {
     hipStream_t compute_stream = nullptr, comm_stream = nullptr;
     hipEvent_t stage_ready[2] = {nullptr, nullptr};
     hipEvent_t slot_free[2] = {nullptr, nullptr};
-    if (sdma_pipeline) {
+    ccoDevComm* chunk_dev_comm = nullptr;
+    unsigned int* chunk_done = nullptr;
+    unsigned int* chunk_peer_lock = nullptr;
+    if (uses_sdma) {
         ccoDevCommRequirements reqs = CCO_DEV_COMM_REQUIREMENTS_INITIALIZER;
         reqs.gdaConnectionType = CCO_GDA_CONNECTION_NONE;
         reqs.gdaSignalCount = 0;
@@ -278,7 +285,7 @@ int main(int argc, char** argv) {
     // handle (direct) or the raw local compact staging pointer (local).
     kargs.cco_c_win = local_staging
         ? staging_local
-        : (sdma_pipeline ? static_cast<void*>(sdma_staging[0])
+        : (uses_sdma ? static_cast<void*>(sdma_staging[0])
                          : static_cast<void*>(win));
     kargs.peer_lsa_rank = rank;
     kargs.a2a_n_shard = shard_n;
@@ -299,6 +306,21 @@ int main(int argc, char** argv) {
     const int num_tiles_m = ceil_div(M, Traits::B_M);
     const int num_tiles_n = ceil_div(N, Traits::B_N);
     const int total_tiles = num_tiles_m * num_tiles_n * kargs.batch;
+    if (chunk_fused) {
+        chunk_dev_comm = ccoDevCommCopyToDevice(&dev_comm);
+        CHECK_HIP(hipMalloc(
+            &chunk_done,
+            static_cast<size_t>(nranks) * num_tiles_m * sizeof(unsigned int)));
+        CHECK_HIP(hipMalloc(
+            &chunk_peer_lock, static_cast<size_t>(nranks) * sizeof(unsigned int)));
+        kargs.chunk_dev_comm = chunk_dev_comm;
+        kargs.chunk_staging_win = sdma_staging_win;
+        kargs.chunk_recv_win = sdma_recv_win;
+        kargs.chunk_done = chunk_done;
+        kargs.chunk_peer_lock = chunk_peer_lock;
+        kargs.chunk_tiles_per_peer = shard_n / Traits::B_N;
+        kargs.chunk_num_m_tiles = num_tiles_m;
+    }
 #if OPUS_PERSISTENT
     int cu_count = 0;
     CHECK_HIP(hipDeviceGetAttribute(&cu_count, hipDeviceAttributeMultiprocessorCount, rank % ndev));
@@ -314,7 +336,7 @@ int main(int argc, char** argv) {
         if (staging_local) {
             CHECK_HIP(hipMemset(staging_local, 0, staging_elems * sizeof(bf16_t)));
         }
-        if (sdma_pipeline) {
+        if (uses_sdma) {
             CHECK_HIP(hipMemset(
                 sdma_staging[0], 0, staging_elems * sizeof(bf16_t)));
             CHECK_HIP(hipMemset(
@@ -354,12 +376,12 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipEventCreate(&start));
     CHECK_HIP(hipEventCreate(&stop));
     clear_buffers();
-    if (!sdma_pipeline) {
+    if (!uses_sdma) {
         for (int i = 0; i < warmup; ++i) launch();
         CHECK_HIP(hipEventRecord(start));
         for (int i = 0; i < iters; ++i) launch();
         CHECK_HIP(hipEventRecord(stop));
-    } else {
+    } else if (sdma_pipeline) {
         uint64_t pipeline_epoch = 0;
         const size_t bytes_per_peer =
             static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
@@ -409,6 +431,51 @@ int main(int argc, char** argv) {
         CHECK_HIP(hipEventRecord(start, compute_stream));
         for (int i = 0; i < iters; ++i) launch_sdma_epoch();
         CHECK_HIP(hipEventRecord(stop, comm_stream));
+    } else {
+        uint64_t round = 0;
+        const size_t bytes_per_peer =
+            static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
+        const size_t elems_per_peer = static_cast<size_t>(M) * shard_n;
+        const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
+        auto launch_chunk_round = [&]() {
+            if (round > 0) {
+                CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[0], 0));
+            }
+#if OPUS_PERSISTENT
+            CHECK_HIP(hipMemsetAsync(
+                d_tile_counter, 0, sizeof(unsigned int), compute_stream));
+#endif
+            CHECK_HIP(hipMemsetAsync(
+                chunk_done, 0,
+                static_cast<size_t>(nranks) * num_tiles_m * sizeof(unsigned int),
+                compute_stream));
+            CHECK_HIP(hipMemsetAsync(
+                chunk_peer_lock, 0,
+                static_cast<size_t>(nranks) * sizeof(unsigned int), compute_stream));
+            kargs.ptr_a = (round & 1) ? d_a_alt : d_a;
+            kargs.cco_c_win = sdma_staging[0];
+            gemm_a16w16_quad_subtile_kernel<Traits, true, true>
+                <<<grid, block, 0, compute_stream>>>(kargs);
+            CHECK_HIP(hipGetLastError());
+            CHECK_HIP(hipEventRecord(stage_ready[0], compute_stream));
+            CHECK_HIP(hipStreamWaitEvent(comm_stream, stage_ready[0], 0));
+            CHECK_HIP(hipMemcpyAsync(
+                sdma_recv + static_cast<size_t>(rank) * elems_per_peer,
+                sdma_staging[0] + static_cast<size_t>(rank) * elems_per_peer,
+                bytes_per_peer, hipMemcpyDeviceToDevice, comm_stream));
+            opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, comm_stream>>>(
+                sdma_ready_win, dev_comm);
+            CHECK_HIP(hipGetLastError());
+            CHECK_HIP(hipEventRecord(slot_free[0], comm_stream));
+            ++round;
+        };
+        for (int i = 0; i < warmup; ++i) launch_chunk_round();
+        CHECK_HIP(hipStreamSynchronize(compute_stream));
+        CHECK_HIP(hipStreamSynchronize(comm_stream));
+        CHECK_CCO(ccoBarrierAll(comm));
+        CHECK_HIP(hipEventRecord(start, compute_stream));
+        for (int i = 0; i < iters; ++i) launch_chunk_round();
+        CHECK_HIP(hipEventRecord(stop, comm_stream));
     }
     CHECK_HIP(hipEventSynchronize(stop));
 
@@ -423,7 +490,7 @@ int main(int argc, char** argv) {
     MPI_Barrier(MPI_COMM_WORLD);
     void* output_device = local_staging
         ? staging_local
-        : (sdma_pipeline ? static_cast<void*>(sdma_recv) : win_local);
+        : (uses_sdma ? static_cast<void*>(sdma_recv) : win_local);
     auto h_output = std::make_unique<bf16_t[]>(
         local_staging ? staging_elems : recv_elems);
     CHECK_HIP(hipMemcpy(
@@ -434,7 +501,7 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipMemcpy(
         h_tail.get(), d_tail, local_c_elems * sizeof(bf16_t), hipMemcpyDeviceToHost));
     std::vector<uint64_t> h_sdma_ready;
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         h_sdma_ready.resize(static_cast<size_t>(nranks));
         CHECK_HIP(hipMemcpy(
             h_sdma_ready.data(), sdma_ready_local,
@@ -443,7 +510,7 @@ int main(int argc, char** argv) {
     }
     int mism = 0;
     const int output_variant =
-        sdma_pipeline ? ((warmup + iters - 1) & 1) : 0;
+        uses_sdma ? ((warmup + iters - 1) & 1) : 0;
     const int sample_rows[] = {0, 17, 511, 1023, 2047};
     const int sample_cols[] = {0, 255, 1024, 2559};
     for (int peer = 0; peer < nranks; ++peer) {
@@ -467,7 +534,7 @@ int main(int argc, char** argv) {
             }
         }
     }
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         const uint64_t expected_epoch =
             static_cast<uint64_t>(warmup + iters);
         for (int src = 0; src < nranks; ++src) {
@@ -502,7 +569,9 @@ int main(int argc, char** argv) {
         const double flops = 2.0 * double(M) * double(N) * double(K) * double(nranks);
         const char* output_name = output_mode == OutputMode::Direct
             ? "direct"
-            : (output_mode == OutputMode::Local ? "local" : "sdma");
+            : (output_mode == OutputMode::Local
+                   ? "local"
+                   : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma"));
         printf("quad_gemm_a2a output=%s %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
                output_name,
                OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
@@ -512,7 +581,7 @@ int main(int argc, char** argv) {
 
     CHECK_HIP(hipEventDestroy(start));
     CHECK_HIP(hipEventDestroy(stop));
-    if (sdma_pipeline) {
+    if (uses_sdma) {
         for (int slot = 0; slot < 2; ++slot) {
             CHECK_HIP(hipEventDestroy(stage_ready[slot]));
             CHECK_HIP(hipEventDestroy(slot_free[slot]));
@@ -520,6 +589,9 @@ int main(int argc, char** argv) {
         CHECK_HIP(hipStreamDestroy(compute_stream));
         CHECK_HIP(hipStreamDestroy(comm_stream));
     }
+    if (chunk_dev_comm) ccoDevCommFreeDeviceCopy(chunk_dev_comm);
+    if (chunk_done) CHECK_HIP(hipFree(chunk_done));
+    if (chunk_peer_lock) CHECK_HIP(hipFree(chunk_peer_lock));
     if (dev_comm_created) CHECK_CCO(ccoDevCommDestroy(comm, &dev_comm));
     if (sdma_recv_win) CHECK_CCO(ccoWindowDeregister(comm, sdma_recv_win));
     if (sdma_staging_win) CHECK_CCO(ccoWindowDeregister(comm, sdma_staging_win));

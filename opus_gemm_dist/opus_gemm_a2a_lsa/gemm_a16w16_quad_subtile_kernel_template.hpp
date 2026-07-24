@@ -7,6 +7,24 @@
 
 #include <opus/opus.hpp>
 #include "gemm_defs.h"
+#if BUILD_CCO_SDMA
+#include "mori/cco/cco.hpp"
+
+__device__ __attribute__((noinline)) void opus_chunk_sdma_submit(
+    void* dev_comm_ptr, void* staging_win_ptr, void* recv_win_ptr,
+    unsigned int* peer_lock, int dst, size_t src_offset,
+    size_t dst_offset, size_t bytes) {
+    while (__atomic_exchange_n(peer_lock + dst, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        __builtin_amdgcn_s_sleep(1);
+    }
+    auto* dev_comm = static_cast<mori::cco::ccoDevComm*>(dev_comm_ptr);
+    mori::cco::ccoSdma{*dev_comm}.put<mori::cco::ccoCoopThread, true>(
+        dst, reinterpret_cast<mori::cco::ccoWindow_t>(recv_win_ptr), dst_offset,
+        reinterpret_cast<mori::cco::ccoWindow_t>(staging_win_ptr), src_offset,
+        bytes, 0);
+    __atomic_store_n(peer_lock + dst, 0u, __ATOMIC_RELEASE);
+}
+#endif
 
 #ifndef OPUS_STORE_PIPELINE
 #define OPUS_STORE_PIPELINE 3
@@ -249,9 +267,10 @@ inline __device__ auto make_layout_gc(int lane_id, int wave_id_m, int wave_id_n,
 
 } // namespace gemm_quad_subtile
 
-template<typename UserTraits, bool LocalStaging = false>
+template<typename UserTraits, bool LocalStaging = false, bool ChunkFused = false>
 __global__ __launch_bounds__(UserTraits::BLOCK_SIZE, 2)
 void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
+    static_assert(!ChunkFused || LocalStaging);
     using namespace opus;
     using namespace gemm_quad_subtile;
     using opus::operator""_I;
@@ -738,6 +757,39 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
 #endif
 #if OPUS_STORE_PIPELINE != 3
     __builtin_amdgcn_s_barrier();
+#endif
+#if BUILD_CCO_SDMA
+    if constexpr (ChunkFused) {
+        if (col < kargs.a2a_span) {
+            s_waitcnt_vmcnt(0_I);
+            __builtin_amdgcn_s_barrier();
+            if (opus::thread_id_x() == 0) {
+                const int dst = col / kargs.a2a_n_shard;
+                const int counter_idx = dst * kargs.chunk_num_m_tiles + m_tile;
+                const unsigned int previous = __atomic_fetch_add(
+                    kargs.chunk_done + counter_idx, 1u, __ATOMIC_ACQ_REL);
+                if (previous + 1u == static_cast<unsigned int>(kargs.chunk_tiles_per_peer) &&
+                    dst != cco_lsa_rank(
+                        reinterpret_cast<mori::cco::ccoWindow_t>(kargs.chunk_recv_win))) {
+                    auto* dev_comm =
+                        static_cast<mori::cco::ccoDevComm*>(kargs.chunk_dev_comm);
+                    const size_t bytes_per_peer =
+                        static_cast<size_t>(kargs.a2a_M) * kargs.a2a_n_shard * sizeof(D_C);
+                    const size_t chunk_bytes =
+                        static_cast<size_t>(T::B_M) * kargs.a2a_n_shard * sizeof(D_C);
+                    const size_t chunk_offset = static_cast<size_t>(m_tile) * chunk_bytes;
+                    opus_chunk_sdma_submit(
+                        kargs.chunk_dev_comm, kargs.chunk_staging_win,
+                        kargs.chunk_recv_win, kargs.chunk_peer_lock, dst,
+                        static_cast<size_t>(dst) * bytes_per_peer + chunk_offset,
+                        static_cast<size_t>(dev_comm->lsaRank) * bytes_per_peer +
+                            chunk_offset,
+                        chunk_bytes);
+                }
+            }
+            __builtin_amdgcn_s_barrier();
+        }
+    }
 #endif
 #if OPUS_STORE_PIPELINE == 2 && OPUS_PERSISTENT
     if (!lookahead_valid) {

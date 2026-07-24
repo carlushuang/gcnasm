@@ -48,7 +48,7 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/gemm_a16w16_quad_subtile_kernel.o: gemm_a16w16_quad_subtile_kernel.cc gemm_a16w16_quad_subtile_kernel_template.hpp gemm_defs.h | $(BUILD)
-	$(HIPCC) $< $(COMMON_FLAGS) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
+	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
 
 $(BUILD)/sdma_a2a_kernel.o: sdma_a2a_kernel.cc | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -c -o $@

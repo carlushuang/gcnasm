@@ -111,6 +111,30 @@ The reported latency includes pipeline fill/drain amortized over 100 epochs;
 very short runs can be slower than direct LSA because that fixed cost is not
 hidden.
 
+## Experimental chunk-fused SDMA
+
+`--output-mode chunk-sdma` submits one 1.25 MiB CCO SDMA PUT after the ten
+`256x256` output tiles for a `(destination, M-tile)` chunk are locally stored.
+It targets single-round latency and remains experimental:
+
+```bash
+mpirun --allow-run-as-root -n 4 ./build/quad_lsa_direct.exe \
+  --output-mode chunk-sdma \
+  -m 2048 -n 18432 -k 8192 --shard-n 2560 --warmup 0 --iters 1
+```
+
+Five-process-run single-round max-rank medians were:
+
+- `M=1024`: direct 1.1972 ms, post SDMA 1.1661 ms, chunk SDMA 1.0430 ms.
+- `M=2048`: direct 1.6418 ms, post SDMA 1.3942 ms, chunk SDMA 1.4760 ms.
+- `M=4096`: direct 2.1058 ms, post SDMA 1.9473 ms, chunk SDMA 1.7362 ms.
+
+The mode improves single-round latency for `M=1024/4096`, but it should not be
+used for steady state: at `M=2048,warmup=5,iters=100` it measured about
+0.609 ms versus 0.519 ms for the normal double-buffered SDMA path. Inlining
+chunk submission also raises the chunk kernel to 61 SGPR spills, so `sdma`
+remains the recommended mode.
+
 ## Persistent tail-balance sweep
 
 With `M=2048`, `K=8192`, four ranks, and 256 CUs, varying N changes the

@@ -77,6 +77,15 @@ struct opus_gemm_kargs {
     int a2a_M = 0;        // per-rank row count (M); receiver row-block offset = lsaRank * M
     int a2a_span = 0;     // scatter width AN: cols [0,AN) scatter, cols [AN,n) stay local
     int stride_c_full = 0;  // row stride of the local full-width [M,N] buffer (= N)
+
+    // Experimental chunk-fused SDMA state.
+    void* chunk_dev_comm = nullptr;
+    void* chunk_staging_win = nullptr;
+    void* chunk_recv_win = nullptr;
+    unsigned int* chunk_done = nullptr;
+    unsigned int* chunk_peer_lock = nullptr;
+    int chunk_tiles_per_peer = 0;
+    int chunk_num_m_tiles = 0;
 };
 
 // Experimental persistent compute + comm pipeline args.
