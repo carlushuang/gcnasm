@@ -9,7 +9,6 @@
 #include <mpi.h>
 
 #include "mori/cco/cco.hpp"
-#include "mori/core/transport/sdma/anvil_device.hpp"
 
 using namespace mori::cco;
 static constexpr int kWaveSize = 64;
@@ -33,51 +32,9 @@ static constexpr int kWaveSize = 64;
         }                                                                                  \
     } while (0)
 
-__global__ void sdma_a2a_post_kernel(
-    const unsigned char* send_local,
-    unsigned char* const* recv_peers,
-    ccoWindow_t ready_win,
-    ccoDevComm dev_comm,
-    uint64_t* completion_signal,
-    size_t bytes_per_peer) {
-    const int lane = static_cast<int>(threadIdx.x) % kWaveSize;
-    const int dst = static_cast<int>(threadIdx.x) / kWaveSize;
-    if (lane != 0 || dst >= dev_comm.lsaSize || dst == dev_comm.lsaRank) return;
-
-    const int num_queues = static_cast<int>(dev_comm.sdma.sdmaNumQueue);
-    if (num_queues <= 0) return;
-
-    const void* src = send_local + static_cast<size_t>(dst) * bytes_per_peer;
-    void* dst_ptr =
-        recv_peers[dst] + static_cast<size_t>(dev_comm.lsaRank) * bytes_per_peer;
-    auto** handles = dev_comm.sdma.deviceHandles + dst * num_queues;
-    auto* remote_ready = static_cast<uint64_t*>(ccoGetLsaPeerPtr(
-        ready_win, dst,
-        static_cast<size_t>(dev_comm.lsaRank) * sizeof(uint64_t)));
-
-    anvil::SdmaQueueDeviceHandle handle = **handles;
-    uint64_t offset = 0;
-    uint64_t base =
-        handle.ReserveQueueSpace(sizeof(SDMA_PKT_COPY_LINEAR), offset);
-    uint64_t pending_wptr = base;
-    const uint64_t start_base = base;
-    auto copy_packet =
-        anvil::CreateCopyPacket(const_cast<void*>(src), dst_ptr, bytes_per_peer);
-    handle.placePacket<SDMA_PKT_COPY_LINEAR>(
-        copy_packet, pending_wptr, offset);
-    base = handle.ReserveQueueSpace(sizeof(SDMA_PKT_ATOMIC), offset);
-    pending_wptr = base;
-    auto remote_packet = anvil::CreateAtomicIncPacket(remote_ready);
-    handle.placePacket<SDMA_PKT_ATOMIC>(
-        remote_packet, pending_wptr, offset);
-    base = handle.ReserveQueueSpace(sizeof(SDMA_PKT_ATOMIC), offset);
-    pending_wptr = base;
-    auto completion_packet =
-        anvil::CreateAtomicIncPacket(completion_signal);
-    handle.placePacket<SDMA_PKT_ATOMIC>(
-        completion_packet, pending_wptr, offset);
-    handle.submitPacket(start_base, pending_wptr);
-}
+__global__ void opus_sdma_a2a_post_kernel(
+    ccoWindow_t, ccoWindow_t, ccoDevComm, size_t, size_t);
+__global__ void opus_sdma_a2a_quiet_notify_kernel(ccoWindow_t, ccoDevComm);
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
@@ -124,6 +81,14 @@ int main(int argc, char** argv) {
     CHECK_CCO(ccoWindowRegister(
         comm, static_cast<size_t>(nranks) * sizeof(uint64_t),
         &ready_win, &ready_local));
+    const size_t buffer_bytes = static_cast<size_t>(nranks) * bytes_per_peer;
+    ccoWindow_t send_win = nullptr, recv_win = nullptr;
+    void* send_local_void = nullptr;
+    void* recv_local_void = nullptr;
+    CHECK_CCO(ccoWindowRegister(
+        comm, buffer_bytes, &send_win, &send_local_void));
+    CHECK_CCO(ccoWindowRegister(
+        comm, buffer_bytes, &recv_win, &recv_local_void));
 
     ccoDevCommRequirements reqs = CCO_DEV_COMM_REQUIREMENTS_INITIALIZER;
     reqs.gdaConnectionType = CCO_GDA_CONNECTION_NONE;
@@ -136,44 +101,8 @@ int main(int argc, char** argv) {
         if (rank == 0) fprintf(stderr, "MORI did not materialize SDMA queues\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    const size_t buffer_bytes = static_cast<size_t>(nranks) * bytes_per_peer;
-    void* send_local_void = nullptr;
-    void* recv_local_void = nullptr;
-    CHECK_HIP(hipExtMallocWithFlags(
-        &send_local_void, buffer_bytes, hipDeviceMallocUncached));
-    CHECK_HIP(hipExtMallocWithFlags(
-        &recv_local_void, buffer_bytes, hipDeviceMallocUncached));
     auto* send_local = static_cast<unsigned char*>(send_local_void);
     auto* recv_local = static_cast<unsigned char*>(recv_local_void);
-
-    hipIpcMemHandle_t recv_handle{};
-    CHECK_HIP(hipIpcGetMemHandle(&recv_handle, recv_local));
-    std::vector<hipIpcMemHandle_t> recv_handles(static_cast<size_t>(nranks));
-    MPI_Allgather(
-        &recv_handle, sizeof(recv_handle), MPI_BYTE,
-        recv_handles.data(), sizeof(recv_handle), MPI_BYTE, MPI_COMM_WORLD);
-    std::vector<unsigned char*> recv_peers(static_cast<size_t>(nranks), nullptr);
-    recv_peers[rank] = recv_local;
-    for (int peer = 0; peer < nranks; ++peer) {
-        if (peer == rank) continue;
-        void* mapped = nullptr;
-        CHECK_HIP(hipIpcOpenMemHandle(
-            &mapped, recv_handles[peer], hipIpcMemLazyEnablePeerAccess));
-        recv_peers[peer] = static_cast<unsigned char*>(mapped);
-    }
-    unsigned char** recv_peers_device = nullptr;
-    CHECK_HIP(hipMalloc(
-        &recv_peers_device, static_cast<size_t>(nranks) * sizeof(unsigned char*)));
-    CHECK_HIP(hipMemcpy(
-        recv_peers_device, recv_peers.data(),
-        static_cast<size_t>(nranks) * sizeof(unsigned char*),
-        hipMemcpyHostToDevice));
-    uint64_t* completion_signal = nullptr;
-    CHECK_HIP(hipExtMallocWithFlags(
-        reinterpret_cast<void**>(&completion_signal),
-        sizeof(uint64_t), hipMallocSignalMemory));
-    CHECK_HIP(hipMemset(completion_signal, 0, sizeof(uint64_t)));
-
     CHECK_HIP(hipMemset(send_local, rank + 1, buffer_bytes));
     CHECK_HIP(hipMemset(recv_local, 0, buffer_bytes));
     CHECK_HIP(hipMemset(
@@ -183,16 +112,13 @@ int main(int argc, char** argv) {
     (void)hipGetLastError();
 
     const dim3 block(static_cast<unsigned>(nranks * kWaveSize));
-    uint64_t epoch = 0;
     auto launch_once = [&]() {
-        ++epoch;
-        sdma_a2a_post_kernel<<<1, block>>>(
-            send_local, recv_peers_device, ready_win, dev_comm,
-            completion_signal, bytes_per_peer);
+        opus_sdma_a2a_post_kernel<<<1, block>>>(
+            send_win, recv_win, dev_comm, 0, bytes_per_peer);
         CHECK_HIP(hipGetLastError());
-        CHECK_HIP(hipStreamWaitValue64(
-            nullptr, completion_signal,
-            epoch * static_cast<uint64_t>(nranks - 1), hipStreamWaitValueGte));
+        opus_sdma_a2a_quiet_notify_kernel<<<1, block>>>(
+            ready_win, dev_comm);
+        CHECK_HIP(hipGetLastError());
     };
 
     for (int i = 0; i < warmup; ++i) launch_once();
@@ -217,18 +143,19 @@ int main(int argc, char** argv) {
     int mismatches = 0;
     std::vector<unsigned char> recv_host(buffer_bytes);
     std::vector<uint64_t> ready_host(static_cast<size_t>(nranks));
-    uint64_t signal_host = 0;
+    std::vector<uint64_t> cco_signal_host;
     CHECK_HIP(hipMemcpy(
         recv_host.data(), recv_local, buffer_bytes, hipMemcpyDeviceToHost));
+    cco_signal_host.resize(
+        static_cast<size_t>(nranks) * dev_comm.sdma.sdmaNumQueue);
     CHECK_HIP(hipMemcpy(
-        &signal_host, completion_signal, sizeof(uint64_t), hipMemcpyDeviceToHost));
+        cco_signal_host.data(), dev_comm.sdma.signalBuf,
+        cco_signal_host.size() * sizeof(uint64_t), hipMemcpyDeviceToHost));
     CHECK_HIP(hipMemcpy(
         ready_host.data(), ready_local,
         static_cast<size_t>(nranks) * sizeof(uint64_t),
         hipMemcpyDeviceToHost));
     const auto* recv = recv_host.data();
-    const uint64_t expected_ready =
-        static_cast<uint64_t>(warmup + iters) * (nranks - 1);
     const size_t samples[] = {0, bytes_per_peer / 2, bytes_per_peer - 1};
     for (int src = 0; src < nranks; ++src) {
         if (src == rank) continue;
@@ -246,11 +173,16 @@ int main(int argc, char** argv) {
             }
         }
     }
-    if (signal_host != expected_ready) {
+    const uint64_t expected_peer = static_cast<uint64_t>(warmup + iters);
+    for (int peer = 0; peer < nranks; ++peer) {
+        if (peer == rank) continue;
+        const uint64_t got =
+            cco_signal_host[static_cast<size_t>(peer) * dev_comm.sdma.sdmaNumQueue];
+        if (got == expected_peer) continue;
         if (mismatches < 8) {
-            printf("[rank %d] completion mismatch got=%llu expected=%llu\n",
-                   rank, static_cast<unsigned long long>(signal_host),
-                   static_cast<unsigned long long>(expected_ready));
+            printf("[rank %d] completion mismatch peer=%d got=%llu expected=%llu\n",
+                   rank, peer, static_cast<unsigned long long>(got),
+                   static_cast<unsigned long long>(expected_peer));
         }
         ++mismatches;
     }
@@ -284,14 +216,9 @@ int main(int argc, char** argv) {
 
     CHECK_HIP(hipEventDestroy(start));
     CHECK_HIP(hipEventDestroy(stop));
-    CHECK_HIP(hipFree(completion_signal));
-    CHECK_HIP(hipFree(recv_peers_device));
-    for (int peer = 0; peer < nranks; ++peer) {
-        if (peer != rank) CHECK_HIP(hipIpcCloseMemHandle(recv_peers[peer]));
-    }
-    CHECK_HIP(hipFree(recv_local));
-    CHECK_HIP(hipFree(send_local));
     CHECK_CCO(ccoDevCommDestroy(comm, &dev_comm));
+    CHECK_CCO(ccoWindowDeregister(comm, recv_win));
+    CHECK_CCO(ccoWindowDeregister(comm, send_win));
     CHECK_CCO(ccoWindowDeregister(comm, ready_win));
     CHECK_CCO(ccoCommDestroy(comm));
     MPI_Finalize();

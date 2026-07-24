@@ -72,10 +72,16 @@ ordinal `r`; the SDMA results below were collected on physical GPUs 0–3.
 Build and run the isolated 3-peer, 10 MiB-per-peer benchmark with:
 
 ```bash
+cmake -S /workspace/mori -B /workspace/mori/build -DBUILD_CCO_SDMA=ON
+cmake --build /workspace/mori/build --target mori_cco
+
 make sdma_bench
 mpirun --allow-run-as-root -n 4 ./build/sdma_a2a_bench.exe \
   --bytes-per-peer 10485760 --warmup 5 --iters 100
 ```
+
+The SDMA path uses registered CCO windows, `ccoSdma::put`, and a quiet/notify
+kernel; it does not maintain a manual IPC peer-pointer table.
 
 ## SDMA isolation and pipeline results
 
@@ -84,8 +90,8 @@ For `M=2048, N=18432, K=8192, shard_n=2560`, three alternating
 
 - Direct LSA, `Tlsa`: 0.6136 ms.
 - GEMM plus local compact store, `Tlocal`: 0.5033 ms.
-- Three concurrent 10 MiB SDMA PUTs, `Tsdma`: 0.1860 ms, or about
-  157.5 GiB/s per rank, including sender and receiver completion signals.
+- Three concurrent 10 MiB CCO SDMA PUTs, `Tsdma`: 0.1851 ms, or about
+  158.2 GiB/s per rank, including sender and receiver completion signals.
 
 Thus `max(Tlocal,Tsdma)=0.5033 ms`, an 18.0% predicted reduction from direct
 LSA, passed the 3% integration gate. Direct and local GEMM variants both use
@@ -95,9 +101,9 @@ The integrated path uses two uncached staging buffers, separate compute and
 communication streams, an SDMA completion signal, and only waits before a
 staging slot is reused. Alternating three-run medians were:
 
-- `M=1024`: direct 0.4004 ms, SDMA 0.3377 ms (15.7% lower).
-- `M=2048`: direct 0.6167 ms, SDMA 0.5384 ms (12.7% lower).
-- `M=4096`: direct 1.0586 ms, SDMA 0.9378 ms (11.4% lower).
+- `M=1024`: direct 0.4004 ms, CCO SDMA 0.3371 ms.
+- `M=2048`: direct 0.6167 ms, CCO SDMA 0.5204 ms (15.6% lower).
+- `M=4096`: direct 1.0586 ms, CCO SDMA 0.9032 ms.
 
 All runs passed receive-layout and tail correctness. SDMA validation alternates
 two distinct A inputs by epoch so stale or out-of-order results cannot pass.

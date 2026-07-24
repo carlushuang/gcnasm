@@ -51,12 +51,8 @@ extern "C" hipError_t hipDeviceGetAttribute(int* pi, hipDeviceAttribute_t attr, 
 template<typename Traits, bool LocalStaging>
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs);
 __global__ void opus_sdma_a2a_post_kernel(
-    const unsigned char* staging,
-    unsigned char* const* recv_peers,
-    ccoWindow_t ready_win,
-    ccoDevComm dev_comm,
-    uint64_t* completion_signal,
-    size_t bytes_per_peer);
+    ccoWindow_t, ccoWindow_t, ccoDevComm, size_t, size_t);
+__global__ void opus_sdma_a2a_quiet_notify_kernel(ccoWindow_t, ccoDevComm);
 
 static constexpr size_t PER_RANK_VMM = 512ULL * 1024 * 1024;
 static constexpr int RANKS = 4;
@@ -227,14 +223,22 @@ int main(int argc, char** argv) {
             comm, static_cast<size_t>(nranks) * sizeof(uint64_t),
             &sdma_ready_win, &sdma_ready_local));
     }
+    ccoWindow_t sdma_staging_win = nullptr, sdma_recv_win = nullptr;
+    void* sdma_staging_local = nullptr;
+    void* sdma_recv_local = nullptr;
+    if (sdma_pipeline) {
+        CHECK_CCO(ccoWindowRegister(
+            comm, 2 * staging_elems * sizeof(bf16_t),
+            &sdma_staging_win, &sdma_staging_local));
+        CHECK_CCO(ccoWindowRegister(
+            comm, recv_elems * sizeof(bf16_t),
+            &sdma_recv_win, &sdma_recv_local));
+    }
 
     ccoDevComm dev_comm{};
     bool dev_comm_created = false;
     bf16_t* sdma_staging[2] = {nullptr, nullptr};
     bf16_t* sdma_recv = nullptr;
-    unsigned char** sdma_recv_peers_device = nullptr;
-    std::vector<unsigned char*> sdma_recv_peers;
-    uint64_t* sdma_completion_signal = nullptr;
     hipStream_t compute_stream = nullptr, comm_stream = nullptr;
     hipEvent_t stage_ready[2] = {nullptr, nullptr};
     hipEvent_t slot_free[2] = {nullptr, nullptr};
@@ -251,42 +255,9 @@ int main(int argc, char** argv) {
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
 
-        const size_t staging_bytes = staging_elems * sizeof(bf16_t);
-        CHECK_HIP(hipExtMallocWithFlags(
-            reinterpret_cast<void**>(&sdma_staging[0]),
-            staging_bytes, hipDeviceMallocUncached));
-        CHECK_HIP(hipExtMallocWithFlags(
-            reinterpret_cast<void**>(&sdma_staging[1]),
-            staging_bytes, hipDeviceMallocUncached));
-        CHECK_HIP(hipExtMallocWithFlags(
-            reinterpret_cast<void**>(&sdma_recv),
-            recv_elems * sizeof(bf16_t), hipDeviceMallocUncached));
-
-        hipIpcMemHandle_t recv_handle{};
-        CHECK_HIP(hipIpcGetMemHandle(&recv_handle, sdma_recv));
-        std::vector<hipIpcMemHandle_t> recv_handles(static_cast<size_t>(nranks));
-        MPI_Allgather(
-            &recv_handle, sizeof(recv_handle), MPI_BYTE,
-            recv_handles.data(), sizeof(recv_handle), MPI_BYTE, MPI_COMM_WORLD);
-        sdma_recv_peers.assign(static_cast<size_t>(nranks), nullptr);
-        sdma_recv_peers[rank] = reinterpret_cast<unsigned char*>(sdma_recv);
-        for (int peer = 0; peer < nranks; ++peer) {
-            if (peer == rank) continue;
-            void* mapped = nullptr;
-            CHECK_HIP(hipIpcOpenMemHandle(
-                &mapped, recv_handles[peer], hipIpcMemLazyEnablePeerAccess));
-            sdma_recv_peers[peer] = static_cast<unsigned char*>(mapped);
-        }
-        CHECK_HIP(hipMalloc(
-            &sdma_recv_peers_device,
-            static_cast<size_t>(nranks) * sizeof(unsigned char*)));
-        CHECK_HIP(hipMemcpy(
-            sdma_recv_peers_device, sdma_recv_peers.data(),
-            static_cast<size_t>(nranks) * sizeof(unsigned char*),
-            hipMemcpyHostToDevice));
-        CHECK_HIP(hipExtMallocWithFlags(
-            reinterpret_cast<void**>(&sdma_completion_signal),
-            sizeof(uint64_t), hipMallocSignalMemory));
+        sdma_staging[0] = static_cast<bf16_t*>(sdma_staging_local);
+        sdma_staging[1] = sdma_staging[0] + staging_elems;
+        sdma_recv = static_cast<bf16_t*>(sdma_recv_local);
 
         CHECK_HIP(hipStreamCreateWithFlags(&compute_stream, hipStreamNonBlocking));
         CHECK_HIP(hipStreamCreateWithFlags(&comm_stream, hipStreamNonBlocking));
@@ -351,7 +322,9 @@ int main(int argc, char** argv) {
             CHECK_HIP(hipMemset(
                 sdma_recv, 0, recv_elems * sizeof(bf16_t)));
             CHECK_HIP(hipMemset(
-                sdma_completion_signal, 0, sizeof(uint64_t)));
+                dev_comm.sdma.signalBuf, 0,
+                static_cast<size_t>(nranks) *
+                    dev_comm.sdma.sdmaNumQueue * sizeof(uint64_t)));
             CHECK_HIP(hipMemset(
                 sdma_ready_local, 0,
                 static_cast<size_t>(nranks) * sizeof(uint64_t)));
@@ -387,11 +360,11 @@ int main(int argc, char** argv) {
         for (int i = 0; i < iters; ++i) launch();
         CHECK_HIP(hipEventRecord(stop));
     } else {
-        uint64_t post_epoch = 0;
         uint64_t pipeline_epoch = 0;
         const size_t bytes_per_peer =
             static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
         const size_t elems_per_peer = static_cast<size_t>(M) * shard_n;
+        const size_t staging_bytes = staging_elems * sizeof(bf16_t);
         const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
 
         auto launch_sdma_epoch = [&]() {
@@ -413,20 +386,17 @@ int main(int argc, char** argv) {
 
             CHECK_HIP(hipStreamWaitEvent(
                 comm_stream, stage_ready[slot], 0));
-            ++post_epoch;
             opus_sdma_a2a_post_kernel<<<1, sdma_block, 0, comm_stream>>>(
-                reinterpret_cast<const unsigned char*>(sdma_staging[slot]),
-                sdma_recv_peers_device, sdma_ready_win, dev_comm,
-                sdma_completion_signal, bytes_per_peer);
+                sdma_staging_win, sdma_recv_win, dev_comm,
+                static_cast<size_t>(slot) * staging_bytes, bytes_per_peer);
             CHECK_HIP(hipGetLastError());
             CHECK_HIP(hipMemcpyAsync(
                 sdma_recv + static_cast<size_t>(rank) * elems_per_peer,
                 sdma_staging[slot] + static_cast<size_t>(rank) * elems_per_peer,
                 bytes_per_peer, hipMemcpyDeviceToDevice, comm_stream));
-            CHECK_HIP(hipStreamWaitValue64(
-                comm_stream, sdma_completion_signal,
-                post_epoch * static_cast<uint64_t>(nranks - 1),
-                hipStreamWaitValueGte));
+            opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, comm_stream>>>(
+                sdma_ready_win, dev_comm);
+            CHECK_HIP(hipGetLastError());
             CHECK_HIP(hipEventRecord(slot_free[slot], comm_stream));
             ++pipeline_epoch;
         };
@@ -549,18 +519,10 @@ int main(int argc, char** argv) {
         }
         CHECK_HIP(hipStreamDestroy(compute_stream));
         CHECK_HIP(hipStreamDestroy(comm_stream));
-        CHECK_HIP(hipFree(sdma_completion_signal));
-        CHECK_HIP(hipFree(sdma_recv_peers_device));
-        for (int peer = 0; peer < nranks; ++peer) {
-            if (peer != rank) {
-                CHECK_HIP(hipIpcCloseMemHandle(sdma_recv_peers[peer]));
-            }
-        }
-        CHECK_HIP(hipFree(sdma_recv));
-        CHECK_HIP(hipFree(sdma_staging[0]));
-        CHECK_HIP(hipFree(sdma_staging[1]));
     }
     if (dev_comm_created) CHECK_CCO(ccoDevCommDestroy(comm, &dev_comm));
+    if (sdma_recv_win) CHECK_CCO(ccoWindowDeregister(comm, sdma_recv_win));
+    if (sdma_staging_win) CHECK_CCO(ccoWindowDeregister(comm, sdma_staging_win));
     if (sdma_ready_win) CHECK_CCO(ccoWindowDeregister(comm, sdma_ready_win));
     if (staging_win) CHECK_CCO(ccoWindowDeregister(comm, staging_win));
     CHECK_CCO(ccoWindowDeregister(comm, win));
