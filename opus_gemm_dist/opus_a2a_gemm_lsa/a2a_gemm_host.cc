@@ -69,8 +69,15 @@ template<typename Traits, int Mode, bool Persistent>
 __global__ void a2a_gemm_lsa_kernel(opus_a2a_gemm_kargs kargs);
 template<typename Traits>
 __global__ void a2a_lsa_comm_kernel(opus_a2a_gemm_kargs kargs);
-template<typename Traits>
+template<typename Traits, bool LocalStaging = false, bool ChunkFused = false>
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs);
+__global__ void a2a_sdma_post_kernel(
+    ccoWindow_t, ccoWindow_t, ccoDevComm,
+    size_t, size_t, size_t, int);
+__global__ void a2a_sdma_quiet_notify_kernel(
+    ccoWindow_t, ccoDevComm, size_t);
+__global__ void a2a_sdma_wait_ready_kernel(
+    const uint64_t*, size_t, uint64_t, int, int);
 
 __global__ void pack_a_shards_kernel(const bf16_t* __restrict__ recv,
                                      bf16_t* __restrict__ full,
@@ -116,6 +123,20 @@ static void fill_a(bf16_t* a, int rank, int rank_count, int m, int k_shard, int 
     }
 }
 
+static void fill_a_epoch_one(
+    bf16_t* a, int rank, int rank_count, int m, int k_shard, int input_mode) {
+    const int chunks = input_mode == OPUS_A2A_INPUT_GENERIC ? rank_count : 1;
+#pragma omp parallel for collapse(3)
+    for (int dst = 0; dst < chunks; ++dst) {
+        for (int r = 0; r < m; ++r) {
+            for (int k = 0; k < k_shard; ++k) {
+                a[(static_cast<size_t>(dst) * m + r) * k_shard + k] =
+                    static_cast<bf16_t>(1.5f * a_value(rank, dst, r, k));
+            }
+        }
+    }
+}
+
 static void fill_b(bf16_t* b, int rank, int n, int k, int input_mode) {
     const int dst = input_mode == OPUS_A2A_INPUT_GENERIC ? rank : 0;
 #pragma omp parallel for collapse(2)
@@ -126,14 +147,20 @@ static void fill_b(bf16_t* b, int rank, int n, int k, int input_mode) {
     }
 }
 
-static float sample_ref(int dst_rank, int row, int col, int k_shard, int ranks, int input_mode) {
+static float sample_ref(
+    int dst_rank, int row, int col, int k_shard, int ranks, int input_mode,
+    int epoch_variant = 0) {
     const int a_dst = input_mode == OPUS_A2A_INPUT_GENERIC ? dst_rank : 0;
     const int b_dst = input_mode == OPUS_A2A_INPUT_GENERIC ? dst_rank : 0;
     float acc = 0.0f;
     for (int src = 0; src < ranks; ++src) {
         for (int kk = 0; kk < k_shard; ++kk) {
             const int global_k = src * k_shard + kk;
-            const float av = static_cast<float>(static_cast<bf16_t>(a_value(src, a_dst, row, kk)));
+            const float source_a =
+                (epoch_variant == 0 ? 1.0f : 1.5f) *
+                a_value(src, a_dst, row, kk);
+            const float av =
+                static_cast<float>(static_cast<bf16_t>(source_a));
             const float bv = static_cast<float>(static_cast<bf16_t>(b_value(b_dst, col, global_k)));
             acc += av * bv;
         }
@@ -170,6 +197,8 @@ int main(int argc, char** argv) {
     int persistent = 0;
     int compute_wgs_arg = 0;
     int input_mode = OPUS_A2A_INPUT_BROADCAST;
+    bool comm_backend_sdma = false;
+    bool comm_parallel = true;
     bool record_wg_hw = false;
     bool validate = true;
     for (int i = 1; i < argc; ++i) {
@@ -187,6 +216,25 @@ int main(int argc, char** argv) {
             if (std::strcmp(value, "broadcast") == 0) input_mode = OPUS_A2A_INPUT_BROADCAST;
             else if (std::strcmp(value, "generic_a2a") == 0) input_mode = OPUS_A2A_INPUT_GENERIC;
             else input_mode = -1;
+        }
+        else if (std::strcmp(argv[i], "--comm-schedule") == 0 && i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "parallel") == 0 ||
+                std::strcmp(value, "auto") == 0) comm_parallel = true;
+            else if (std::strcmp(value, "serial") == 0) comm_parallel = false;
+            else {
+                if (rank == 0) fprintf(stderr, "--comm-schedule must be serial, parallel, or auto\n");
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+        }
+        else if (std::strcmp(argv[i], "--comm-backend") == 0 && i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "lsa") == 0) comm_backend_sdma = false;
+            else if (std::strcmp(value, "sdma") == 0) comm_backend_sdma = true;
+            else {
+                if (rank == 0) fprintf(stderr, "--comm-backend must be lsa or sdma\n");
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
         }
         else if (std::strcmp(argv[i], "--record-wg-hw") == 0) record_wg_hw = true;
         else if (std::strcmp(argv[i], "--no-validate") == 0) validate = false;
@@ -208,8 +256,15 @@ int main(int argc, char** argv) {
         if (rank == 0) fprintf(stderr, "unsupported comm config: comm_wgs must be positive\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    if (mode < 0 || mode > 3) {
-        if (rank == 0) fprintf(stderr, "unsupported mode: 0=fused, 1=compute-only, 2=RCCL baseline, 3=split LSA\n");
+    if (comm_backend_sdma) {
+        if (mode != 0 && mode != 4) {
+            if (rank == 0) fprintf(stderr, "--comm-backend sdma cannot be combined with --mode %d\n", mode);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        mode = 4;
+    }
+    if (mode < 0 || mode > 4) {
+        if (rank == 0) fprintf(stderr, "unsupported mode: 0=fused, 1=compute-only, 2=RCCL, 3=split LSA, 4=CCO SDMA pipeline\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     if ((persistent != 0 && persistent != 1) || (persistent && mode != 0)) {
@@ -218,6 +273,10 @@ int main(int argc, char** argv) {
     }
     if (compute_wgs_arg < 0) {
         if (rank == 0) fprintf(stderr, "--compute-wgs must be non-negative\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    if (warmup < 0 || iters <= 0) {
+        if (rank == 0) fprintf(stderr, "--warmup must be non-negative and --iters must be positive\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     if (input_mode != OPUS_A2A_INPUT_BROADCAST && input_mode != OPUS_A2A_INPUT_GENERIC) {
@@ -230,6 +289,13 @@ int main(int argc, char** argv) {
     }
     const char* input_mode_name =
         input_mode == OPUS_A2A_INPUT_GENERIC ? "generic_a2a" : "broadcast";
+    if (mode == 4) {
+        const char* value = std::getenv("MORI_ENABLE_SDMA");
+        if (!value || std::strcmp(value, "1") != 0) {
+            if (rank == 0) fprintf(stderr, "mode 4 requires MORI_ENABLE_SDMA=1\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
 
     int ndev = 0;
     CHECK_HIP(hipGetDeviceCount(&ndev));
@@ -282,8 +348,14 @@ int main(int argc, char** argv) {
     const size_t hw_record_elems = static_cast<size_t>(grid_wgs) * kHwRecordWidth;
 
     auto h_a = std::make_unique<bf16_t[]>(local_a_elems);
+    std::unique_ptr<bf16_t[]> h_a_epoch_one;
     auto h_b = std::make_unique<bf16_t[]>(b_elems);
     fill_a(h_a.get(), rank, nranks, M, K_SHARD, input_mode);
+    if (mode == 4) {
+        h_a_epoch_one = std::make_unique<bf16_t[]>(local_a_elems);
+        fill_a_epoch_one(
+            h_a_epoch_one.get(), rank, nranks, M, K_SHARD, input_mode);
+    }
     fill_b(h_b.get(), rank, N, K, input_mode);
 
     bf16_t* d_a = nullptr;
@@ -309,6 +381,65 @@ int main(int argc, char** argv) {
     void* ready_local = nullptr;
     CHECK_CCO(ccoWindowRegister(comm, recv_elems * sizeof(bf16_t), &recv_win, &recv_local));
     CHECK_CCO(ccoWindowRegister(comm, ready_elems * sizeof(unsigned int), &ready_win, &ready_local));
+
+    ccoWindow_t sdma_send_win = nullptr, sdma_recv_win = nullptr, sdma_ready_win = nullptr;
+    void* sdma_send_local = nullptr;
+    void* sdma_recv_local = nullptr;
+    void* sdma_ready_local = nullptr;
+    ccoDevComm sdma_dev_comm{};
+    bool sdma_dev_comm_created = false;
+    hipStream_t sdma_comm_stream = nullptr, sdma_compute_stream = nullptr;
+    hipEvent_t sdma_comm_ready[2] = {nullptr, nullptr};
+    hipEvent_t sdma_recv_free[2] = {nullptr, nullptr};
+    if (mode == 4) {
+        CHECK_CCO(ccoWindowRegister(
+            comm, 2 * local_a_elems * sizeof(bf16_t),
+            &sdma_send_win, &sdma_send_local));
+        CHECK_CCO(ccoWindowRegister(
+            comm, 2 * recv_elems * sizeof(bf16_t),
+            &sdma_recv_win, &sdma_recv_local));
+        CHECK_CCO(ccoWindowRegister(
+            comm, 2 * static_cast<size_t>(nranks) * sizeof(uint64_t),
+            &sdma_ready_win, &sdma_ready_local));
+        CHECK_HIP(hipMemcpy(
+            sdma_send_local, d_a, local_a_elems * sizeof(bf16_t),
+            hipMemcpyDeviceToDevice));
+        CHECK_HIP(hipMemcpy(
+            static_cast<char*>(sdma_send_local) +
+                local_a_elems * sizeof(bf16_t),
+            h_a_epoch_one.get(), local_a_elems * sizeof(bf16_t),
+            hipMemcpyHostToDevice));
+        CHECK_HIP(hipMemset(
+            sdma_recv_local, 0, 2 * recv_elems * sizeof(bf16_t)));
+        CHECK_HIP(hipMemset(
+            sdma_ready_local, 0,
+            2 * static_cast<size_t>(nranks) * sizeof(uint64_t)));
+        ccoDevCommRequirements reqs = CCO_DEV_COMM_REQUIREMENTS_INITIALIZER;
+        reqs.gdaConnectionType = CCO_GDA_CONNECTION_NONE;
+        reqs.gdaSignalCount = 0;
+        reqs.gdaCounterCount = 0;
+        reqs.sdmaQueueCount = 1;
+        CHECK_CCO(ccoDevCommCreate(comm, &reqs, &sdma_dev_comm));
+        sdma_dev_comm_created = true;
+        CHECK_HIP(hipMemset(
+            sdma_dev_comm.sdma.signalBuf, 0,
+            static_cast<size_t>(nranks) *
+                sdma_dev_comm.sdma.sdmaNumQueue * sizeof(uint64_t)));
+        CHECK_HIP(hipMemset(
+            sdma_dev_comm.sdma.expectSignals, 0,
+            static_cast<size_t>(nranks) *
+                sdma_dev_comm.sdma.sdmaNumQueue * sizeof(uint64_t)));
+        CHECK_HIP(hipStreamCreateWithFlags(
+            &sdma_comm_stream, hipStreamNonBlocking));
+        CHECK_HIP(hipStreamCreateWithFlags(
+            &sdma_compute_stream, hipStreamNonBlocking));
+        for (int slot = 0; slot < 2; ++slot) {
+            CHECK_HIP(hipEventCreateWithFlags(
+                &sdma_comm_ready[slot], hipEventDisableTiming));
+            CHECK_HIP(hipEventCreateWithFlags(
+                &sdma_recv_free[slot], hipEventDisableTiming));
+        }
+    }
 
     if (mode == 2) {
         ncclUniqueId nccl_uid;
@@ -429,6 +560,53 @@ int main(int argc, char** argv) {
         a2a_gemm_lsa_kernel<Traits, 2, false><<<gemm_grid, block>>>(kargs);
         CHECK_HIP(hipGetLastError());
     };
+    const size_t sdma_bytes_per_peer = a_chunk_elems * sizeof(bf16_t);
+    const size_t sdma_send_slot_bytes = local_a_elems * sizeof(bf16_t);
+    const size_t sdma_recv_slot_bytes = recv_elems * sizeof(bf16_t);
+    const size_t sdma_ready_slot_bytes = static_cast<size_t>(nranks) * sizeof(uint64_t);
+    const dim3 sdma_block(static_cast<unsigned>(nranks * 64));
+    uint64_t sdma_ready_target[2] = {0, 0};
+    auto launch_sdma_comm = [&](int slot, uint64_t epoch) {
+        const size_t send_slot_offset = static_cast<size_t>(slot) * sdma_send_slot_bytes;
+        const size_t recv_slot_offset = static_cast<size_t>(slot) * sdma_recv_slot_bytes;
+        const size_t ready_slot_offset = static_cast<size_t>(slot) * sdma_ready_slot_bytes;
+        a2a_sdma_post_kernel<<<1, sdma_block, 0, sdma_comm_stream>>>(
+            sdma_send_win, sdma_recv_win, sdma_dev_comm,
+            send_slot_offset, recv_slot_offset, sdma_bytes_per_peer, input_mode);
+        CHECK_HIP(hipGetLastError());
+        const size_t self_src_chunk =
+            input_mode == OPUS_A2A_INPUT_GENERIC ? static_cast<size_t>(rank) : 0;
+        CHECK_HIP(hipMemcpyAsync(
+            static_cast<char*>(sdma_recv_local) + recv_slot_offset +
+                static_cast<size_t>(rank) * sdma_bytes_per_peer,
+            static_cast<char*>(sdma_send_local) + send_slot_offset +
+                self_src_chunk * sdma_bytes_per_peer,
+            sdma_bytes_per_peer, hipMemcpyDeviceToDevice, sdma_comm_stream));
+        a2a_sdma_quiet_notify_kernel<<<1, sdma_block, 0, sdma_comm_stream>>>(
+            sdma_ready_win, sdma_dev_comm, ready_slot_offset);
+        CHECK_HIP(hipGetLastError());
+        const uint64_t ready_target = ++sdma_ready_target[slot];
+        a2a_sdma_wait_ready_kernel<<<1, 64, 0, sdma_comm_stream>>>(
+            static_cast<const uint64_t*>(sdma_ready_local),
+            ready_slot_offset, ready_target, nranks, rank);
+        CHECK_HIP(hipGetLastError());
+        CHECK_HIP(hipEventRecord(sdma_comm_ready[slot], sdma_comm_stream));
+        (void)epoch;
+    };
+    auto launch_sdma_compute = [&](int slot) {
+        CHECK_HIP(hipStreamWaitEvent(
+            sdma_compute_stream, sdma_comm_ready[slot], 0));
+        opus_a2a_gemm_kargs slot_args = kargs;
+        slot_args.recv_a_local =
+            static_cast<char*>(sdma_recv_local) +
+            static_cast<size_t>(slot) * sdma_recv_slot_bytes;
+        slot_args.recv_a_win = sdma_recv_win;
+        slot_args.recv_a_bytes = static_cast<unsigned int>(sdma_recv_slot_bytes);
+        a2a_gemm_lsa_kernel<Traits, 2, false>
+            <<<gemm_grid, block, 0, sdma_compute_stream>>>(slot_args);
+        CHECK_HIP(hipGetLastError());
+        CHECK_HIP(hipEventRecord(sdma_recv_free[slot], sdma_compute_stream));
+    };
 
     hipEvent_t start, comm_stop, compute_start, stop;
     CHECK_HIP(hipEventCreate(&start));
@@ -436,7 +614,51 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipEventCreate(&compute_start));
     CHECK_HIP(hipEventCreate(&stop));
     float total_ms = 0.0f, comm_total_ms = 0.0f, compute_total_ms = 0.0f;
-    if (mode == 3) {
+    if (mode == 4) {
+        uint64_t epoch = 0;
+        auto launch_sdma_epoch = [&]() {
+            const int slot = static_cast<int>(epoch & 1);
+            if (comm_parallel && epoch >= 2) {
+                CHECK_HIP(hipStreamWaitEvent(
+                    sdma_comm_stream, sdma_recv_free[slot], 0));
+            } else if (!comm_parallel && epoch > 0) {
+                const int previous_slot = static_cast<int>((epoch - 1) & 1);
+                CHECK_HIP(hipStreamWaitEvent(
+                    sdma_comm_stream, sdma_recv_free[previous_slot], 0));
+            }
+            launch_sdma_comm(slot, epoch + 1);
+            launch_sdma_compute(slot);
+            ++epoch;
+        };
+        for (int i = 0; i < warmup; ++i) launch_sdma_epoch();
+        CHECK_HIP(hipStreamSynchronize(sdma_comm_stream));
+        CHECK_HIP(hipStreamSynchronize(sdma_compute_stream));
+        CHECK_CCO(ccoBarrierAll(comm));
+        CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
+        for (int i = 0; i < iters; ++i) launch_sdma_epoch();
+        CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
+        CHECK_HIP(hipEventSynchronize(stop));
+        float ms = 0.0f;
+        CHECK_HIP(hipEventElapsedTime(&ms, start, stop));
+        total_ms = ms;
+        CHECK_CCO(ccoBarrierAll(comm));
+        CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
+        for (int i = 0; i < iters; ++i) {
+            launch_sdma_comm(i & 1, epoch + i + 1);
+        }
+        CHECK_HIP(hipEventRecord(comm_stop, sdma_comm_stream));
+        CHECK_HIP(hipEventSynchronize(comm_stop));
+        CHECK_HIP(hipEventElapsedTime(&comm_total_ms, start, comm_stop));
+        CHECK_CCO(ccoBarrierAll(comm));
+        CHECK_HIP(hipEventRecord(compute_start, sdma_compute_stream));
+        for (int i = 0; i < iters; ++i) {
+            launch_sdma_compute(i & 1);
+        }
+        CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
+        CHECK_HIP(hipEventSynchronize(stop));
+        CHECK_HIP(hipEventElapsedTime(
+            &compute_total_ms, compute_start, stop));
+    } else if (mode == 3) {
         for (int i = 0; i < warmup; ++i) {
             clear_for_launch();
             launch_split_comm();
@@ -524,6 +746,37 @@ int main(int argc, char** argv) {
 
     int mism = 0;
     if (validate) {
+        if (mode == 4) {
+            auto h_ready = std::make_unique<uint64_t[]>(
+                2 * static_cast<size_t>(nranks));
+            CHECK_HIP(hipMemcpy(
+                h_ready.get(), sdma_ready_local,
+                2 * static_cast<size_t>(nranks) * sizeof(uint64_t),
+                hipMemcpyDeviceToHost));
+            const int pipeline_epochs = warmup + iters;
+            for (int slot = 0; slot < 2; ++slot) {
+                const uint64_t expected =
+                    static_cast<uint64_t>(
+                        (pipeline_epochs + (slot == 0 ? 1 : 0)) / 2) +
+                    static_cast<uint64_t>(
+                        (iters + (slot == 0 ? 1 : 0)) / 2);
+                for (int source = 0; source < nranks; ++source) {
+                    const uint64_t got =
+                        h_ready[static_cast<size_t>(slot) * nranks + source];
+                    const uint64_t source_expected =
+                        source == rank ? 0 : expected;
+                    if (got != source_expected) {
+                        if (mism < 8) {
+                            printf("[rank %d] ready mismatch slot=%d source=%d got=%llu expected=%llu\n",
+                                   rank, slot, source,
+                                   static_cast<unsigned long long>(got),
+                                   static_cast<unsigned long long>(source_expected));
+                        }
+                        ++mism;
+                    }
+                }
+            }
+        }
         auto h_c = std::make_unique<bf16_t[]>(c_elems);
         CHECK_HIP(hipMemcpy(h_c.get(), d_c, c_elems * sizeof(bf16_t), hipMemcpyDeviceToHost));
 
@@ -534,7 +787,10 @@ int main(int argc, char** argv) {
             for (int c : sample_cols) {
                 if (c >= N) continue;
                 const float got = static_cast<float>(h_c[static_cast<size_t>(r) * N + c]);
-                float ref = sample_ref(rank, r, c, K_SHARD, nranks, input_mode);
+                const int epoch_variant =
+                    mode == 4 ? ((iters - 1) & 1) : 0;
+                float ref = sample_ref(
+                    rank, r, c, K_SHARD, nranks, input_mode, epoch_variant);
                 if (mode == 1) ref = sample_ref_local_repeat(rank, r, c, K_SHARD, nranks);
                 const float diff = std::fabs(got - ref);
                 if (diff > 0.1f) {
@@ -552,15 +808,25 @@ int main(int argc, char** argv) {
     MPI_Reduce(&mism, &total_mism, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
     if (rank == 0) {
         const double flops = 2.0 * double(M) * double(N) * double(K);
-        if (mode == 3) {
+        if (mode == 4) {
+            printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=%s comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f pipeline_total_ms=%.4f %.2f TFLOP/s %s\n",
+                   M, N, K, nranks, input_mode_name,
+                   comm_parallel ? "parallel" : "serial",
+                   max_comm_ms, max_compute_ms,
+                   max_comm_ms + max_compute_ms, max_ms,
+                   flops / (max_ms * 1.0e9),
+                   (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
+        } else if (mode == 3) {
             printf("a2a_gemm_split M=%d N=%d K=%d ranks=%d input_mode=%s comm_wgs=%d comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f split_total_ms=%.4f %.2f TFLOP/s %s\n",
                    M, N, K, nranks, input_mode_name, comm_wgs,
                    max_comm_ms, max_compute_ms, max_comm_ms + max_compute_ms, max_ms,
                    flops / (max_ms * 1.0e9),
                    (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
         } else {
-            printf("a2a_gemm_lsa M=%d N=%d K=%d ranks=%d mode=%d input_mode=%s persistent=%d comm_wgs=%d compute_wgs=%d grid_wgs=%d max_rank_time=%.4f ms %.2f TFLOP/s %s\n",
-                   M, N, K, nranks, mode, input_mode_name, persistent, comm_wgs,
+            printf("a2a_gemm_lsa M=%d N=%d K=%d ranks=%d mode=%d input_mode=%s schedule=%s persistent=%d comm_wgs=%d compute_wgs=%d grid_wgs=%d max_rank_time=%.4f ms %.2f TFLOP/s %s\n",
+                   M, N, K, nranks, mode, input_mode_name,
+                   mode == 4 ? (comm_parallel ? "parallel" : "serial") : "n/a",
+                   persistent, comm_wgs,
                    persistent ? compute_wgs : compute_tasks, grid_wgs,
                    max_ms, flops / (max_ms * 1.0e9),
                    (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
@@ -571,6 +837,20 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipEventDestroy(comm_stop));
     CHECK_HIP(hipEventDestroy(compute_start));
     CHECK_HIP(hipEventDestroy(stop));
+    if (mode == 4) {
+        for (int slot = 0; slot < 2; ++slot) {
+            CHECK_HIP(hipEventDestroy(sdma_comm_ready[slot]));
+            CHECK_HIP(hipEventDestroy(sdma_recv_free[slot]));
+        }
+        CHECK_HIP(hipStreamDestroy(sdma_comm_stream));
+        CHECK_HIP(hipStreamDestroy(sdma_compute_stream));
+        if (sdma_dev_comm_created) {
+            CHECK_CCO(ccoDevCommDestroy(comm, &sdma_dev_comm));
+        }
+        CHECK_CCO(ccoWindowDeregister(comm, sdma_ready_win));
+        CHECK_CCO(ccoWindowDeregister(comm, sdma_recv_win));
+        CHECK_CCO(ccoWindowDeregister(comm, sdma_send_win));
+    }
     CHECK_CCO(ccoWindowDeregister(comm, recv_win));
     CHECK_CCO(ccoWindowDeregister(comm, ready_win));
     if (nccl_comm) CHECK_NCCL(ncclCommDestroy(nccl_comm));

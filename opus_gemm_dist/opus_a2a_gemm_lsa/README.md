@@ -34,8 +34,102 @@ Useful debug flags:
 
 ```bash
 ./build/a2a_gemm_lsa.exe -m 256 -n 256 --k-shard 128
-./build/a2a_gemm_lsa.exe --mode 2   # comm-only
+./build/a2a_gemm_lsa.exe --mode 2   # RCCL + pack + GEMM baseline
 ```
+
+## CCO-SDMA serial and parallel pipeline
+
+Mode 4 uses MORI CCO SDMA to transfer A shards into two receive slots and then
+reuses the existing Mode 2 compute-from-receive kernel. The fused LSA path
+(mode 0) remains the default and fallback.
+
+MORI must be built with `BUILD_CCO_SDMA=ON`. Enable SDMA at runtime and select
+the schedule explicitly:
+
+```bash
+export MORI_ENABLE_SDMA=1
+export MORI_SDMA_NUM_CHANNELS=1
+
+# SDMA A2A e, then GEMM e; no cross-epoch overlap.
+mpirun --allow-run-as-root -n 8 ./build/a2a_gemm_lsa.exe \
+  --comm-backend sdma --input-mode generic_a2a --comm-schedule serial \
+  --warmup 10 --iters 30
+
+# While GEMM reads receive slot e, SDMA fills slot e+1.
+mpirun --allow-run-as-root -n 8 ./build/a2a_gemm_lsa.exe \
+  --comm-backend sdma --input-mode generic_a2a --comm-schedule parallel \
+  --warmup 10 --iters 30
+```
+
+`--comm-schedule auto` is the default and selects parallel. `--mode 4` remains
+an equivalent shorthand for profiling scripts; modes 0 through 3 retain their
+existing behavior.
+
+Each send and receive window contains two slots. A `comm_ready[slot]` event
+makes the completed SDMA slot visible to the compute stream, and a
+`recv_free[slot]` event prevents the communication stream from overwriting a
+slot still consumed by GEMM. Each remote peer has one SDMA queue. The post
+kernel submits one PUT per remote peer, and the quiet/notify kernel waits for
+that peer queue before incrementing the destination's 64-bit ready counter.
+The destination polling kernel acquires every remote source counter for the
+slot's target epoch before recording `comm_ready`.
+The rank-local shard is copied into the same receive layout with an asynchronous
+device-to-device copy.
+The two send slots contain different A values and alternate by epoch; validation
+checks the corresponding final C values and every per-slot, per-source remote
+ready counter, so stale-slot reuse is observable rather than masked by identical
+inputs.
+
+The reported `comm_ms` and `compute_ms` are isolated per-epoch measurements.
+`pipeline_total_ms` is the end-to-end average across the requested epochs; for
+parallel mode it includes fill and drain, so use multiple warm iterations and
+at least 30 measured iterations for steady-state comparisons.
+
+On 8 ranks with generic A2A, `N=K=8192`, `K_SHARD=1024`,
+`--warmup 10 --iters 30`, the end-to-end results were:
+
+- `M=2048`: fused LSA 0.3375 ms, split LSA 0.4618 ms, RCCL 0.4496 ms,
+  SDMA serial 0.3014 ms, SDMA parallel 0.2389 ms.
+- `M=6144`: fused LSA 0.8901 ms, split LSA 1.0070 ms, RCCL 1.0393 ms,
+  SDMA serial 0.8028 ms, SDMA parallel 0.6183 ms.
+- `M=16384`: fused LSA 2.2953 ms, split LSA 2.4239 ms, RCCL 2.7045 ms,
+  SDMA serial 2.0471 ms, SDMA parallel 1.5465 ms.
+
+The fused-LSA values are medians of three runs. SDMA parallel reduces latency
+by 29.2% to 32.6% versus fused LSA and by 20.7% to 24.5% versus SDMA serial,
+passing the retention gate on all three shapes. Mode 4 is retained as an
+opt-in backend; mode 0 remains the default because SDMA requires an SDMA-enabled
+MORI build and runtime configuration. Broadcast and generic inputs both pass
+serial and parallel correctness on 4 and 8 ranks.
+
+The isolated SDMA breakdown for the same three generic shapes was:
+
+- `M=2048`: 0.0909 ms communication and 0.1998 ms compute.
+- `M=6144`: 0.2359 ms communication and 0.6018 ms compute.
+- `M=16384`: 0.5715 ms communication and 1.5201 ms compute.
+
+The parallel steady state approaches the compute duration because the next
+epoch's SDMA transfer is shorter than the current epoch's GEMM.
+
+The clean gfx950 resource build reports:
+
+- `a2a_sdma_post_kernel`: 50 SGPR, 29 VGPR, 0 LDS, no SGPR/VGPR spill,
+  8 waves/SIMD.
+- `a2a_sdma_quiet_notify_kernel`: 18 SGPR, 10 VGPR, 0 LDS, no spill,
+  8 waves/SIMD.
+- `a2a_sdma_wait_ready_kernel`: 18 SGPR, 4 VGPR, 0 LDS, no spill,
+  8 waves/SIMD.
+- reused Mode 2 compute kernel: 76 SGPR, 210 VGPR, 135168 bytes LDS,
+  no spill, 2 waves/SIMD.
+
+The symbolized rank-0 timeline is in
+`build/traces/sdma_parallel/rank0_results.pftrace`, with its CSV companion in
+`rank0_kernel_trace.csv`. It shows the communication kernels on stream 1 and
+the Mode 2 GEMM on stream 2. In a steady-state epoch, the next post,
+rank-local copy, and quiet/notify interval lies inside the previous GEMM
+interval, confirming cross-epoch overlap. The decoded advanced thread trace is
+under `build/traces/sdma_parallel_att/` in its generated `ui_output_*`
+directory.
 
 Persistent compute scheduling is available for fused mode 0:
 

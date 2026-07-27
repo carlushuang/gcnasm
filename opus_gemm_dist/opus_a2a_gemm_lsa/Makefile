@@ -22,11 +22,11 @@ MPI_LIB         ?= -lmpi_cxx -lmpi
 BUILD = build
 OUT   = $(BUILD)/a2a_gemm_lsa.exe
 
-COMMON_FLAGS = -I. -I$(OPUS_INCLUDE_DIR) -std=c++20 -fopenmp -O3 -Wall --offload-arch=$(ARCH) -ffast-math -DA2A_GEMM_COMM_PEER_ORDER=$(COMM_PEER_ORDER) -DA2A_GEMM_COMM_WG_PLACEMENT=$(COMM_WG_PLACEMENT) -DA2A_GEMM_RECORD_WG_HW=$(RECORD_WG_HW) -DA2A_GEMM_COMM_COPY_MODE=$(COMM_COPY_MODE) -DA2A_GEMM_TILE_READY=$(TILE_READY) -DA2A_GEMM_READY_AWARE_K=$(READY_AWARE_K) -DA2A_GEMM_C_STORE_MODE=$(A2A_C_STORE_MODE) -DA2A_GEMM_PRESTORE_BARRIER=$(PRESTORE_BARRIER)
+COMMON_FLAGS = -I. -I$(OPUS_INCLUDE_DIR) -std=c++20 -fopenmp -O3 -Wall --offload-arch=$(ARCH) -ffast-math -DBUILD_CCO_SDMA=1 -DA2A_GEMM_COMM_PEER_ORDER=$(COMM_PEER_ORDER) -DA2A_GEMM_COMM_WG_PLACEMENT=$(COMM_WG_PLACEMENT) -DA2A_GEMM_RECORD_WG_HW=$(RECORD_WG_HW) -DA2A_GEMM_COMM_COPY_MODE=$(COMM_COPY_MODE) -DA2A_GEMM_TILE_READY=$(TILE_READY) -DA2A_GEMM_READY_AWARE_K=$(READY_AWARE_K) -DA2A_GEMM_C_STORE_MODE=$(A2A_C_STORE_MODE) -DA2A_GEMM_PRESTORE_BARRIER=$(PRESTORE_BARRIER)
 HOST_INCLUDES = -I$(MORI_INCLUDE_DIR) -I$(MPI_INCLUDE_DIR)
 HOST_LIBS = -L$(MORI_LIB_DIR) -lmori_cco -Wl,-rpath,$(MORI_LIB_DIR) -lrccl $(MPI_LIB)
 
-OBJS = $(BUILD)/a2a_gemm_kernel.o $(BUILD)/gemm_a16w16_quad_subtile_kernel.o $(BUILD)/a2a_gemm_host.o
+OBJS = $(BUILD)/a2a_gemm_kernel.o $(BUILD)/a2a_sdma_kernel.o $(BUILD)/gemm_a16w16_quad_subtile_kernel.o $(BUILD)/a2a_gemm_host.o
 
 .PHONY: all clean run
 
@@ -36,10 +36,13 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/a2a_gemm_kernel.o: a2a_gemm_kernel.cc a2a_gemm_kernel_template.hpp gemm_defs.h | $(BUILD)
-	$(HIPCC) $< $(COMMON_FLAGS) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
+	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
+
+$(BUILD)/a2a_sdma_kernel.o: a2a_sdma_kernel.cc | $(BUILD)
+	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -Rpass-analysis=kernel-resource-usage -c -o $@
 
 $(BUILD)/gemm_a16w16_quad_subtile_kernel.o: ../opus_gemm_a2a_lsa/gemm_a16w16_quad_subtile_kernel.cc ../opus_gemm_a2a_lsa/gemm_a16w16_quad_subtile_kernel_template.hpp ../opus_gemm_a2a_lsa/gemm_defs.h | $(BUILD)
-	$(HIPCC) $< $(COMMON_FLAGS) -DOPUS_PERSISTENT=0 -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
+	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -DOPUS_PERSISTENT=0 -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
 
 $(BUILD)/a2a_gemm_host.o: a2a_gemm_host.cc gemm_defs.h | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -c -o $@
