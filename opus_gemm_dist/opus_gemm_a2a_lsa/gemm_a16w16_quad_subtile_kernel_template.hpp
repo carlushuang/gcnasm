@@ -765,10 +765,15 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
             __builtin_amdgcn_s_barrier();
             if (opus::thread_id_x() == 0) {
                 const int dst = col / kargs.a2a_n_shard;
-                const int counter_idx = dst * kargs.chunk_num_m_tiles + m_tile;
+                const int chunk_group = m_tile / kargs.chunk_m_tiles_per_put;
+                const int counter_idx =
+                    dst * kargs.chunk_num_m_tiles + chunk_group;
                 const unsigned int previous = __atomic_fetch_add(
                     kargs.chunk_done + counter_idx, 1u, __ATOMIC_ACQ_REL);
-                if (previous + 1u == static_cast<unsigned int>(kargs.chunk_tiles_per_peer) &&
+                const unsigned int tiles_required =
+                    static_cast<unsigned int>(
+                        kargs.chunk_tiles_per_peer * kargs.chunk_m_tiles_per_put);
+                if (previous + 1u == tiles_required &&
                     dst != cco_lsa_rank(
                         reinterpret_cast<mori::cco::ccoWindow_t>(kargs.chunk_recv_win))) {
                     auto* dev_comm =
@@ -776,8 +781,11 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
                     const size_t bytes_per_peer =
                         static_cast<size_t>(kargs.a2a_M) * kargs.a2a_n_shard * sizeof(D_C);
                     const size_t chunk_bytes =
-                        static_cast<size_t>(T::B_M) * kargs.a2a_n_shard * sizeof(D_C);
-                    const size_t chunk_offset = static_cast<size_t>(m_tile) * chunk_bytes;
+                        static_cast<size_t>(T::B_M) *
+                        kargs.chunk_m_tiles_per_put *
+                        kargs.a2a_n_shard * sizeof(D_C);
+                    const size_t chunk_offset =
+                        static_cast<size_t>(chunk_group) * chunk_bytes;
                     opus_chunk_sdma_submit(
                         kargs.chunk_dev_comm, kargs.chunk_staging_win,
                         kargs.chunk_recv_win, kargs.chunk_peer_lock, dst,

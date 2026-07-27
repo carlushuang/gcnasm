@@ -86,6 +86,7 @@ struct opus_gemm_kargs {
     unsigned int* chunk_peer_lock = nullptr;
     int chunk_tiles_per_peer = 0;
     int chunk_num_m_tiles = 0;
+    int chunk_m_tiles_per_put = 1;
     unsigned long long chunk_staging_slot_offset = 0;
 };
 

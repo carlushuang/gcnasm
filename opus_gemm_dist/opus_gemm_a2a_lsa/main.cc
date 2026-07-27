@@ -125,6 +125,7 @@ int main(int argc, char** argv) {
     int shard_n = 2560;
     int warmup = 3;
     int iters = 20;
+    int chunk_m_tiles_per_put = 1;
     OutputMode output_mode = OutputMode::Direct;
     CommSchedule comm_schedule = CommSchedule::Auto;
     for (int i = 1; i < argc; ++i) {
@@ -134,6 +135,9 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--shard-n") == 0 && i + 1 < argc) shard_n = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) warmup = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc) iters = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--chunk-m-tiles") == 0 && i + 1 < argc) {
+            chunk_m_tiles_per_put = std::atoi(argv[++i]);
+        }
         else if (std::strcmp(argv[i], "--output-mode") == 0 && i + 1 < argc) {
             const char* value = argv[++i];
             if (std::strcmp(value, "direct") == 0) output_mode = OutputMode::Direct;
@@ -327,10 +331,18 @@ int main(int argc, char** argv) {
     const int num_tiles_n = ceil_div(N, Traits::B_N);
     const int total_tiles = num_tiles_m * num_tiles_n * kargs.batch;
     if (chunk_fused) {
+        if (chunk_m_tiles_per_put <= 0 ||
+            num_tiles_m % chunk_m_tiles_per_put != 0) {
+            if (rank == 0) {
+                fprintf(stderr, "--chunk-m-tiles must be positive and divide M/B_M\n");
+            }
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        const int chunk_groups = num_tiles_m / chunk_m_tiles_per_put;
         chunk_dev_comm = ccoDevCommCopyToDevice(&dev_comm);
         CHECK_HIP(hipMalloc(
             &chunk_done,
-            static_cast<size_t>(nranks) * num_tiles_m * sizeof(unsigned int)));
+            static_cast<size_t>(nranks) * chunk_groups * sizeof(unsigned int)));
         CHECK_HIP(hipMalloc(
             &chunk_peer_lock, static_cast<size_t>(nranks) * sizeof(unsigned int)));
         kargs.chunk_dev_comm = chunk_dev_comm;
@@ -339,7 +351,8 @@ int main(int argc, char** argv) {
         kargs.chunk_done = chunk_done;
         kargs.chunk_peer_lock = chunk_peer_lock;
         kargs.chunk_tiles_per_peer = shard_n / Traits::B_N;
-        kargs.chunk_num_m_tiles = num_tiles_m;
+        kargs.chunk_num_m_tiles = chunk_groups;
+        kargs.chunk_m_tiles_per_put = chunk_m_tiles_per_put;
     }
 #if OPUS_PERSISTENT
     int cu_count = 0;
@@ -472,7 +485,8 @@ int main(int argc, char** argv) {
 #endif
             CHECK_HIP(hipMemsetAsync(
                 chunk_done, 0,
-                static_cast<size_t>(nranks) * num_tiles_m * sizeof(unsigned int),
+                static_cast<size_t>(nranks) *
+                    kargs.chunk_num_m_tiles * sizeof(unsigned int),
                 compute_stream));
             CHECK_HIP(hipMemsetAsync(
                 chunk_peer_lock, 0,
@@ -603,9 +617,10 @@ int main(int argc, char** argv) {
                    ? "local"
                    : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma"));
         const char* schedule_name = overlap_epochs ? "parallel" : "serial";
-        printf("quad_gemm_a2a output=%s schedule=%s %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
+        printf("quad_gemm_a2a output=%s schedule=%s chunk_m_tiles=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
                output_name,
                schedule_name,
+               chunk_m_tiles_per_put,
                OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
                avg_ms, max_ms, flops / (max_ms * 1.0e9),
                total_mism == 0 ? "SUCCESS" : "FAILED");

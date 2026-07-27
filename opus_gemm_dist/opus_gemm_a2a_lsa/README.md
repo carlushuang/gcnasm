@@ -126,8 +126,12 @@ It targets single-round latency and remains experimental:
 ```bash
 mpirun --allow-run-as-root -n 4 ./build/quad_lsa_direct.exe \
   --output-mode chunk-sdma \
+  --chunk-m-tiles 1 \
   -m 2048 -n 18432 -k 8192 --shard-n 2560 --warmup 0 --iters 1
 ```
+
+`--chunk-m-tiles=1/2/4/8` groups that many 256-row M tiles per PUT, producing
+1.25/2.5/5/10 MiB transfers respectively for the default shape.
 
 Five-process-run single-round max-rank medians were:
 
@@ -149,6 +153,15 @@ With `warmup=10,iters=50`, serial versus parallel max-rank medians were:
 
 Parallel scheduling improves both paths. Standard double-buffered SDMA remains
 the fastest choice on all tested shapes.
+
+At `M=2048,warmup=10,iters=50`, the chunk-size sweep measured:
+
+- Serial: 1.25/2.5/5/10 MiB = 0.6144/0.5947/0.5873/0.5841 ms.
+- Parallel: 1.25/2.5/5/10 MiB = 0.5419/0.5432/0.5419/0.5406 ms.
+
+Larger PUTs reduce serial packet/lock overhead. Parallel execution hides most
+of that overhead, so transfer size has little effect; 10 MiB was marginally
+best.
 
 ## Persistent tail-balance sweep
 
