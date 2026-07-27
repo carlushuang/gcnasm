@@ -2,8 +2,9 @@
 #include "gemm_defs.h"
 
 #ifndef __HIP_DEVICE_COMPILE__
-template<typename Traits, int Mode, bool Persistent>
-__global__ void a2a_gemm_lsa_kernel(opus_a2a_gemm_kargs kargs) {}
+template<typename Traits, int Mode, bool Persistent,
+         typename Kargs = opus_a2a_gemm_kargs>
+__global__ void a2a_gemm_lsa_kernel(Kargs kargs) {}
 template<typename Traits>
 __global__ void a2a_lsa_comm_kernel(opus_a2a_gemm_kargs kargs) {}
 template __global__ void a2a_lsa_comm_kernel<
@@ -16,6 +17,8 @@ template __global__ void a2a_gemm_lsa_kernel<
     opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, 1, false>(opus_a2a_gemm_kargs);
 template __global__ void a2a_gemm_lsa_kernel<
     opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, 2, false>(opus_a2a_gemm_kargs);
+template __global__ void a2a_gemm_lsa_kernel<
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, 3, false>(opus_a2a_gemm_kargs);
 #else
 #include "a2a_gemm_kernel_template.hpp"
 template __global__ void a2a_lsa_comm_kernel<
@@ -28,4 +31,6 @@ template __global__ void a2a_gemm_lsa_kernel<
     opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, 1, false>(opus_a2a_gemm_kargs);
 template __global__ void a2a_gemm_lsa_kernel<
     opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, 2, false>(opus_a2a_gemm_kargs);
+template __global__ void a2a_gemm_lsa_kernel<
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, 3, false>(opus_a2a_gemm_kargs);
 #endif

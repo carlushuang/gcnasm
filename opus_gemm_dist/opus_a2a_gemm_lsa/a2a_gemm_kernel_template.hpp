@@ -201,6 +201,88 @@ __device__ inline void wait_input_ready(opus_a2a_gemm_kargs kargs, int k_part, i
     __builtin_amdgcn_s_barrier();
 }
 
+__device__ inline void wait_sdma_input_ready(
+    opus_a2a_gemm_kargs kargs, int k_part, int tid) {
+    if (tid == 0 && k_part != kargs.my_rank) {
+        while (__hip_atomic_load(
+                   kargs.sdma_ready_local + k_part,
+                   __ATOMIC_ACQUIRE,
+                   __HIP_MEMORY_SCOPE_SYSTEM) < kargs.sdma_ready_target) {
+            __builtin_amdgcn_s_sleep(1);
+        }
+    }
+    __builtin_amdgcn_s_barrier();
+}
+
+__device__ inline void wait_fused_sdma_input_ready(
+    opus_a2a_gemm_kargs kargs, int k_part, int tid) {
+    if (tid == 0 && k_part != kargs.my_rank) {
+        // quietQueue completes the SDMA write before the single producer
+        // publishes this monotonic epoch, so fused mode only needs polling.
+        while (__hip_atomic_load(
+                   kargs.sdma_ready_local + k_part,
+                   __ATOMIC_RELAXED,
+                   __HIP_MEMORY_SCOPE_SYSTEM) < kargs.sdma_ready_target) {
+            __builtin_amdgcn_s_sleep(1);
+        }
+    }
+    __builtin_amdgcn_s_barrier();
+}
+
+template<typename D_A>
+__device__ inline void fused_sdma_post_all(
+    opus_a2a_gemm_sdma_fused_kargs kargs,
+    int bx, int wave_id, int lane_id) {
+    if (bx != 0) return;
+    const int peer = wave_id;
+    if (lane_id == 0 &&
+        peer < kargs.rank_count &&
+        peer != kargs.my_rank) {
+        const auto* state = kargs.sdma_comm_state;
+        const uint64_t src_chunk =
+            kargs.input_mode == OPUS_A2A_INPUT_GENERIC
+                ? static_cast<uint64_t>(peer)
+                : 0;
+        mori::cco::ccoSdma{*state->sdma_dev_comm}
+            .put<mori::cco::ccoCoopThread, true>(
+                peer,
+                state->sdma_recv_win,
+                state->sdma_recv_slot_offset +
+                    static_cast<uint64_t>(kargs.my_rank) *
+                        state->sdma_bytes_per_peer,
+                state->sdma_send_win,
+                state->sdma_send_slot_offset +
+                    src_chunk * state->sdma_bytes_per_peer,
+                state->sdma_bytes_per_peer,
+                0);
+    }
+    __builtin_amdgcn_s_barrier();
+}
+
+__device__ inline void fused_sdma_quiet_and_signal(
+    opus_a2a_gemm_sdma_fused_kargs kargs,
+    int bx, int shard_iter, int tid) {
+    if (bx != 0) return;
+    if (tid == 0) {
+        const auto* state = kargs.sdma_comm_state;
+        const int rank_mask = kargs.rank_count - 1;
+        const int dst_rank =
+            (kargs.my_rank - 1 - shard_iter + kargs.rank_count) & rank_mask;
+        mori::cco::ccoSdma{*state->sdma_dev_comm}
+            .quietQueue(dst_rank, 0);
+        auto* remote_ready = static_cast<uint64_t*>(
+            mori::cco::ccoGetLsaPeerPtr(
+                state->sdma_ready_win,
+                dst_rank,
+                state->sdma_ready_slot_offset +
+                    static_cast<uint64_t>(kargs.my_rank) * sizeof(uint64_t)));
+        __hip_atomic_fetch_add(
+            remote_ready, 1ULL,
+            __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+    }
+    __builtin_amdgcn_s_barrier();
+}
+
 }  // namespace a2a_gemm_lsa
 
 template<typename UserTraits>
@@ -213,11 +295,15 @@ void a2a_lsa_comm_kernel(opus_a2a_gemm_kargs kargs) {
     }
 }
 
-template<typename UserTraits, int Mode, bool Persistent = false>
+template<typename UserTraits, int Mode, bool Persistent = false,
+         typename Kargs = opus_a2a_gemm_kargs>
 __global__ __launch_bounds__(UserTraits::BLOCK_SIZE, 2)
-void a2a_gemm_lsa_kernel(opus_a2a_gemm_kargs kargs) {
-    static_assert(Mode == 0 || Mode == 1 || Mode == 2);
-    static_assert(!Persistent || Mode == 0, "persistent scheduling is only enabled for fused mode");
+void a2a_gemm_lsa_kernel(Kargs kargs) {
+    static_assert(Mode >= 0 && Mode <= 4);
+    static_assert(!Persistent || Mode == 0 || Mode == 4,
+                  "persistent scheduling is only enabled for fused modes");
+    static_assert(Mode != 3 || !A2A_GEMM_READY_AWARE_K,
+                  "SDMA intra mode uses its own uint64 ready protocol");
     using namespace opus;
     using namespace gemm_quad_subtile;
     using namespace a2a_gemm_lsa;
@@ -232,6 +318,9 @@ void a2a_gemm_lsa_kernel(opus_a2a_gemm_kargs kargs) {
     const int tid = opus::thread_id_x();
     const int wave_id = __builtin_amdgcn_readfirstlane(tid / get_warp_size());
     const int lane_id = tid % get_warp_size();
+    if constexpr (Mode == 4) {
+        fused_sdma_post_all<D_A>(kargs, bx, wave_id, lane_id);
+    }
 
 #if A2A_GEMM_COMM_WG_PLACEMENT == 1
     const bool is_comm_wg = Mode == 0 && bx < kargs.comm_wgs;
@@ -278,6 +367,7 @@ void a2a_gemm_lsa_kernel(opus_a2a_gemm_kargs kargs) {
     bool first_compute_task = true;
 
     while (true) {
+    const bool initial_compute_task = first_compute_task;
     int compute_task = compute_worker;
     if constexpr (Persistent) {
         if (first_compute_task) {
@@ -451,7 +541,15 @@ void a2a_gemm_lsa_kernel(opus_a2a_gemm_kargs kargs) {
 #else
         const int part = ordered_part(shard_base_tile);
 #endif
-        if constexpr (Mode == 0) {
+        if constexpr (Mode == 4) {
+            if (part != kargs.my_rank) {
+                wait_fused_sdma_input_ready(kargs, part, tid);
+            }
+        } else if constexpr (Mode == 3) {
+            if (part != kargs.my_rank) {
+                wait_sdma_input_ready(kargs, part, tid);
+            }
+        } else if constexpr (Mode == 0) {
             wait_input_ready<T>(kargs, part, m_tile, tid, wave_id);
         }
     }
@@ -628,6 +726,12 @@ void a2a_gemm_lsa_kernel(opus_a2a_gemm_kargs kargs) {
         if (shard_iter + 1 < shard_outer_loops) {
             s_waitcnt_vmcnt(0_I);
             if (wave_id_m == 0) __builtin_amdgcn_s_barrier();
+        }
+    }
+    if constexpr (Mode == 4) {
+        if (initial_compute_task && shard_iter + 1 < shard_outer_loops) {
+            fused_sdma_quiet_and_signal(
+                kargs, bx, shard_iter, tid);
         }
     }
     }

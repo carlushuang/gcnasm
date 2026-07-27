@@ -26,7 +26,7 @@ COMMON_FLAGS = -I. -I$(OPUS_INCLUDE_DIR) -std=c++20 -fopenmp -O3 -Wall --offload
 HOST_INCLUDES = -I$(MORI_INCLUDE_DIR) -I$(MPI_INCLUDE_DIR)
 HOST_LIBS = -L$(MORI_LIB_DIR) -lmori_cco -Wl,-rpath,$(MORI_LIB_DIR) -lrccl $(MPI_LIB)
 
-OBJS = $(BUILD)/a2a_gemm_kernel.o $(BUILD)/a2a_sdma_kernel.o $(BUILD)/gemm_a16w16_quad_subtile_kernel.o $(BUILD)/a2a_gemm_host.o
+OBJS = $(BUILD)/a2a_gemm_kernel.o $(BUILD)/a2a_gemm_sdma_fused_kernel.o $(BUILD)/a2a_sdma_kernel.o $(BUILD)/gemm_a16w16_quad_subtile_kernel.o $(BUILD)/a2a_gemm_host.o
 
 .PHONY: all clean run
 
@@ -40,6 +40,9 @@ $(BUILD)/a2a_gemm_kernel.o: a2a_gemm_kernel.cc a2a_gemm_kernel_template.hpp gemm
 
 $(BUILD)/a2a_sdma_kernel.o: a2a_sdma_kernel.cc | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -Rpass-analysis=kernel-resource-usage -c -o $@
+
+$(BUILD)/a2a_gemm_sdma_fused_kernel.o: a2a_gemm_sdma_fused_kernel.cc a2a_gemm_kernel_template.hpp gemm_defs.h | $(BUILD)
+	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
 
 $(BUILD)/gemm_a16w16_quad_subtile_kernel.o: ../opus_gemm_a2a_lsa/gemm_a16w16_quad_subtile_kernel.cc ../opus_gemm_a2a_lsa/gemm_a16w16_quad_subtile_kernel_template.hpp ../opus_gemm_a2a_lsa/gemm_defs.h | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -DOPUS_PERSISTENT=0 -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@

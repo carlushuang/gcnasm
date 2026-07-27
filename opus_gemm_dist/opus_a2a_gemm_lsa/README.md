@@ -59,11 +59,39 @@ mpirun --allow-run-as-root -n 8 ./build/a2a_gemm_lsa.exe \
 mpirun --allow-run-as-root -n 8 ./build/a2a_gemm_lsa.exe \
   --comm-backend sdma --input-mode generic_a2a --comm-schedule parallel \
   --warmup 10 --iters 30
+
+# Start GEMM after post+self-copy; consume each remote K shard when its SDMA
+# ready counter arrives while quiet/notify runs on the communication stream.
+mpirun --allow-run-as-root -n 8 ./build/a2a_gemm_lsa.exe \
+  --comm-backend sdma --input-mode generic_a2a --comm-schedule intra \
+  --warmup 10 --iters 30
+
+# Literal single-kernel experiment: block 0 issues/quiet SDMA while every
+# workgroup computes K shards and polls per-source ready epochs.
+mpirun --allow-run-as-root -n 8 ./build/a2a_gemm_lsa.exe \
+  --comm-backend sdma --input-mode generic_a2a --comm-schedule fused \
+  --warmup 10 --iters 30
 ```
 
 `--comm-schedule auto` is the default and selects parallel. `--mode 4` remains
 an equivalent shorthand for profiling scripts; modes 0 through 3 retain their
 existing behavior.
+
+`intra` is an experimental same-epoch stream-fused schedule. It records a
+`stage_ready[slot]` event after SDMA post and the self D2D copy, then launches
+a compile-time Mode 3 GEMM. The GEMM computes the local K shard first and uses
+system-scope acquire polling before each remote shard. The communication stream
+quiet/notifies peer queues concurrently with that GEMM. CCO window and DevComm
+state remain outside the compute kernel.
+
+`fused` is a literal single-kernel experiment derived from the external
+`Opus_a2a_gemm_cco_sdma` design. Block 0 posts all peer PUTs at kernel entry,
+computes its tile, and quiet/notifies one destination after each K shard.
+Other workgroups compute the local shard first and acquire the same uint64
+ready epochs before remote shards. The implementation supports 4/8 ranks,
+broadcast/generic inputs, and dynamic M shapes. The retained fast path uses the
+normal hardware workgroup scheduler for all tile counts; a cooperative
+persistent variant was correct but slower for large M.
 
 Each send and receive window contains two slots. A `comm_ready[slot]` event
 makes the completed SDMA slot visible to the compute stream, and a
@@ -111,6 +139,57 @@ The isolated SDMA breakdown for the same three generic shapes was:
 The parallel steady state approaches the compute duration because the next
 epoch's SDMA transfer is shorter than the current epoch's GEMM.
 
+The experimental intra schedule passed 4/8-rank broadcast and generic A2A
+correctness, including odd/even epoch alternation and pipeline-output checks.
+For 8-rank generic A2A, `N=K=8192`, `warmup=10,iters=30`:
+
+- `M=1024`: parallel 0.1721 ms, intra 0.1763 ms.
+- `M=2048`: 0.2411 ms vs 0.2488 ms; a repeated median was 0.2417 vs 0.2443 ms.
+- `M=4096`: 0.4265 ms vs 0.4371 ms.
+- `M=6144`: 0.6160 ms vs 0.6355 ms.
+- `M=8192`: 0.8016 ms vs 0.8330 ms.
+- `M=12288`: 1.1734 ms vs 1.2229 ms.
+- `M=16384`: 1.5352 ms vs 1.6121 ms.
+
+Intra is 2.4% to 5.0% slower than parallel in steady state, averaging 3.5%,
+because Mode 3 adds per-shard readiness synchronization while cross-epoch
+parallel already hides the full communication phase. For warmed
+`M=2048,broadcast,iters=1`, three-run medians were 0.4627 ms serial,
+0.4967 ms parallel, and 0.3930 ms intra. Intra improves the local host-pipeline
+single-epoch result but remains slower than the external single-kernel fused
+reference (0.2676 ms), so it stays opt-in and `auto` remains parallel.
+
+The literal fused schedule also passed 4/8-rank broadcast/generic correctness,
+dynamic M, and 1000-epoch stress. Static launch and the fused-only relaxed-ready
+protocol reduced the generic full E2E at
+`M=1024/2048/4096/6144/8192/12288/16384` to
+0.2029/0.2760/0.5250/0.7772/1.0305/1.5327/2.0417 ms.
+
+The dynamic-M remote fused results were
+0.2049/0.2635/0.5388/0.7750/1.0686/1.5363/2.0491 ms. The two literal kernels
+are now within roughly 5% on every shape: local is faster at five shapes and
+remote is faster at M=2048/6144. Both remain substantially slower than the
+current cross-epoch parallel schedule, so literal fused stays experimental and
+`auto` remains parallel.
+
+Additional fused A/B tests found:
+
+- Static normal launch versus cooperative persistent improved M=4096/8192/16384
+  E2E from 0.6301/1.2693/2.4209 to 0.6059/1.1143/2.1926 ms and passed a
+  1000-epoch M=4096 stress run.
+- Using the recv window as the broadcast SDMA source regressed the M=2048
+  kernel median from about 0.3395 to 0.3467 ms, so the separate send window was
+  retained.
+- C-store modes 0/1/2 produced M=2048 kernel medians of
+  0.3444/0.3413/0.3408 ms respectively; the existing mode 2 remains best.
+- Replacing the fused ready `fetch_add` with a release store showed no stable
+  benefit and was reverted.
+- Keeping the monotonic counter but using relaxed system-scope producer and
+  consumer atomics reduced the M=2048 fused kernel from roughly 0.34 to
+  0.27–0.28 ms. This is safe in the tested CCO path because `quietQueue`
+  completes the SDMA transfer before publishing the counter; 4/8-rank generic
+  tests and 1000-epoch M=2048/M=4096 stress runs passed.
+
 The clean gfx950 resource build reports:
 
 - `a2a_sdma_post_kernel`: 50 SGPR, 29 VGPR, 0 LDS, no SGPR/VGPR spill,
@@ -121,6 +200,12 @@ The clean gfx950 resource build reports:
   8 waves/SIMD.
 - reused Mode 2 compute kernel: 76 SGPR, 210 VGPR, 135168 bytes LDS,
   no spill, 2 waves/SIMD.
+- intra Mode 3 compute kernel: 84 SGPR, 212 VGPR, 135168 bytes LDS,
+  no spill, 2 waves/SIMD.
+- literal fused non-persistent kernel: 91 SGPR, 214 VGPR, 135168 bytes LDS,
+  no spill, 2 waves/SIMD.
+- literal fused persistent A/B variant:
+  103 SGPR, 222 VGPR, 135172 bytes LDS, no spill, 2 waves/SIMD.
 
 The symbolized rank-0 timeline is in
 `build/traces/sdma_parallel/rank0_results.pftrace`, with its CSV companion in
@@ -130,6 +215,20 @@ rank-local copy, and quiet/notify interval lies inside the previous GEMM
 interval, confirming cross-epoch overlap. The decoded advanced thread trace is
 under `build/traces/sdma_parallel_att/` in its generated `ui_output_*`
 directory.
+
+The intra traces are in
+`build/traces/sdma_intra_M2048_single/rank0_results.pftrace` and
+`build/traces/sdma_intra_M4096_system/rank0_results.pftrace`. They show Mode 3
+GEMM beginning before quiet/notify finishes on the communication stream; the
+later remote K-shards are released by the per-source uint64 counters.
+
+The literal fused system and ATT captures are under
+`build/traces/sdma_literal_fused_M2048/` and
+`build/traces/sdma_literal_fused_M2048_att/`. The timed fused path contains one
+GEMM dispatch; block 0 performs SDMA packet submission and
+per-shard quiet/notify inside that dispatch. The ATT capture can report cutoff
+waves because only one target CU/shader engine is traced, but the symbolized
+kernel timeline and correctness result are complete.
 
 Persistent compute scheduling is available for fused mode 0:
 
