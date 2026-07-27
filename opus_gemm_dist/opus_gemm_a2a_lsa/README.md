@@ -62,8 +62,14 @@ export MORI_SDMA_NUM_CHANNELS=1
 
 mpirun --allow-run-as-root -n 4 ./build/quad_lsa_direct.exe \
   --output-mode sdma \
+  --comm-schedule parallel \
   -m 2048 -n 18432 -k 8192 --shard-n 2560 --warmup 5 --iters 100
 ```
+
+Both SDMA modes accept `--comm-schedule serial|parallel|auto`. `auto` preserves
+the historical defaults: standard SDMA is parallel across epochs, while
+chunk-SDMA is serial. Parallel chunk-SDMA alternates the two staging slots so
+epoch `t` communication can overlap epoch `t+1` compute.
 
 The current MORI SDMA setup assumes local rank `r` is bound to visible device
 ordinal `r`; the SDMA results below were collected on physical GPUs 0–3.
@@ -134,6 +140,15 @@ used for steady state: at `M=2048,warmup=5,iters=100` it measured about
 0.609 ms versus 0.519 ms for the normal double-buffered SDMA path. Inlining
 chunk submission also raises the chunk kernel to 61 SGPR spills, so `sdma`
 remains the recommended mode.
+
+With `warmup=10,iters=50`, serial versus parallel max-rank medians were:
+
+- `M=1024`: standard SDMA 0.4430 vs 0.3423 ms; chunk-SDMA 0.3688 vs 0.3452 ms.
+- `M=2048`: standard SDMA 0.7091 vs 0.5249 ms; chunk-SDMA 0.6161 vs 0.5420 ms.
+- `M=4096`: standard SDMA 1.2558 vs 0.9096 ms; chunk-SDMA 1.0204 vs 0.9423 ms.
+
+Parallel scheduling improves both paths. Standard double-buffered SDMA remains
+the fastest choice on all tested shapes.
 
 ## Persistent tail-balance sweep
 

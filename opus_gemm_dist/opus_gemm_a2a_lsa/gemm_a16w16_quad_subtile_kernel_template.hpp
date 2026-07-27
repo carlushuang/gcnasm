@@ -781,7 +781,8 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
                     opus_chunk_sdma_submit(
                         kargs.chunk_dev_comm, kargs.chunk_staging_win,
                         kargs.chunk_recv_win, kargs.chunk_peer_lock, dst,
-                        static_cast<size_t>(dst) * bytes_per_peer + chunk_offset,
+                        static_cast<size_t>(kargs.chunk_staging_slot_offset) +
+                            static_cast<size_t>(dst) * bytes_per_peer + chunk_offset,
                         static_cast<size_t>(dev_comm->lsaRank) * bytes_per_peer +
                             chunk_offset,
                         chunk_bytes);

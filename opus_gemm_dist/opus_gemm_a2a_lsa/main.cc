@@ -65,6 +65,12 @@ enum class OutputMode {
     ChunkSdma,
 };
 
+enum class CommSchedule {
+    Auto,
+    Serial,
+    Parallel,
+};
+
 static float a_value(int src_rank, int row, int k, int variant = 0) {
     const float base =
         0.001f * float(src_rank + 1) +
@@ -120,6 +126,7 @@ int main(int argc, char** argv) {
     int warmup = 3;
     int iters = 20;
     OutputMode output_mode = OutputMode::Direct;
+    CommSchedule comm_schedule = CommSchedule::Auto;
     for (int i = 1; i < argc; ++i) {
         if ((std::strcmp(argv[i], "-m") == 0 || std::strcmp(argv[i], "--m") == 0) && i + 1 < argc) M = std::atoi(argv[++i]);
         else if ((std::strcmp(argv[i], "-n") == 0 || std::strcmp(argv[i], "--n") == 0) && i + 1 < argc) N = std::atoi(argv[++i]);
@@ -138,6 +145,16 @@ int main(int argc, char** argv) {
                 MPI_Abort(MPI_COMM_WORLD, 1);
             }
         }
+        else if (std::strcmp(argv[i], "--comm-schedule") == 0 && i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "serial") == 0) comm_schedule = CommSchedule::Serial;
+            else if (std::strcmp(value, "parallel") == 0) comm_schedule = CommSchedule::Parallel;
+            else if (std::strcmp(value, "auto") == 0) comm_schedule = CommSchedule::Auto;
+            else {
+                if (rank == 0) fprintf(stderr, "--comm-schedule must be auto, serial, or parallel\n");
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+        }
     }
 
     if (nranks != RANKS) {
@@ -148,6 +165,9 @@ int main(int argc, char** argv) {
     const bool sdma_pipeline = output_mode == OutputMode::Sdma;
     const bool chunk_fused = output_mode == OutputMode::ChunkSdma;
     const bool uses_sdma = sdma_pipeline || chunk_fused;
+    const bool overlap_epochs =
+        comm_schedule == CommSchedule::Parallel ||
+        (comm_schedule == CommSchedule::Auto && sdma_pipeline);
     if (uses_sdma) {
         const char* value = std::getenv("MORI_ENABLE_SDMA");
         if (!value || std::strcmp(value, "1") != 0) {
@@ -420,6 +440,9 @@ int main(int argc, char** argv) {
                 sdma_ready_win, dev_comm);
             CHECK_HIP(hipGetLastError());
             CHECK_HIP(hipEventRecord(slot_free[slot], comm_stream));
+            if (!overlap_epochs) {
+                CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[slot], 0));
+            }
             ++pipeline_epoch;
         };
 
@@ -436,10 +459,12 @@ int main(int argc, char** argv) {
         const size_t bytes_per_peer =
             static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
         const size_t elems_per_peer = static_cast<size_t>(M) * shard_n;
+        const size_t staging_bytes = staging_elems * sizeof(bf16_t);
         const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
         auto launch_chunk_round = [&]() {
-            if (round > 0) {
-                CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[0], 0));
+            const int slot = overlap_epochs ? static_cast<int>(round & 1) : 0;
+            if ((overlap_epochs && round >= 2) || (!overlap_epochs && round > 0)) {
+                CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[slot], 0));
             }
 #if OPUS_PERSISTENT
             CHECK_HIP(hipMemsetAsync(
@@ -453,20 +478,25 @@ int main(int argc, char** argv) {
                 chunk_peer_lock, 0,
                 static_cast<size_t>(nranks) * sizeof(unsigned int), compute_stream));
             kargs.ptr_a = (round & 1) ? d_a_alt : d_a;
-            kargs.cco_c_win = sdma_staging[0];
+            kargs.cco_c_win = sdma_staging[slot];
+            kargs.chunk_staging_slot_offset =
+                static_cast<unsigned long long>(slot) * staging_bytes;
             gemm_a16w16_quad_subtile_kernel<Traits, true, true>
                 <<<grid, block, 0, compute_stream>>>(kargs);
             CHECK_HIP(hipGetLastError());
-            CHECK_HIP(hipEventRecord(stage_ready[0], compute_stream));
-            CHECK_HIP(hipStreamWaitEvent(comm_stream, stage_ready[0], 0));
+            CHECK_HIP(hipEventRecord(stage_ready[slot], compute_stream));
+            CHECK_HIP(hipStreamWaitEvent(comm_stream, stage_ready[slot], 0));
             CHECK_HIP(hipMemcpyAsync(
                 sdma_recv + static_cast<size_t>(rank) * elems_per_peer,
-                sdma_staging[0] + static_cast<size_t>(rank) * elems_per_peer,
+                sdma_staging[slot] + static_cast<size_t>(rank) * elems_per_peer,
                 bytes_per_peer, hipMemcpyDeviceToDevice, comm_stream));
             opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, comm_stream>>>(
                 sdma_ready_win, dev_comm);
             CHECK_HIP(hipGetLastError());
-            CHECK_HIP(hipEventRecord(slot_free[0], comm_stream));
+            CHECK_HIP(hipEventRecord(slot_free[slot], comm_stream));
+            if (!overlap_epochs) {
+                CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[slot], 0));
+            }
             ++round;
         };
         for (int i = 0; i < warmup; ++i) launch_chunk_round();
@@ -572,8 +602,10 @@ int main(int argc, char** argv) {
             : (output_mode == OutputMode::Local
                    ? "local"
                    : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma"));
-        printf("quad_gemm_a2a output=%s %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
+        const char* schedule_name = overlap_epochs ? "parallel" : "serial";
+        printf("quad_gemm_a2a output=%s schedule=%s %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
                output_name,
+               schedule_name,
                OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
                avg_ms, max_ms, flops / (max_ms * 1.0e9),
                total_mism == 0 ? "SUCCESS" : "FAILED");
