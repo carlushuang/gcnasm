@@ -43,6 +43,7 @@ See the [detailed README](vector_add_asm/README.md).
 
 | Tag | Folder | Description |
 |-----|--------|-------------|
+| `[A/H]` | [`asm_f4gemm`](asm_f4gemm/) | Host driver + CPU reference for aiter's gfx950 MXFP4 GEMM code objects (kernarg ABI, B/scale preshuffle layouts, tile heuristic, splitK) |
 | `[A/H]` | [`hgemm`](hgemm/) | Half-precision GEMM 128x128 with hand-written MFMA asm |
 | `[H+]` | [`hgemm_mfma`](hgemm_mfma/) | Half-precision GEMM with MFMA; Python codegen helpers |
 | `[A/H]` | [`sgemm`](sgemm/) | SGEMM 128x128 with hand-written asm (VEGA64) |
