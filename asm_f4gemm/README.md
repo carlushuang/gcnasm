@@ -166,6 +166,77 @@ MI355X (gfx950, 256 CU), `--iters 50`, heuristic kernel selection:
 
 `run_tests.sh` covers 8 heuristic shapes, all 35 kernels at `M=300 N=2048 K=1024`, and 8 splitK configurations: 51 checks, all passing.
 
+## Round-tripping a code object: `.co` -> `.s` -> `.co`
+
+aiter ships only the assembled objects, not the sources. `co2asm.py` + `rebuild.sh` take one back to editable GCN assembly, reassemble it, prove the result is equivalent, and drop it into a self-contained `--co-dir` so you can be sure the rebuilt object is the one that ran. That is the starting point for actually modifying a kernel.
+
+The 256x256 preshuffled tile is the default: it is the tile the heuristic picks for every large shape, and the fastest one measured above.
+
+```bash
+./rebuild.sh --co-dir /path/to/aiter/hsa/gfx950/f4gemm
+./asm_f4gemm.exe --co-dir ./rebuilt -m 4096 -n 4096 -k 4096
+```
+
+`rebuild.sh` writes `rebuilt/<kernel>.s`, `rebuilt/<kernel>.co`, and a one-line manifest CSV listing only that kernel — so the heuristic can only ever select the rebuilt tile, whatever shape you ask for.
+
+### Reconstructing the assembly
+
+A code object holds three things the assembler needs, and each comes from a different tool:
+
+| Piece | Recovered with | Becomes |
+|---|---|---|
+| instructions + local labels | `llvm-objdump -d` | `.text` |
+| 64-byte kernel descriptor | `llvm-objdump -d -j .rodata` | `.amdhsa_kernel` ... `.end_amdhsa_kernel` |
+| msgpack note (kernarg offsets, LDS, workgroup size) | `llvm-readelf --notes` | `.amdgpu_metadata` ... `.end_amdgpu_metadata` |
+
+The branch targets survive because the objects keep their `label_XXXX` symbols in `.symtab`, so `llvm-objdump` emits real labels rather than raw addresses.
+
+Three things about llvm-objdump's descriptor dump make it *not* directly reassemblable, all handled in `co2asm.py`:
+
+- **`.amdhsa_next_free_sgpr` is not what it looks like.** The descriptor only stores the SGPR count granulated by 8, so objdump reports the top of the granule (104) *and* inverts the encoding assuming zero extra SGPRs. The assembler goes the other way and adds `getNumExtraSGPRs()` back before granulating — 6 on gfx8+ when flat_scratch is reserved, which is the default objdump never prints. Feeding 104 straight back is rejected outright (gfx9 addresses at most 102), and clamping to 102 silently lands one granule too high. Subtracting the 6 extras reproduces the encoded byte exactly.
+- **`.amdhsa_reserve_xnack_mask` is only legal when the target id names xnack.** These objects are built for xnack `ANY`, so the directive is dropped and the target left as plain `gfx950` — which also keeps the rebuilt ELF feature flags bit-identical. Dropping it is safe precisely because the extra-SGPR count is driven by flat_scratch, not xnack.
+- **`ABI Version` in the ELF header is not the code object version.** `ELFABIVERSION_AMDGPU_HSA_V2` is 0, V3 is 1, and so on, so the `ABI Version: 4` these objects report means `-mcode-object-version=6`. Building with `4` produces a silently different object.
+
+### What "equivalent" means here
+
+`rebuild.sh` checks four things and fails loudly on any mismatch:
+
+```
+    ELF header    identical (0x54F, gfx950, xnack, sramecc)
+    descriptor    identical (64 bytes)
+    .text         3413 lines, disassembly identical (508 don't-care bits re-encoded)
+    metadata      identical (84 kernarg slots)
+```
+
+The ELF header, the 64-byte kernel descriptor and the metadata note come out **byte-identical**, and the rebuilt file is the same size as the original (35632 bytes).
+
+`.text` is compared as *disassembly*, not as bytes, because 508 bytes genuinely differ. Every one of them is bit 13 and/or 14 of a `v_mfma_scale_f32_16x16x128_f8f6f4` first dword (`0xd3ac....`) — the src2 `op_sel` / `op_sel_hi` bits, which are don't-cares for the accumulator operand. Whatever assembled the original set them; LLVM's assembler emits 0 and its disassembler ignores them, so all 3413 instructions decode identically. Nothing else in `.text` moves.
+
+### Verified on hardware
+
+The rebuilt object was run through the same checks as the original on MI355X:
+
+| | rebuilt | original |
+|---|---|---|
+| `M=4096 N=4096 K=4096` | PASSED, `max_abs_err=128`, `max_rel_err=0.003891` | PASSED, `max_abs_err=128`, `max_rel_err=0.003891` |
+| same, TFLOP/s | 4048 | 3958 |
+| `M=300 N=2048 K=1024` | PASSED | PASSED |
+| `M=1 N=4096 K=2048` | PASSED | PASSED |
+| `--splitk 2` / `--splitk 4` | PASSED | PASSED |
+
+Identical error metrics, and the throughput difference is run-to-run noise.
+
+### Pointing at the wrong directory
+
+Because `rebuilt/` holds a single tile, a wrong `--co-dir` is not a silent fallback. If the manifest lists a kernel the directory does not contain, the driver names the missing file and exits non-zero rather than letting `hipModuleLoad` report a bare "file not found":
+
+```
+[f4gemm] no such code object: /tmp/f4probe/f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640.co
+[f4gemm]   the manifest lists this kernel but --co-dir does not contain it -- point --co-dir at a directory holding it
+```
+
+`co2asm.py` is not f4gemm-specific — it takes any AMDGPU code object and detects the arch and code object version from the ELF header.
+
 ## Files
 
 | File | Contents |
@@ -174,3 +245,5 @@ MI355X (gfx950, 256 CU), `--iters 50`, heuristic kernel selection:
 | `f4gemm_ref.hpp` | fp4/e8m0 decode, B and scale shuffles, operand generation, CPU reference |
 | `main.cpp` | CLI, buffer setup, verification, benchmark |
 | `run_tests.sh` | regression sweep |
+| `co2asm.py` | code object -> reassemblable `.s` (any AMDGPU `.co`, not just f4gemm) |
+| `rebuild.sh` | round-trip one kernel and verify it against the original |

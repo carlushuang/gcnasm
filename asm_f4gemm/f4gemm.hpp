@@ -277,6 +277,18 @@ class Kernel
     void load(const std::string& co_dir, const Config& cfg)
     {
         std::string path = co_dir + "/" + cfg.co_name;
+        // hipModuleLoad only reports "file not found" without saying which file,
+        // which is the single most common way to get the --co-dir wrong.
+        {
+            std::ifstream probe(path, std::ios::binary);
+            if(!probe.is_open())
+            {
+                printf("[f4gemm] no such code object: %s\n", path.c_str());
+                printf("[f4gemm]   the manifest lists this kernel but --co-dir does not"
+                       " contain it -- point --co-dir at a directory holding it\n");
+                exit(EXIT_FAILURE);
+            }
+        }
         HIP_CALL(hipModuleLoad(&module_, path.c_str()));
         HIP_CALL(hipModuleGetFunction(&func_, module_, cfg.knl_name.c_str()));
         path_ = path;
