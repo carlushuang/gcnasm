@@ -100,8 +100,9 @@ def disasm_kd(objdump, co, arch):
     """.rodata -> (.amdhsa_kernel blocks, target id to assemble with).
 
     llvm-objdump's descriptor dump is not directly reassemblable; two fields
-    need fixing up. ``rebuild.sh`` diffs the rebuilt .rodata against the
-    original, which is what proves both fixups are lossless.
+    need fixing up. The README's round-trip section shows how to diff the
+    reassembled .rodata against the original, which proves both fixups are
+    lossless.
 
     ``.amdhsa_next_free_sgpr`` -- the descriptor only stores the SGPR count
     granulated by 8, so llvm-objdump reports the *top* of the granule, and it

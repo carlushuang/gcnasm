@@ -168,18 +168,49 @@ MI355X (gfx950, 256 CU), `--iters 50`, heuristic kernel selection:
 
 ## Round-tripping a code object: `.co` -> `.s` -> `.co`
 
-aiter ships only the assembled objects, not the sources. `co2asm.py` + `rebuild.sh` take one back to editable GCN assembly, reassemble it, prove the result is equivalent, and drop it into a self-contained `--co-dir` so you can be sure the rebuilt object is the one that ran. That is the starting point for actually modifying a kernel.
+aiter ships only the assembled objects, not the sources. The intended workflow is fully manual:
 
-The 256x256 preshuffled tile is the default: it is the tile the heuristic picks for every large shape, and the fastest one measured above.
+1. **Disassemble** a `.co` into reassemblable GCN assembly with `co2asm.py`.
+2. **Edit the `.s` by hand** — that is the whole point.
+3. **Reassemble** into a new `.co` with clang (`co2asm.py` prints the exact command, with the arch and code object version already detected).
+4. **Run it** through the host driver: put the rebuilt `.co` in a directory with a one-line manifest CSV listing only that kernel, and point `--co-dir` at it — so whatever shape you ask for, the rebuilt object is provably the one that ran.
 
 ```bash
-./rebuild.sh --co-dir /path/to/aiter/hsa/gfx950/f4gemm
+# 1. disassemble (writes <kernel>.s next to the .co by default; -o to redirect)
+python3 co2asm.py /path/to/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co
+
+# 2. edit the .s ... then
+
+# 3. reassemble
+/opt/rocm/llvm/bin/clang -x assembler -target amdgcn-amd-amdhsa \
+    -mcpu=gfx950 -mcode-object-version=6 \
+    f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.s \
+    -o rebuilt/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co
+
+# 4. manifest listing only the rebuilt kernel, then run it
+SRC=/path/to/aiter/hsa/gfx950/f4gemm
+head -1 $SRC/f4gemm_bf16_per1x32Fp4.csv > rebuilt/f4gemm_bf16_per1x32Fp4.csv
+grep ",f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co" $SRC/f4gemm_bf16_per1x32Fp4.csv \
+    >> rebuilt/f4gemm_bf16_per1x32Fp4.csv
 ./asm_f4gemm.exe --co-dir ./rebuilt -m 4096 -n 4096 -k 4096
 ```
 
-`rebuild.sh` writes `rebuilt/<kernel>.s`, `rebuilt/<kernel>.co`, and a one-line manifest CSV listing only that kernel — so the heuristic can only ever select the rebuilt tile, whatever shape you ask for.
+The 256x256 preshuffled tile is a good starting point: it is the tile the heuristic picks for every large shape, and the fastest one measured above.
 
 ### Reconstructing the assembly
+
+For a quick look at a kernel, raw `llvm-objdump` is all you need:
+
+```bash
+/opt/rocm/llvm/bin/llvm-objdump -d --triple=amdgcn-amd-amdhsa --mcpu=gfx950 <file.co>
+```
+
+That prints every section it can decode — `.text` as instructions (each line suffixed with a `// <addr>: <encoding>` comment) and the 64-byte kernel descriptor in `.rodata` rendered as `.amdhsa_*` directives. What it prints is **not** reassemblable as-is; `co2asm.py` is the delta between that raw dump and a `.s` that `clang -x assembler` accepts and reproduces the original with. Concretely, it:
+
+1. **Keeps only `.text` from the instruction dump** and strips the `// <addr>: <encoding>` comment from every line. Kernel entry points (any symbol not named `label_XXXX`) become `.globl` + `.type @function`, with `.p2align 8` restored.
+2. **Separately dumps the descriptor** with `llvm-objdump -d -j .rodata` and applies the two field fixups described below (`.amdhsa_next_free_sgpr` and `.amdhsa_reserve_xnack_mask`).
+3. **Recovers the metadata note** — the msgpack kernarg/LDS/workgroup table — from `llvm-readelf --notes` and re-emits the YAML document between `.amdgpu_metadata` / `.end_amdgpu_metadata`.
+4. **Maps the ELF header to assembler flags**: arch from `Flags:` (`--mcpu` for both objdump and clang), and `ABI Version` to the real code object version (`ABI 4` → `-mcode-object-version=6`, see below), then prints the exact `clang` reassembly command.
 
 A code object holds three things the assembler needs, and each comes from a different tool:
 
@@ -199,16 +230,31 @@ Three things about llvm-objdump's descriptor dump make it *not* directly reassem
 
 ### What "equivalent" means here
 
-`rebuild.sh` checks four things and fails loudly on any mismatch:
+Before modifying anything, it is worth checking the plain round-trip against the original — four checks, all doable by hand:
 
-```
-    ELF header    identical (0x54F, gfx950, xnack, sramecc)
-    descriptor    identical (64 bytes)
-    .text         3413 lines, disassembly identical (508 don't-care bits re-encoded)
-    metadata      identical (84 kernarg slots)
+```bash
+ORIG=/path/to/aiter/hsa/gfx950/f4gemm/f4gemm_..._256x256.co
+NEW=rebuilt/f4gemm_..._256x256.co
+RL=/opt/rocm/llvm/bin
+
+# 1. ELF header: arch + feature flags + ABI version must match
+diff <($RL/llvm-readelf -h $ORIG | grep -E "ABI Version|Flags:") \
+     <($RL/llvm-readelf -h $NEW  | grep -E "ABI Version|Flags:")
+
+# 2. kernel descriptor: must be byte-identical, it drives SGPR/VGPR/LDS setup
+$RL/llvm-objcopy --dump-section=.rodata=o.kd $ORIG /dev/null
+$RL/llvm-objcopy --dump-section=.rodata=n.kd $NEW  /dev/null
+cmp o.kd n.kd
+
+# 3. .text: compare as disassembly, not bytes (see below)
+diff <($RL/llvm-objdump -d --triple=amdgcn-amd-amdhsa --mcpu=gfx950 $ORIG | sed 's|//.*||') \
+     <($RL/llvm-objdump -d --triple=amdgcn-amd-amdhsa --mcpu=gfx950 $NEW  | sed 's|//.*||')
+
+# 4. metadata note: kernarg offsets, LDS, workgroup size
+diff <($RL/llvm-readelf --notes $ORIG) <($RL/llvm-readelf --notes $NEW)
 ```
 
-The ELF header, the 64-byte kernel descriptor and the metadata note come out **byte-identical**, and the rebuilt file is the same size as the original (35632 bytes).
+For an unmodified round-trip of the 256x256 tile, all four report identical — the descriptor and metadata are **byte-identical** and the rebuilt file is the same size as the original (35632 bytes).
 
 `.text` is compared as *disassembly*, not as bytes, because 508 bytes genuinely differ. Every one of them is bit 13 and/or 14 of a `v_mfma_scale_f32_16x16x128_f8f6f4` first dword (`0xd3ac....`) — the src2 `op_sel` / `op_sel_hi` bits, which are don't-cares for the accumulator operand. Whatever assembled the original set them; LLVM's assembler emits 0 and its disassembler ignores them, so all 3413 instructions decode identically. Nothing else in `.text` moves.
 
@@ -246,4 +292,3 @@ Because `rebuilt/` holds a single tile, a wrong `--co-dir` is not a silent fallb
 | `main.cpp` | CLI, buffer setup, verification, benchmark |
 | `run_tests.sh` | regression sweep |
 | `co2asm.py` | code object -> reassemblable `.s` (any AMDGPU `.co`, not just f4gemm) |
-| `rebuild.sh` | round-trip one kernel and verify it against the original |
