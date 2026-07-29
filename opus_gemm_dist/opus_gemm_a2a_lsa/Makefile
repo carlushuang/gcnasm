@@ -38,7 +38,7 @@ COMMON_FLAGS = -I. -I$(abspath $(OPUS_INCLUDE_DIR)) -std=c++20 -fopenmp -O3 $(TR
 HOST_INCLUDES = -I$(MORI_INCLUDE_DIR) -I$(MPI_INCLUDE_DIR)
 HOST_LIBS = -L$(MORI_LIB_DIR) -lmori_cco -Wl,-rpath,$(MORI_LIB_DIR) $(MPI_LIB)
 
-OBJS = $(BUILD)/gemm_a16w16_quad_subtile_kernel.o $(BUILD)/sdma_a2a_kernel.o $(BUILD)/main.o
+OBJS = $(BUILD)/gemm_a16w16_quad_subtile_kernel.o $(BUILD)/lsa_a2a_kernel.o $(BUILD)/sdma_a2a_kernel.o $(BUILD)/main.o
 
 .PHONY: all clean run sdma_bench
 
@@ -54,6 +54,9 @@ $(BUILD)/gemm_a16w16_quad_subtile_kernel.o: gemm_a16w16_quad_subtile_kernel.cc g
 
 $(BUILD)/sdma_a2a_kernel.o: sdma_a2a_kernel.cc | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -c -o $@
+
+$(BUILD)/lsa_a2a_kernel.o: lsa_a2a_kernel.cc gemm_defs.h | $(BUILD)
+	$(HIPCC) $< $(COMMON_FLAGS) -Rpass-analysis=kernel-resource-usage -c -o $@
 
 $(BUILD)/main.o: main.cc gemm_defs.h | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -c -o $@

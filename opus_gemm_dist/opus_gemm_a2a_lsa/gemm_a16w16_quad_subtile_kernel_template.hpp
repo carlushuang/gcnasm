@@ -27,6 +27,38 @@ __device__ __attribute__((noinline)) void opus_chunk_sdma_submit(
 
 #endif
 
+static __device__ __attribute__((always_inline)) inline unsigned long long
+opus_direct_stripe_tile(
+    int tile_linear,
+    int num_tiles_m,
+    int tiles_per_peer,
+    int num_peer_tiles,
+    int scatter_tiles,
+    int my_rank) {
+    const int scatter_tile_count = scatter_tiles * num_tiles_m;
+    int m_tile;
+    int n_tile;
+    if (tile_linear < scatter_tile_count) {
+        const int m_stripe = num_tiles_m < 2 ? num_tiles_m : 2;
+        const int m_in_stripe = tile_linear % m_stripe;
+        int stripe_sequence = tile_linear / m_stripe;
+        const int peer_slot = stripe_sequence % num_peer_tiles;
+        stripe_sequence /= num_peer_tiles;
+        const int m_group = stripe_sequence % (num_tiles_m / m_stripe);
+        const int inner = stripe_sequence / (num_tiles_m / m_stripe);
+        const int peer = (peer_slot + my_rank) % num_peer_tiles;
+        m_tile = m_group * m_stripe + m_in_stripe;
+        n_tile = peer * tiles_per_peer + inner;
+    } else {
+        const int tail_linear = tile_linear - scatter_tile_count;
+        m_tile = tail_linear % num_tiles_m;
+        n_tile = scatter_tiles + tail_linear / num_tiles_m;
+    }
+    return (static_cast<unsigned long long>(
+                static_cast<unsigned int>(m_tile)) << 32) |
+           static_cast<unsigned int>(n_tile);
+}
+
 #ifndef OPUS_STORE_PIPELINE
 #define OPUS_STORE_PIPELINE 3
 #endif
@@ -271,10 +303,14 @@ inline __device__ auto make_layout_gc(int lane_id, int wave_id_m, int wave_id_n,
 
 } // namespace gemm_quad_subtile
 
-template<typename UserTraits, bool LocalStaging = false, bool ChunkFused = false>
+template<typename UserTraits,
+         bool LocalStaging = false,
+         bool ChunkFused = false,
+         bool DirectStriped = false>
 __global__ __launch_bounds__(UserTraits::BLOCK_SIZE, 2)
 void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
     static_assert(!ChunkFused || LocalStaging);
+    static_assert(!DirectStriped || (!LocalStaging && !ChunkFused));
     using namespace opus;
     using namespace gemm_quad_subtile;
     using opus::operator""_I;
@@ -329,23 +365,55 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
         }
         const int batch_id = tile_id / tile_count;
         const int tile_linear = tile_id - batch_id * tile_count;
-        const int m_tile = tile_linear % num_tiles_m;
+        int m_tile = tile_linear % num_tiles_m;
         const int n_tile_sequence = tile_linear / num_tiles_m;
         int n_tile = n_tile_sequence;
 #if OPUS_TILE_ORDER == 1
-        // Round-robin the scattered column tiles across destination peers:
-        // instead of processing all tiles for peer0, then peer1, etc., issue
-        // peer0/peer1/peer2/peer3 in sequence for each inner tile. This spreads
-        // remote LSA store bursts across xGMI peers and was the largest
-        // short-term win in testing (roughly +25% on M=8192,N=36864 with
-        // STORE_PIPELINE=3 and C_STORE_MODE=2).
+        // Round-robin scattered column tiles across destination peers. Chunk
+        // mode additionally makes each M chunk contiguous in the tile stream,
+        // so its PUT can start early, and rotates peers by source rank to avoid
+        // synchronized all-rank incast.
         if (kargs.a2a_n_shard && kargs.a2a_span > 0) {
             const int tiles_per_peer = kargs.a2a_n_shard / T::B_N;
             const int num_peer_tiles = kargs.a2a_span / kargs.a2a_n_shard;
             const int scatter_tiles = tiles_per_peer * num_peer_tiles;
-            if (tiles_per_peer > 0 && num_peer_tiles > 0 && n_tile_sequence < scatter_tiles) {
+            if constexpr (ChunkFused) {
+                const int scatter_tile_count = scatter_tiles * num_tiles_m;
+                if (tiles_per_peer > 0 && num_peer_tiles > 0 &&
+                    tile_linear < scatter_tile_count) {
+                    const int chunk_m_tiles = kargs.chunk_m_tiles_per_put;
+                    const int m_in_chunk = tile_linear % chunk_m_tiles;
+                    int chunk_sequence = tile_linear / chunk_m_tiles;
+                    const int peer_slot = chunk_sequence % num_peer_tiles;
+                    chunk_sequence /= num_peer_tiles;
+                    const int inner = chunk_sequence % tiles_per_peer;
+                    const int chunk_group = chunk_sequence / tiles_per_peer;
+                    const int peer =
+                        (peer_slot + kargs.peer_lsa_rank) % num_peer_tiles;
+                    m_tile = chunk_group * chunk_m_tiles + m_in_chunk;
+                    n_tile = peer * tiles_per_peer + inner;
+                } else if (tile_linear >= scatter_tile_count) {
+                    const int tail_linear = tile_linear - scatter_tile_count;
+                    m_tile = tail_linear % num_tiles_m;
+                    n_tile = scatter_tiles + tail_linear / num_tiles_m;
+                }
+            }
+            else if constexpr (DirectStriped) {
+                if (tiles_per_peer > 0 && num_peer_tiles > 0) {
+                    const unsigned long long mapped = opus_direct_stripe_tile(
+                        tile_linear, num_tiles_m, tiles_per_peer,
+                        num_peer_tiles, scatter_tiles,
+                        kargs.peer_lsa_rank);
+                    m_tile = static_cast<int>(mapped >> 32);
+                    n_tile = static_cast<int>(mapped);
+                }
+            }
+            else
+            if (tiles_per_peer > 0 && num_peer_tiles > 0 &&
+                n_tile_sequence < scatter_tiles) {
                 const int inner = n_tile_sequence / num_peer_tiles;
-                const int peer = n_tile_sequence - inner * num_peer_tiles;
+                const int peer =
+                    n_tile_sequence - inner * num_peer_tiles;
                 n_tile = peer * tiles_per_peer + inner;
             }
         }
@@ -737,8 +805,20 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
     if (lookahead_tile_id < total_tiles) {
         const int lookahead_batch_id = lookahead_tile_id / tile_count;
         const int lookahead_tile_linear = lookahead_tile_id - lookahead_batch_id * tile_count;
-        const int lookahead_row = (lookahead_tile_linear % num_tiles_m) * T::B_M;
-        const int lookahead_col = (lookahead_tile_linear / num_tiles_m) * T::B_N;
+        int lookahead_m_tile = lookahead_tile_linear % num_tiles_m;
+        int lookahead_n_tile = lookahead_tile_linear / num_tiles_m;
+        if constexpr (DirectStriped) {
+            const int tiles_per_peer = kargs.a2a_n_shard / T::B_N;
+            const int num_peer_tiles = kargs.a2a_span / kargs.a2a_n_shard;
+            const int scatter_tiles = tiles_per_peer * num_peer_tiles;
+            const unsigned long long mapped = opus_direct_stripe_tile(
+                lookahead_tile_linear, num_tiles_m, tiles_per_peer,
+                num_peer_tiles, scatter_tiles, kargs.peer_lsa_rank);
+            lookahead_m_tile = static_cast<int>(mapped >> 32);
+            lookahead_n_tile = static_cast<int>(mapped);
+        }
+        const int lookahead_row = lookahead_m_tile * T::B_M;
+        const int lookahead_col = lookahead_n_tile * T::B_N;
         auto lookahead_g_a = make_gmem(
             reinterpret_cast<const D_A*>(kargs.ptr_a) + lookahead_batch_id * kargs.stride_a_batch + lookahead_row * kargs.stride_a,
             (kargs.m - lookahead_row) * kargs.stride_a * sizeof(D_A));

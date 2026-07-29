@@ -51,18 +51,23 @@ extern "C" hipError_t hipDeviceGetAttribute(int* pi, hipDeviceAttribute_t attr, 
         }                                                                                  \
     } while (0)
 
-template<typename Traits, bool LocalStaging, bool ChunkFused = false>
+template<typename Traits,
+         bool LocalStaging,
+         bool ChunkFused = false,
+         bool DirectStriped = false>
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs);
 __global__ void opus_sdma_a2a_post_kernel(
     ccoWindow_t, ccoWindow_t, ccoDevComm, size_t, size_t);
 __global__ void opus_sdma_a2a_quiet_notify_kernel(ccoWindow_t, ccoDevComm);
+__global__ void opus_lsa_a2a_copy_kernel(
+    const bf16_t*, void*, bf16_t*, size_t, int, int);
 
-static constexpr size_t PER_RANK_VMM = 512ULL * 1024 * 1024;
-static constexpr int RANKS = 4;
+static constexpr size_t PER_RANK_VMM = 1024ULL * 1024 * 1024;
 static constexpr int WAVE_SIZE = 64;
 
 enum class OutputMode {
     Direct,
+    SplitLsa,
     Local,
     Sdma,
     ChunkSdma,
@@ -129,6 +134,7 @@ int main(int argc, char** argv) {
     int warmup = 3;
     int iters = 20;
     int chunk_m_tiles_per_put = 1;
+    bool chunk_m_tiles_explicit = false;
     OutputMode output_mode = OutputMode::Direct;
     CommSchedule comm_schedule = CommSchedule::Auto;
     for (int i = 1; i < argc; ++i) {
@@ -140,15 +146,17 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc) iters = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--chunk-m-tiles") == 0 && i + 1 < argc) {
             chunk_m_tiles_per_put = std::atoi(argv[++i]);
+            chunk_m_tiles_explicit = true;
         }
         else if (std::strcmp(argv[i], "--output-mode") == 0 && i + 1 < argc) {
             const char* value = argv[++i];
             if (std::strcmp(value, "direct") == 0) output_mode = OutputMode::Direct;
+            else if (std::strcmp(value, "split-lsa") == 0) output_mode = OutputMode::SplitLsa;
             else if (std::strcmp(value, "local") == 0) output_mode = OutputMode::Local;
             else if (std::strcmp(value, "sdma") == 0) output_mode = OutputMode::Sdma;
             else if (std::strcmp(value, "chunk-sdma") == 0) output_mode = OutputMode::ChunkSdma;
             else {
-                if (rank == 0) fprintf(stderr, "--output-mode must be direct, local, sdma, or chunk-sdma\n");
+                if (rank == 0) fprintf(stderr, "--output-mode must be direct, split-lsa, local, sdma, or chunk-sdma\n");
                 MPI_Abort(MPI_COMM_WORLD, 1);
             }
         }
@@ -164,11 +172,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (nranks != RANKS) {
-        if (rank == 0) fprintf(stderr, "requires exactly %d ranks\n", RANKS);
+    if (nranks != 4 && nranks != 8) {
+        if (rank == 0) fprintf(stderr, "requires exactly 4 or 8 ranks\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     const bool local_staging = output_mode == OutputMode::Local;
+    const bool split_lsa = output_mode == OutputMode::SplitLsa;
+    const bool staging_compute = local_staging || split_lsa;
     const bool sdma_pipeline = output_mode == OutputMode::Sdma;
     const bool chunk_fused = output_mode == OutputMode::ChunkSdma;
     const bool uses_sdma = sdma_pipeline || chunk_fused;
@@ -243,7 +253,7 @@ int main(int argc, char** argv) {
     CHECK_CCO(ccoWindowRegister(comm, recv_elems * sizeof(bf16_t), &win, &win_local));
     ccoWindow_t staging_win = nullptr;
     void* staging_local = nullptr;
-    if (local_staging) {
+    if (staging_compute) {
         CHECK_CCO(ccoWindowRegister(
             comm, staging_elems * sizeof(bf16_t), &staging_win, &staging_local));
     }
@@ -310,7 +320,7 @@ int main(int argc, char** argv) {
     kargs.tile_counter = d_tile_counter;
     // Compile-time output backends interpret this as either a CCO window
     // handle (direct) or the raw local compact staging pointer (local).
-    kargs.cco_c_win = local_staging
+    kargs.cco_c_win = staging_compute
         ? staging_local
         : (uses_sdma ? static_cast<void*>(sdma_staging[0])
                          : static_cast<void*>(win));
@@ -335,6 +345,12 @@ int main(int argc, char** argv) {
     const int num_tiles_n = ceil_div(N, Traits::B_N);
     const int total_tiles = num_tiles_m * num_tiles_n * kargs.batch;
     if (chunk_fused) {
+        if (!chunk_m_tiles_explicit) {
+            chunk_m_tiles_per_put = num_tiles_m < 8 ? num_tiles_m : 8;
+            while (num_tiles_m % chunk_m_tiles_per_put != 0) {
+                --chunk_m_tiles_per_put;
+            }
+        }
         if (chunk_m_tiles_per_put <= 0 ||
             num_tiles_m % chunk_m_tiles_per_put != 0) {
             if (rank == 0) {
@@ -358,15 +374,18 @@ int main(int argc, char** argv) {
         kargs.chunk_num_m_tiles = chunk_groups;
         kargs.chunk_m_tiles_per_put = chunk_m_tiles_per_put;
     }
-#if OPUS_PERSISTENT
     int cu_count = 0;
     CHECK_HIP(hipDeviceGetAttribute(&cu_count, hipDeviceAttributeMultiprocessorCount, rank % ndev));
+#if OPUS_PERSISTENT
     const int persistent_wgs = total_tiles < cu_count ? total_tiles : cu_count;
     dim3 grid(persistent_wgs, 1, 1);
 #else
     dim3 grid(total_tiles, 1, 1);
 #endif
     dim3 block(Traits::BLOCK_SIZE);
+    const int lsa_copy_wgs = (cu_count / nranks) * nranks;
+    dim3 lsa_copy_grid(lsa_copy_wgs > 0 ? lsa_copy_wgs : nranks);
+    dim3 lsa_copy_block(256);
 
     auto clear_buffers = [&]() {
         CHECK_HIP(hipMemset(win_local, 0, recv_elems * sizeof(bf16_t)));
@@ -401,11 +420,25 @@ int main(int argc, char** argv) {
 #if OPUS_PERSISTENT
         CHECK_HIP(hipMemset(d_tile_counter, 0, sizeof(unsigned int)));
 #endif
-        if (local_staging) {
+        if (staging_compute) {
             gemm_a16w16_quad_subtile_kernel<Traits, true><<<grid, block>>>(kargs);
+        } else if (nranks >= 8 && M >= 8192) {
+            gemm_a16w16_quad_subtile_kernel<Traits, false, false, true>
+                <<<grid, block>>>(kargs);
         } else {
             gemm_a16w16_quad_subtile_kernel<Traits, false><<<grid, block>>>(kargs);
         }
+        CHECK_HIP(hipGetLastError());
+    };
+    auto launch_split_lsa = [&]() {
+        launch();
+        opus_lsa_a2a_copy_kernel<<<lsa_copy_grid, lsa_copy_block>>>(
+            static_cast<const bf16_t*>(staging_local),
+            win,
+            static_cast<bf16_t*>(win_local),
+            static_cast<size_t>(M) * shard_n,
+            nranks,
+            rank);
         CHECK_HIP(hipGetLastError());
     };
 
@@ -413,7 +446,12 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipEventCreate(&start));
     CHECK_HIP(hipEventCreate(&stop));
     clear_buffers();
-    if (!uses_sdma) {
+    if (split_lsa) {
+        for (int i = 0; i < warmup; ++i) launch_split_lsa();
+        CHECK_HIP(hipEventRecord(start));
+        for (int i = 0; i < iters; ++i) launch_split_lsa();
+        CHECK_HIP(hipEventRecord(stop));
+    } else if (!uses_sdma) {
         for (int i = 0; i < warmup; ++i) launch();
         CHECK_HIP(hipEventRecord(start));
         for (int i = 0; i < iters; ++i) launch();
@@ -629,9 +667,11 @@ int main(int argc, char** argv) {
         const double flops = 2.0 * double(M) * double(N) * double(K) * double(nranks);
         const char* output_name = output_mode == OutputMode::Direct
             ? "direct"
-            : (output_mode == OutputMode::Local
-                   ? "local"
-                   : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma"));
+            : (output_mode == OutputMode::SplitLsa
+                   ? "split-lsa"
+                   : (output_mode == OutputMode::Local
+                          ? "local"
+                          : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma")));
         const char* schedule_name = overlap_epochs ? "parallel" : "serial";
         printf("quad_gemm_a2a output=%s schedule=%s chunk_m_tiles=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
                output_name,

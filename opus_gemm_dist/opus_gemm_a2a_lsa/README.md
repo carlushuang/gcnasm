@@ -53,6 +53,54 @@ mpirun --allow-run-as-root -n 4 ./build/quad_lsa_direct.exe \
 ```
 
 `--output-mode local` is the isolated GEMM + local compact-store measurement.
+`--output-mode split-lsa` is a serial two-kernel baseline: the same
+local-staging GEMM writes `[dst,M,shard_n]`, then a 16-byte vectorized LSA copy
+kernel writes each slab into `peer_recv[dst][source_rank]`.
+
+```bash
+mpirun --allow-run-as-root -n 4 ./build/quad_lsa_direct.exe \
+  --output-mode split-lsa \
+  -m 2048 -n 18432 -k 8192 --shard-n 2560 --warmup 10 --iters 30
+```
+
+At M=2048, three-run max-rank medians were 0.6147 ms Direct LSA,
+0.7184 ms Split LSA, and 0.6855 ms standard SDMA serial. The split path is
+16.9% slower than fused Direct LSA and 4.8% slower than SDMA serial, but
+provides an isolated LSA communication baseline. The copy kernel uses
+29 SGPR, 10 VGPR, no LDS/spill, and averages about 0.200 ms in the rank-0
+system trace:
+`build/traces/split_lsa_M2048/rank0_results.pftrace`.
+A correctness-checked seven-shape sweep (`warmup=10,iters=30`) measured
+max-rank latencies of 0.4463/0.7203/1.3029/1.8657/2.6315/3.7169/5.1608 ms
+for M=1024/2048/4096/6144/8192/12288/16384.
+
+## 8-rank Direct LSA scheduling
+
+At 8 ranks, the Direct kernel uses a separate compile-time instance for
+M>=8192. It processes two M tiles before rotating destination peer, rotates
+the peer order by source rank, and inlines the uniform tile decode. Smaller
+8-rank shapes and all 4-rank runs retain the original kernel.
+
+Five-run baseline and optimized max-rank medians
+(`warmup=10,iters=50`) were:
+
+- `M=8192`: 2.3015 -> 1.9018 ms (17.4% lower), Split LSA 2.5070 ms.
+- `M=12288`: 3.6243 -> 2.7721 ms (23.5% lower), Split LSA 3.5583 ms.
+- `M=16384`: 5.0546 -> 3.6959 ms (26.9% lower), Split LSA 4.8596 ms.
+
+The 4-rank M=2048/4096/8192 regression panel changed from
+0.6128/1.0551/1.9937 ms to 0.6116/1.0526/1.9971 ms; the worst change was a
+0.2% regression. The original Direct instance uses 226 VGPR and six SGPR
+spills, while the 8-rank striped instance uses 226 VGPR and 16 SGPR spills,
+and retains two waves/SIMD. Optimized rank-0 traces are under
+`build/traces/direct_ab_8rank/M{8192,16384}/inline/`.
+
+Rejected experiments are retained as results: source-rank rotation without
+M striping was <=1%; outlined stripe decode removed spills but was 12-15%
+slower than inline; rank-aware stagger was mixed below 1%;
+`STORE_PIPELINE=2` used 13 spills; and `C_STORE_MODE=1` regressed by roughly
+1-3%.
+
 For the SDMA pipeline, set the transport variables before MORI initialization:
 
 ```bash
@@ -144,31 +192,44 @@ hidden.
 
 ## Experimental chunk-fused SDMA
 
-`--output-mode chunk-sdma` submits one 1.25 MiB CCO SDMA PUT after the ten
-`256x256` output tiles for a `(destination, M-tile)` chunk are locally stored.
-It targets single-round latency and remains experimental:
+`--output-mode chunk-sdma` completes one M chunk across all of a peer's N
+tiles, then submits one CCO SDMA PUT while later chunks continue computing.
+The tile order rotates peers by source rank to avoid synchronized incast.
+The default groups up to eight 256-row tiles per PUT (four for M=1024);
+`--chunk-m-tiles` can still override it.
 
 ```bash
-mpirun --allow-run-as-root -n 4 ./build/quad_lsa_direct.exe \
+mpirun --allow-run-as-root -n 8 ./build/quad_lsa_direct.exe \
   --output-mode chunk-sdma \
-  --chunk-m-tiles 1 \
-  -m 2048 -n 18432 -k 8192 --shard-n 2560 --warmup 0 --iters 1
+  --comm-schedule serial \
+  -m 2048 -n 18432 -k 8192 --shard-n 2304 --warmup 10 --iters 50
 ```
 
-`--chunk-m-tiles=1/2/4/8` groups that many 256-row M tiles per PUT, producing
-1.25/2.5/5/10 MiB transfers respectively for the default shape.
+At 8 ranks, a five-run `chunk_m_tiles=1/8` sweep (`warmup=10,iters=50`)
+reduced max-rank latency by 5.2%/3.8%/6.0% at M=2048/4096/8192.
+Chunk-aware ordering then made each chunk ready earlier. The final three-run
+max-rank medians versus Standard SDMA serial were:
 
-Five-process-run single-round max-rank medians were:
+- `M=1024`: 0.4264 vs 0.4136 ms (Chunk 3.1% slower).
+- `M=2048`: 0.7034 vs 0.6829 ms (Chunk 3.0% slower).
+- `M=4096`: 1.1002 vs 1.2058 ms (Chunk 8.8% faster).
+- `M=6144`: 1.5037 vs 1.7433 ms (Chunk 13.7% faster).
+- `M=8192`: 1.9290 vs 2.4566 ms (Chunk 21.5% faster).
+- `M=12288`: 2.8674 vs 3.4557 ms (Chunk 17.0% faster).
+- `M=16384`: 3.7699 vs 4.7017 ms (Chunk 19.8% faster).
 
-- `M=1024`: direct 1.1972 ms, post SDMA 1.1661 ms, chunk SDMA 1.0430 ms.
-- `M=2048`: direct 1.6418 ms, post SDMA 1.3942 ms, chunk SDMA 1.4760 ms.
-- `M=4096`: direct 2.1058 ms, post SDMA 1.9473 ms, chunk SDMA 1.7362 ms.
+The 4-rank regression panel also improved: M=2048/4096/8192 changed from
+0.5936/0.9999/1.8570 ms with one-tile PUTs to
+0.5684/0.9353/1.7450 ms with the optimized default. The final chunk kernel
+uses 106 SGPR, 227 VGPR, 69 SGPR spills, no VGPR spills, and two waves/SIMD.
+At 8-rank M=16384, rank-0 traces show the fused kernel falling from 4.551 to
+3.886 ms and quiet/notify from 1.086 to 0.129 ms. Optimized traces are under
+`build/traces/serial_breakdown_8rank/M{2048,16384}/chunk-sdma_optimized/`.
 
-The mode improves single-round latency for `M=1024/4096`, but it should not be
-used for steady state: at `M=2048,warmup=5,iters=100` it measured about
-0.609 ms versus 0.519 ms for the normal double-buffered SDMA path. Inlining
-chunk submission also raises the chunk kernel to 61 SGPR spills, so `sdma`
-remains the recommended mode.
+Three rejected codegen/synchronization experiments are retained as results:
+removing the post-submit barrier deadlocked and raised spills to 78; inlining
+the CCO submit raised spills to 99; replacing CCO rank lookups with kernel
+arguments raised spills to 72 without a measurable latency gain.
 
 An experimental fused-quiet implementation let the last remote chunk submitter
 quiet all peer queues and publish ready counters inside the GEMM kernel,
@@ -180,24 +241,6 @@ spill count increased from 68 to 71. The quiet
 duration is mostly SDMA completion latency, and moving it into the GEMM adds
 resource pressure without enough remaining compute to hide it. The experiment
 was removed; these results are retained for reference.
-
-With `warmup=10,iters=50`, serial versus parallel max-rank medians were:
-
-- `M=1024`: standard SDMA 0.4430 vs 0.3423 ms; chunk-SDMA 0.3688 vs 0.3452 ms.
-- `M=2048`: standard SDMA 0.7091 vs 0.5249 ms; chunk-SDMA 0.6161 vs 0.5420 ms.
-- `M=4096`: standard SDMA 1.2558 vs 0.9096 ms; chunk-SDMA 1.0204 vs 0.9423 ms.
-
-Parallel scheduling improves both paths. Standard double-buffered SDMA remains
-the fastest choice on all tested shapes.
-
-At `M=2048,warmup=10,iters=50`, the chunk-size sweep measured:
-
-- Serial: 1.25/2.5/5/10 MiB = 0.6144/0.5947/0.5873/0.5841 ms.
-- Parallel: 1.25/2.5/5/10 MiB = 0.5419/0.5432/0.5419/0.5406 ms.
-
-Larger PUTs reduce serial packet/lock overhead. Parallel execution hides most
-of that overhead, so transfer size has little effect; 10 MiB was marginally
-best.
 
 ## Persistent tail-balance sweep
 

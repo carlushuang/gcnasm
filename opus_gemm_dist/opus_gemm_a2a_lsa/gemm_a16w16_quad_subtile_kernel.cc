@@ -6,20 +6,24 @@
 #include "gemm_defs.h"
 
 #ifndef __HIP_DEVICE_COMPILE__
-template<typename Traits, bool LocalStaging, bool ChunkFused>
+template<typename Traits, bool LocalStaging, bool ChunkFused, bool DirectStriped>
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {}
 template __global__ void gemm_a16w16_quad_subtile_kernel<
-    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, false, false>(opus_gemm_kargs);
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, false, false, false>(opus_gemm_kargs);
 template __global__ void gemm_a16w16_quad_subtile_kernel<
-    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, false>(opus_gemm_kargs);
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, false, false, true>(opus_gemm_kargs);
 template __global__ void gemm_a16w16_quad_subtile_kernel<
-    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, true>(opus_gemm_kargs);
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, false, false>(opus_gemm_kargs);
+template __global__ void gemm_a16w16_quad_subtile_kernel<
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, true, false>(opus_gemm_kargs);
 #else
 #include "gemm_a16w16_quad_subtile_kernel_template.hpp"
 template __global__ void gemm_a16w16_quad_subtile_kernel<
-    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, false, false>(opus_gemm_kargs);
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, false, false, false>(opus_gemm_kargs);
 template __global__ void gemm_a16w16_quad_subtile_kernel<
-    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, false>(opus_gemm_kargs);
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, false, false, true>(opus_gemm_kargs);
 template __global__ void gemm_a16w16_quad_subtile_kernel<
-    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, true>(opus_gemm_kargs);
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, false, false>(opus_gemm_kargs);
+template __global__ void gemm_a16w16_quad_subtile_kernel<
+    opus_gemm_traits<512, 256, 256, 64, bf16_t, bf16_t, bf16_t, float>, true, true, false>(opus_gemm_kargs);
 #endif
