@@ -19,6 +19,9 @@ using namespace mori::cco;
 #ifndef OPUS_PERSISTENT
 #define OPUS_PERSISTENT 1
 #endif
+#ifndef OPUS_SDMA_DIRECT_SELF_STORE
+#define OPUS_SDMA_DIRECT_SELF_STORE 0
+#endif
 
 #if !defined(HIP_INCLUDE_HIP_HIP_RUNTIME_API_H)
 extern "C" hipError_t hipGetDeviceCount(int* count);
@@ -316,6 +319,7 @@ int main(int argc, char** argv) {
     kargs.a2a_M = M;
     kargs.a2a_span = scatter_n;
     kargs.stride_c_full = N;
+    kargs.sdma_self_recv = uses_sdma ? static_cast<void*>(sdma_recv) : nullptr;
     kargs.m = M;
     kargs.n = N;
     kargs.k = K;
@@ -418,13 +422,16 @@ int main(int argc, char** argv) {
         uint64_t pipeline_epoch = 0;
         const size_t bytes_per_peer =
             static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
-        const size_t elems_per_peer = static_cast<size_t>(M) * shard_n;
+        [[maybe_unused]] const size_t elems_per_peer =
+            static_cast<size_t>(M) * shard_n;
         const size_t staging_bytes = staging_elems * sizeof(bf16_t);
         const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
+        hipStream_t transfer_stream =
+            overlap_epochs ? comm_stream : compute_stream;
 
         auto launch_sdma_epoch = [&]() {
             const int slot = static_cast<int>(pipeline_epoch & 1);
-            if (pipeline_epoch >= 2) {
+            if (overlap_epochs && pipeline_epoch >= 2) {
                 CHECK_HIP(hipStreamWaitEvent(
                     compute_stream, slot_free[slot], 0));
             }
@@ -437,24 +444,26 @@ int main(int argc, char** argv) {
             gemm_a16w16_quad_subtile_kernel<Traits, true>
                 <<<grid, block, 0, compute_stream>>>(kargs);
             CHECK_HIP(hipGetLastError());
-            CHECK_HIP(hipEventRecord(stage_ready[slot], compute_stream));
-
-            CHECK_HIP(hipStreamWaitEvent(
-                comm_stream, stage_ready[slot], 0));
-            opus_sdma_a2a_post_kernel<<<1, sdma_block, 0, comm_stream>>>(
+            if (overlap_epochs) {
+                CHECK_HIP(hipEventRecord(stage_ready[slot], compute_stream));
+                CHECK_HIP(hipStreamWaitEvent(
+                    transfer_stream, stage_ready[slot], 0));
+            }
+            opus_sdma_a2a_post_kernel<<<1, sdma_block, 0, transfer_stream>>>(
                 sdma_staging_win, sdma_recv_win, dev_comm,
                 static_cast<size_t>(slot) * staging_bytes, bytes_per_peer);
             CHECK_HIP(hipGetLastError());
+#if !OPUS_SDMA_DIRECT_SELF_STORE
             CHECK_HIP(hipMemcpyAsync(
                 sdma_recv + static_cast<size_t>(rank) * elems_per_peer,
                 sdma_staging[slot] + static_cast<size_t>(rank) * elems_per_peer,
-                bytes_per_peer, hipMemcpyDeviceToDevice, comm_stream));
-            opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, comm_stream>>>(
+                bytes_per_peer, hipMemcpyDeviceToDevice, transfer_stream));
+#endif
+            opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, transfer_stream>>>(
                 sdma_ready_win, dev_comm);
             CHECK_HIP(hipGetLastError());
-            CHECK_HIP(hipEventRecord(slot_free[slot], comm_stream));
-            if (!overlap_epochs) {
-                CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[slot], 0));
+            if (overlap_epochs) {
+                CHECK_HIP(hipEventRecord(slot_free[slot], transfer_stream));
             }
             ++pipeline_epoch;
         };
@@ -466,17 +475,20 @@ int main(int argc, char** argv) {
 
         CHECK_HIP(hipEventRecord(start, compute_stream));
         for (int i = 0; i < iters; ++i) launch_sdma_epoch();
-        CHECK_HIP(hipEventRecord(stop, comm_stream));
+        CHECK_HIP(hipEventRecord(stop, transfer_stream));
     } else {
         uint64_t round = 0;
-        const size_t bytes_per_peer =
+        [[maybe_unused]] const size_t bytes_per_peer =
             static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
-        const size_t elems_per_peer = static_cast<size_t>(M) * shard_n;
+        [[maybe_unused]] const size_t elems_per_peer =
+            static_cast<size_t>(M) * shard_n;
         const size_t staging_bytes = staging_elems * sizeof(bf16_t);
         const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
+        hipStream_t transfer_stream =
+            overlap_epochs ? comm_stream : compute_stream;
         auto launch_chunk_round = [&]() {
             const int slot = overlap_epochs ? static_cast<int>(round & 1) : 0;
-            if ((overlap_epochs && round >= 2) || (!overlap_epochs && round > 0)) {
+            if (overlap_epochs && round >= 2) {
                 CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[slot], 0));
             }
 #if OPUS_PERSISTENT
@@ -498,18 +510,22 @@ int main(int argc, char** argv) {
             gemm_a16w16_quad_subtile_kernel<Traits, true, true>
                 <<<grid, block, 0, compute_stream>>>(kargs);
             CHECK_HIP(hipGetLastError());
-            CHECK_HIP(hipEventRecord(stage_ready[slot], compute_stream));
-            CHECK_HIP(hipStreamWaitEvent(comm_stream, stage_ready[slot], 0));
+            if (overlap_epochs) {
+                CHECK_HIP(hipEventRecord(stage_ready[slot], compute_stream));
+                CHECK_HIP(hipStreamWaitEvent(
+                    transfer_stream, stage_ready[slot], 0));
+            }
+#if !OPUS_SDMA_DIRECT_SELF_STORE
             CHECK_HIP(hipMemcpyAsync(
                 sdma_recv + static_cast<size_t>(rank) * elems_per_peer,
                 sdma_staging[slot] + static_cast<size_t>(rank) * elems_per_peer,
-                bytes_per_peer, hipMemcpyDeviceToDevice, comm_stream));
-            opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, comm_stream>>>(
+                bytes_per_peer, hipMemcpyDeviceToDevice, transfer_stream));
+#endif
+            opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, transfer_stream>>>(
                 sdma_ready_win, dev_comm);
             CHECK_HIP(hipGetLastError());
-            CHECK_HIP(hipEventRecord(slot_free[slot], comm_stream));
-            if (!overlap_epochs) {
-                CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[slot], 0));
+            if (overlap_epochs) {
+                CHECK_HIP(hipEventRecord(slot_free[slot], transfer_stream));
             }
             ++round;
         };
@@ -519,7 +535,7 @@ int main(int argc, char** argv) {
         CHECK_CCO(ccoBarrierAll(comm));
         CHECK_HIP(hipEventRecord(start, compute_stream));
         for (int i = 0; i < iters; ++i) launch_chunk_round();
-        CHECK_HIP(hipEventRecord(stop, comm_stream));
+        CHECK_HIP(hipEventRecord(stop, transfer_stream));
     }
     CHECK_HIP(hipEventSynchronize(stop));
 

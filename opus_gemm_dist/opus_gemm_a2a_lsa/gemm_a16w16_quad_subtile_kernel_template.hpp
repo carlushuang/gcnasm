@@ -24,6 +24,7 @@ __device__ __attribute__((noinline)) void opus_chunk_sdma_submit(
         bytes, 0);
     __atomic_store_n(peer_lock + dst, 0u, __ATOMIC_RELEASE);
 }
+
 #endif
 
 #ifndef OPUS_STORE_PIPELINE
@@ -32,6 +33,9 @@ __device__ __attribute__((noinline)) void opus_chunk_sdma_submit(
 
 #ifndef OPUS_C_STORE_MODE
 #define OPUS_C_STORE_MODE 2
+#endif
+#ifndef OPUS_SDMA_DIRECT_SELF_STORE
+#define OPUS_SDMA_DIRECT_SELF_STORE 0
 #endif
 
 #ifndef OPUS_STORE_STAGGER_PHASES
@@ -367,12 +371,22 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
         eff_stride_c = kargs.a2a_n_shard;
         eff_col_bias = dst * kargs.a2a_n_shard;   // map global col -> local col (col%n_shard)
         if constexpr (LocalStaging) {
+#if OPUS_SDMA_DIRECT_SELF_STORE
+            if (dst == kargs.peer_lsa_rank &&
+                kargs.sdma_self_recv != nullptr) {
+                c_base = reinterpret_cast<D_C*>(kargs.sdma_self_recv) +
+                         static_cast<size_t>(kargs.peer_lsa_rank) *
+                             kargs.a2a_M * kargs.a2a_n_shard;
+            } else
+#endif
+            {
             // SDMA source layout: one contiguous [M, n_shard] slab per
             // destination. The later bulk PUT maps this slab to this rank's
             // row-block in the destination receive window.
             eff_row = row;
             c_base = reinterpret_cast<D_C*>(kargs.cco_c_win) +
                      static_cast<size_t>(dst) * kargs.a2a_M * kargs.a2a_n_shard;
+            }
         } else {
             int my = cco_lsa_rank(kargs.cco_c_win);
             eff_row = my * kargs.a2a_M + row;

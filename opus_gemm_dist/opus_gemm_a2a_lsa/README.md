@@ -71,6 +71,31 @@ the historical defaults: standard SDMA is parallel across epochs, while
 chunk-SDMA is serial. Parallel chunk-SDMA alternates the two staging slots so
 epoch `t` communication can overlap epoch `t+1` compute.
 
+Serial schedules use one HIP stream: memset, GEMM, SDMA post or
+in-kernel chunk PUTs, self-copy, and quiet/notify are submitted in order without
+cross-stream events.
+
+At `M=2048,warmup=10,iters=30`, three-run max-rank medians improved from
+0.7125 to 0.6861 ms for standard SDMA serial and from 0.6149 to 0.5942 ms for
+Chunk-SDMA serial (3.7% and 3.4%). Symbolized traces are under
+`build/traces/sdma_serial_single_stream_M2048/` and
+`build/traces/chunk_serial_single_stream_M2048/`; all timed dispatches use the
+same stream.
+
+An optional direct self-store experiment removes the post-GEMM self-shard D2D
+copy by routing `dst == my_rank` C stores directly into the receive layout:
+
+```bash
+make BUILD=build_self_direct SDMA_DIRECT_SELF_STORE=1
+```
+
+It is disabled by default. With the current single-stream serial path, the
+`M=2048,warmup=10,iters=30` three-run median changes versus the normal copy
+path ranged from a 0.2% regression to a 1.1% improvement. M=4096/8192 sweeps
+were also mixed (roughly -0.7% to +1.3%) with no benefit that consistently grew
+with copy size. The local-staging GEMM SGPR spill count increased from 6 to 11,
+and chunk-SDMA from 68 to 76, so the experiment remains opt-in.
+
 The current MORI SDMA setup assumes local rank `r` is bound to visible device
 ordinal `r`; the SDMA results below were collected on physical GPUs 0–3.
 `02_gda_put.cpp` is an IBGDA/RDMA example, not the SDMA API used here.
@@ -144,6 +169,17 @@ used for steady state: at `M=2048,warmup=5,iters=100` it measured about
 0.609 ms versus 0.519 ms for the normal double-buffered SDMA path. Inlining
 chunk submission also raises the chunk kernel to 61 SGPR spills, so `sdma`
 remains the recommended mode.
+
+An experimental fused-quiet implementation let the last remote chunk submitter
+quiet all peer queues and publish ready counters inside the GEMM kernel,
+removing the standalone quiet/notify dispatch. At
+`M=2048,warmup=10,iters=30`, three-run max-rank medians regressed from
+0.5952 to 0.6059 ms in the current single-stream serial mode and from
+0.5550 to 0.6143 ms in parallel mode (1.8% and 10.7%). The chunk kernel SGPR
+spill count increased from 68 to 71. The quiet
+duration is mostly SDMA completion latency, and moving it into the GEMM adds
+resource pressure without enough remaining compute to hide it. The experiment
+was removed; these results are retained for reference.
 
 With `warmup=10,iters=50`, serial versus parallel max-rank medians were:
 
