@@ -77,6 +77,14 @@ mpirun --allow-run-as-root -n 8 ./build/a2a_gemm_lsa.exe \
 an equivalent shorthand for profiling scripts; modes 0 through 3 retain their
 existing behavior.
 
+`serial` uses one non-blocking HIP stream. SDMA post, the rank-local D2D copy,
+quiet/notify, ready polling, and Mode 2 GEMM are enqueued in order without
+cross-stream event waits. `fused` uses that same one-stream host setup, but
+overlaps SDMA and GEMM inside its single kernel. Only parallel and intra create
+separate communication and compute streams. At M=6144, 8-rank generic A2A, a
+same-session run changed serial E2E from 0.8067 to 0.7847 ms (2.7% lower);
+parallel remained within run-to-run variation.
+
 `intra` is an experimental same-epoch stream-fused schedule. It records a
 `stage_ready[slot]` event after SDMA post and the self D2D copy, then launches
 a compile-time Mode 3 GEMM. The GEMM computes the local K shard first and uses
@@ -93,10 +101,11 @@ broadcast/generic inputs, and dynamic M shapes. The retained fast path uses the
 normal hardware workgroup scheduler for all tile counts; a cooperative
 persistent variant was correct but slower for large M.
 
-Each send and receive window contains two slots. A `comm_ready[slot]` event
-makes the completed SDMA slot visible to the compute stream, and a
-`recv_free[slot]` event prevents the communication stream from overwriting a
-slot still consumed by GEMM. Each remote peer has one SDMA queue. The post
+Each send and receive window contains two slots. In parallel/intra mode, a
+`comm_ready[slot]` event makes the completed SDMA slot visible to the compute
+stream, and a `recv_free[slot]` event prevents the communication stream from
+overwriting a slot still consumed by GEMM. Serial mode relies on in-stream
+ordering instead. Each remote peer has one SDMA queue. The post
 kernel submits one PUT per remote peer, and the quiet/notify kernel waits for
 that peer queue before incrementing the destination's 64-bit ready counter.
 The destination polling kernel acquires every remote source counter for the
@@ -215,6 +224,13 @@ rank-local copy, and quiet/notify interval lies inside the previous GEMM
 interval, confirming cross-epoch overlap. The decoded advanced thread trace is
 under `build/traces/sdma_parallel_att/` in its generated `ui_output_*`
 directory.
+
+The single-stream serial capture is in
+`build/traces/sdma_serial_single_stream/rank0_results.pftrace`. Its kernel CSV
+shows post, quiet/notify, ready polling, and Mode 2 GEMM all on stream 1.
+The corresponding fused capture is in
+`build/traces/sdma_fused_single_stream_M2048/rank0_results.pftrace`; the fused
+kernel and its isolated comm/compute measurements also all use stream 1.
 
 The intra traces are in
 `build/traces/sdma_intra_M2048_single/rank0_results.pftrace` and

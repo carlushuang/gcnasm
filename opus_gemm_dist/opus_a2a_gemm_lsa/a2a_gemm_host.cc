@@ -70,7 +70,10 @@ template<typename Traits, int Mode, bool Persistent,
 __global__ void a2a_gemm_lsa_kernel(Kargs kargs);
 template<typename Traits>
 __global__ void a2a_lsa_comm_kernel(opus_a2a_gemm_kargs kargs);
-template<typename Traits, bool LocalStaging = false, bool ChunkFused = false>
+template<typename Traits,
+         bool LocalStaging = false,
+         bool ChunkFused = false,
+         bool DirectStriped = false>
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs);
 __global__ void a2a_sdma_post_kernel(
     ccoWindow_t, ccoWindow_t, ccoDevComm,
@@ -419,6 +422,10 @@ int main(int argc, char** argv) {
     ccoDevComm* sdma_fused_dev_comm = nullptr;
     opus_a2a_gemm_sdma_fused_comm_state* sdma_fused_states = nullptr;
     bool sdma_dev_comm_created = false;
+    const bool sdma_shared_stream =
+        mode == 4 &&
+        (comm_schedule == SdmaSchedule::Serial ||
+         comm_schedule == SdmaSchedule::Fused);
     hipStream_t sdma_comm_stream = nullptr, sdma_compute_stream = nullptr;
     hipEvent_t sdma_stage_ready[2] = {nullptr, nullptr};
     hipEvent_t sdma_comm_ready[2] = {nullptr, nullptr};
@@ -466,8 +473,12 @@ int main(int argc, char** argv) {
         }
         CHECK_HIP(hipStreamCreateWithFlags(
             &sdma_comm_stream, hipStreamNonBlocking));
-        CHECK_HIP(hipStreamCreateWithFlags(
-            &sdma_compute_stream, hipStreamNonBlocking));
+        if (sdma_shared_stream) {
+            sdma_compute_stream = sdma_comm_stream;
+        } else {
+            CHECK_HIP(hipStreamCreateWithFlags(
+                &sdma_compute_stream, hipStreamNonBlocking));
+        }
         for (int slot = 0; slot < 2; ++slot) {
             CHECK_HIP(hipEventCreateWithFlags(
                 &sdma_stage_ready[slot], hipEventDisableTiming));
@@ -669,8 +680,10 @@ int main(int argc, char** argv) {
         launch_sdma_quiet_notify(slot);
     };
     auto launch_sdma_compute = [&](int slot) {
-        CHECK_HIP(hipStreamWaitEvent(
-            sdma_compute_stream, sdma_comm_ready[slot], 0));
+        if (!sdma_shared_stream) {
+            CHECK_HIP(hipStreamWaitEvent(
+                sdma_compute_stream, sdma_comm_ready[slot], 0));
+        }
         opus_a2a_gemm_kargs slot_args = kargs;
         slot_args.recv_a_local =
             static_cast<char*>(sdma_recv_local) +
@@ -900,10 +913,6 @@ int main(int argc, char** argv) {
             if (comm_schedule != SdmaSchedule::Serial && epoch >= 2) {
                 CHECK_HIP(hipStreamWaitEvent(
                     sdma_comm_stream, sdma_recv_free[slot], 0));
-            } else if (comm_schedule == SdmaSchedule::Serial && epoch > 0) {
-                const int previous_slot = static_cast<int>((epoch - 1) & 1);
-                CHECK_HIP(hipStreamWaitEvent(
-                    sdma_comm_stream, sdma_recv_free[previous_slot], 0));
             }
             if (comm_schedule == SdmaSchedule::Intra) {
                 launch_sdma_intra_comm(slot);
@@ -916,7 +925,9 @@ int main(int argc, char** argv) {
         };
         for (int i = 0; i < warmup; ++i) launch_sdma_epoch();
         CHECK_HIP(hipStreamSynchronize(sdma_comm_stream));
-        CHECK_HIP(hipStreamSynchronize(sdma_compute_stream));
+        if (!sdma_shared_stream) {
+            CHECK_HIP(hipStreamSynchronize(sdma_compute_stream));
+        }
         CHECK_CCO(ccoBarrierAll(comm));
         CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
         for (int i = 0; i < iters; ++i) launch_sdma_epoch();
@@ -1103,7 +1114,9 @@ int main(int argc, char** argv) {
             CHECK_HIP(hipEventDestroy(sdma_recv_free[slot]));
         }
         CHECK_HIP(hipStreamDestroy(sdma_comm_stream));
-        CHECK_HIP(hipStreamDestroy(sdma_compute_stream));
+        if (!sdma_shared_stream) {
+            CHECK_HIP(hipStreamDestroy(sdma_compute_stream));
+        }
         if (sdma_fused_states) {
             CHECK_HIP(hipFree(sdma_fused_states));
         }
