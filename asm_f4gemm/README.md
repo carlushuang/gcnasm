@@ -8,6 +8,15 @@ D[M, N] (bf16) = alpha * A[M, K] (mxfp4) * B[N, K] (mxfp4)^T + beta * C[M, N]
 
 This directory contains **host launch logic only**. It re-implements the relevant parts of aiter's `csrc/py_itfs_cu/asm_gemm_a4w4.cu` with no torch and no aiter dependency, so the kernels can be poked at, verified against a CPU reference, and benchmarked from a plain HIP program.
 
+## Learning resources for AMDGPU assembly
+
+If you want to read or hand-edit the kernels (see the round-trip section below), these are the references worth having open:
+
+- **[CDNA4 Instruction Set Architecture](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf)** (AMD, PDF) — the gfx950 ISA: every instruction's encoding and semantics, the MFMA/MXFP4 tables, `s_waitcnt` rules, LDS/buffer details. The single most important document. (ISAs for other architectures are collected on the [ROCm GPU architecture page](https://rocm.docs.amd.com/en/latest/reference/gpu-arch/index.html).)
+- **[LLVM AMDGPU usage](https://llvm.org/docs/AMDGPUUsage.html)** — how the LLVM assembler/disassembler talks about AMD GPUs: target IDs (`gfx950:xnack+`), code object versions, the `.amdhsa_kernel` / `.amdgpu_metadata` directives, and ELF note layouts. This is the ground truth for what `co2asm.py` reconstructs and what `clang -x assembler` accepts.
+- **[AMD CDNA 4 architecture whitepaper](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf)** (AMD, PDF) — the machine model: CUs, matrix pipes, LDS, cache hierarchy. Background for why kernels are pipelined the way they are.
+- The disassembler/assembler themselves: `llvm-objdump -d --triple=amdgcn-amd-amdhsa --mcpu=gfx950` and `clang -x assembler` (both under `/opt/rocm/llvm/bin`) — when in doubt, assemble a snippet and disassemble it back.
+
 ## Dependency: the code objects live in aiter
 
 The `.co` files are **not** copied into gcnasm. Point the driver at aiter's tree:
