@@ -480,6 +480,7 @@ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {
     };
 
     auto stagger_store_phase = [&]() {
+        if (!kargs.a2a_n_shard) return;  // stagger only helps remote LSA scatter, skip for local store
 #if OPUS_STORE_STAGGER_PHASES > 0 && OPUS_STORE_STAGGER_DELAY > 0
         // Lightly phase-shift C stores so persistent CTAs do not all hit the
         // same remote-store path at once. Best tested setting was 16 phases and
