@@ -306,23 +306,76 @@ nothing here is idealized. MFMA groups are counted per half: **g1 = mfma#1–32 
 K-half 0), g2 = mfma#33–64 (m 0–7, K-half 1), g3 = mfma#65–96 (m 8–15, K-half 0), g4 = mfma#97–128
 (m 8–15, K-half 1)** — i.e. the "2 groups of 64" of §4.3 split at the K-half boundary.
 
-#### 4.4.1 Issue-order timeline of one loop half (body A, half 1 = kstep j, j even, LDS buf0)
+#### 4.4.1 Issue-order timeline of one loop half (body A; line numbers = .s file)
 
-| lines | MFMA | VMEM issued (kstep targeted) | LDS reads issued (data targeted) | sync | what it overlaps / hides |
-|---|---|---|---|---|---|
-| 654–659 | g1 #1 (656) | — | — | **W1** `s_waitcnt vmcnt(10) lgkmcnt(0)` (655), `s_barrier` (657), 2 nop | retires B(j) → `v[136:167]`, `v208/209` valid (see 4.4.2 for the count); `lgkmcnt(0)` lands the g1/g2 fragment reads issued last half; barrier publishes kstep-j+1 A LDS writes across waves |
-| 660–706 | g1 #2–32 | B(j+1): 8 × `buffer_load_dwordx4` → `v[168:199]` quads, one per 4-MFMA slot (661, 667, …, 703) | 8 × `ds_read_b128` → `v[72:119]`, buf0 blocks 4–5 = A(j) m-frags 8–11 (663, 669, …, 705) | — | each B load issued ~126 MFMAs before first use (g1 of next half); ds_reads land ~32–60 MFMAs before g3 consumes them |
-| 707–762 | g2 #33–64 | ScaleB(j+1): 2 × `buffer_load_dword` → `v210`, `v211` (709, 715) | 8 × `ds_read_b128` → `v[88:135]`, buf0 blocks 6–7 = A(j) m-frags 12–15 (711, …, 742); 4 × `ds_read_b32` → `v204–207`, ScaleA(j) for m 8–15 (746–758) | — | scalar tail folded in: guard `s62/s64` (720–732), bump B ptr `s16/s18` (736–744), bump ScaleB ptr `s24/s26` (748–756) |
-| 763–767 | g3 #65 (764) | — | — | **W2** `s_waitcnt vmcnt(15) lgkmcnt(0)` (763), `s_barrier` (765), 2 nop | retires A(j+1) loads #1–5 (buf1 blocks 0–3 + ScaleA slot 1); `lgkmcnt(0)` drains all buf0 reads → buf0 is now free to be overwritten by A(j+2) |
-| 768–828 | g3 #66–96 | A(j+2) → buf0: 7 × `buffer_load_dwordx4 … lds` (`v212–v218`), each preceded by its `s_add_u32 m0` (768–828) | 15 × `ds_read_b128` → `v[8:67]` from **buf1** = A(j+1) g1/g2 fragments (770, 774, …, 826) | — | A(j+2) writes race ahead ~2 ksteps before use; buf1 reads feed next half's g1/g2 |
-| 829–882 | g4 #97–128 | A(j+2): `v219` (836, m0 at 832); ScaleA(j+2): `v222`,`v223` (804/844, m0 at 800/840) | last buf1 read `v[68:71]` (830); 4 × `ds_read_b32` → `v200–203`, ScaleA(j+1) for m 0–7 (834–846) | — | scalar tail: guard `s61/s63` (848–857), bump A ptr `s12/s14` (860–866), bump ScaleA ptr `s20/s22` (869–875, body A only), `s50 += 0x100` + exit test + `s_cbranch_scc0 label_0EC7` (877–882) |
+```
+--- half 1 (lines 654-882): kstep j (even); MFMA operands from LDS buf0;
+--- B(j) live in v[136:167]+v208/209 --------------------------------------------
+654  label_041A:
+655  W1 waitcnt vmcnt(10) lgkmcnt(0)   <- retires B(j) VGPR loads (ledger in 4.4.2);
+                                        drains last half's ds_reads into v[8:71]
+656  g1 mfma #1
+657     barrier + 2 nop                <- publishes kstep-(j+1) A LDS writes x-wave
+660  g1 mfma #2..32  (m-frags 0-7, K-half 0)
+        per 4-mfma slot: 1x buffer_load_dwordx4 B(j+1) -> v[168:199]  (661..703)
+                         1x ds_read_b128 A(j) m8..11 (buf0) -> v[72:119] (663..705)
+                                        <- B: ~126 mfma before 1st use (next g1);
+                                           ds: operands for g3/g4
+707  g2 mfma #33..64 (m-frags 0-7, K-half 1)
+        buffer_load_dword ScaleB(j+1) -> v210,v211              (709, 715)
+        ds_read_b128 A(j) m12..15 (buf0) -> v[88:135]           (711..742)
+        ds_read_b32  ScaleA(j) m8..15  -> v204..v207            (746..758)
+        scalar: guard s62/s64 (720..732); bump B ptr s16/s18 (736..744);
+                bump ScaleB ptr s24/s26 (748..756)
+763  W2 waitcnt vmcnt(15) lgkmcnt(0)   <- retires A(j+1) loads #1-5 (buf1 blocks
+                                        0-3 + scale slot 1); drains all buf0 reads
+764  g3 mfma #65
+765     barrier + 2 nop                <- buf0 now free; A(j+1) blk 0-3 visible x-wave
+768  g3 mfma #66..96 (m-frags 8-15, K-half 0)
+        per slot: s_add m0; buffer_load_dwordx4 lds A(j+2) -> buf0
+                  v212..v218 (768..828); ScaleA(j+2) v222 (804, m0@800)
+        ds_read_b128 A(j+1) g1/g2 frags (buf1) -> v[8:67]         (770..826)
+                                        <- A: ~2 ksteps before use; feeds next g1/g2
+829  g4 mfma #97..128 (m-frags 8-15, K-half 1)
+        A(j+2) tail: v219 (836, m0@832); ScaleA(j+2) v223 (844, m0@840)
+        ds_read_b128 v[68:71] (830)
+        ds_read_b32 ScaleA(j+1) m0-7 -> v200..v203                (834..846)
+        scalar: guard s61/s63 (848..857); bump A ptr s12/s14 (860..866);
+                bump ScaleA ptr s20/s22 (869..875, body A only);
+                s50 += 0x100 + exit test + cbranch 0EC7 (877..882)
 
-Half 2 (lines 883–1111, kstep j+1, buf1) is the mirror image: B registers swap
-(`v[168:199]`/`v210`,`v211` in use, `v[136:167]`/`v208`,`v209` reloaded for kstep j+2), LDS roles
-swap (g3/g4 MFMA operands read from buf1 at 891–986 while A(j+3) streams into buf0 at
-`m0 = s59 + 0x8400 + …`, lines 996–1072), scale ds_read offsets shift by +2048, and the same
-guards/bumps/exit repeat (948–1110) with `s_branch label_041A` at 1111. The next iteration's
-W1 at 655 then retires B(j+2) and the A(j+2) stragglers — closing the ring.
+--- half 2 (lines 883-1111): kstep j+1 (odd); MFMA operands from LDS buf1;
+--- B(j+1) live in v[168:199]+v210/211 ------------------------------------------
+883  W3 waitcnt vmcnt(10) lgkmcnt(0)   <- retires A(j+1) #6-10 + B(j+1) loads
+884  g1 mfma #1
+885     barrier + 2 nop
+888  g1 mfma #2..32
+        per 4-mfma slot: 1x buffer_load_dwordx4 B(j+2) -> v[136:167]  (889..931)
+                         1x ds_read_b128 A(j+1) m8..11 (buf1) -> v[72:119] (891..933)
+935  g2 mfma #33..64
+        buffer_load_dword ScaleB(j+2) -> v208,v209                (937, 943)
+        ds_read_b128 A(j+1) m12..15 (buf1) -> v[88:135]           (939..970)
+        ds_read_b32  ScaleA(j+1) m8..15 -> v204..v207             (974..986)
+        scalar: guard s62/s64 (948..960); bump B (964..972); bump ScaleB (976..984)
+991  W4 waitcnt vmcnt(15) lgkmcnt(0)   <- retires A(j+2) loads #1-5; drains buf1 reads
+992  g3 mfma #65
+993     barrier + 2 nop                <- buf1 now free for A(j+3)
+996  g3 mfma #66..96
+        per slot: s_add m0; buffer_load_dwordx4 lds A(j+3) -> buf1
+                  (m0 = s59+0x8400+..) v212..v218 (996..1056); ScaleA(j+3) v222 (1032)
+        ds_read_b128 A(j+2) g1/g2 frags (buf0) -> v[8:67]         (998..1054)
+1057 g4 mfma #97..128
+        A(j+3) tail: v219 (1064, m0@1060); ScaleA(j+3) v223 (1072, m0@1068)
+        ds_read_b128 v[68:71] (1058)
+        ds_read_b32 ScaleA(j+2) m0-7 -> v200..v203                (1062..1074)
+        scalar: guard s61/s63 (1076..1085); bump A (1088..1094);
+                bump ScaleA (1097..1103); s50 += 0x100 + exit (1105..1110)
+1111 s_branch label_041A               <- next W1 retires B(j+2) + A(j+2) stragglers
+```
+
+Half 2 is the exact mirror of half 1: B register banks swap (`v[136:167]`↔`v[168:199]`,
+`v208/209`↔`v210/211`), LDS buffer roles swap (buf0↔buf1, A-lds `m0` bases shift by `0x8400`),
+scale ds_read offsets shift by +2048, and the guards/bumps/exit repeat with the same structure.
 
 Register time-multiplexing worth noting before editing: `v[8:71]` carries kstep j's m-frags 0–7
 during g1/g2 and is **re-read with kstep j+1's m-frags 0–7 during g3/g4** — safe only because
@@ -336,33 +389,34 @@ Load bundles are issued in units of 10 VMEM ops (8 data + 2 scale), so every `vm
 multiple-of-5 boundary. The outstanding-VMEM ledger (steady state, kstep j, half 1):
 
 ```
-                 issue site          retires at
- B(j)   →VGPR   half 2 of kstep j-1  W1  of half 1 (kstep j)     [~1 kstep ahead]
- A(j+1) →LDS    half 2 of kstep j-1  #1–5: W2 of half 1;  #6–10: W3 of half 2
- B(j+1) →VGPR   g1/g2 of half 1      W3  of half 2               [~1 kstep ahead]
- A(j+2) →LDS    g3/g4 of half 1      #1–5: W2 of half 2 (kstep j+1); #6–10: W1 of next iter
-                                                              [A runs ~2 ksteps ahead]
+              issue site            retires at
+B(j)   ->VGPR half 2 of kstep j-1   W1 of half 1 (kstep j)        [~1 kstep ahead]
+A(j+1) ->LDS  half 2 of kstep j-1   #1-5: W2 of half 1; #6-10: W3 of half 2
+B(j+1) ->VGPR g1/g2 of half 1       W3 of half 2                  [~1 kstep ahead]
+A(j+2) ->LDS  g3/g4 of half 1       #1-5: W2 of half 2 (kstep j+1);
+                                    #6-10: W1 of next iteration   [~2 ksteps ahead]
 
 outstanding ledger (half 1 of kstep j):
-  at W1 (655):  B(j)[10] + A(j+1)[10]            = 20  → vmcnt(10) retires B(j)        → 10 left
-  after g1/g2:  + B(j+1)[10]                     = 20  → vmcnt(15) retires A(j+1)#1–5  → 15 left
-  after g3/g4:  + A(j+2)[10]                     = 25
-  at W3 (883):                                 = 25  → vmcnt(10) retires A(j+1)#6–10
-                                                       + B(j+1)                        → 10 left
-  …and symmetrically for half 2. (Iteration 0 differs only in that the prologue's
-  vmcnt(25)/vmcnt(10) pair at 582/655 plays the same role for ksteps 0/1.)
+  at W1 (655):  B(j)[10] + A(j+1)[10]  = 20 -> vmcnt(10) retires B(j)       -> 10 left
+  after g1/g2:  + B(j+1)[10]           = 20 -> vmcnt(15) retires A(j+1)#1-5 -> 15 left
+  after g3/g4:  + A(j+2)[10]           = 25
+  at W3 (883):                         = 25 -> vmcnt(10) retires A(j+1)#6-10
+                                               + B(j+1)                     -> 10 left
+  ...and symmetrically for half 2. (Iteration 0 differs only in that the
+  prologue's vmcnt(25)/vmcnt(10) pair at 582/655 plays the same role for
+  ksteps 0/1.)
 ```
 
 Residency snapshot at a point inside g3 of half 1 (kstep j):
 
 ```
-MFMA pipe      : kstep j    — B(j) v[136:167]+v208/209, A(j) m8-15 v[72:135] (buf0 copy)
-VGPR, incoming : kstep j+1  — B(j+1) v[168:199]+v210/211 in flight (issued g1/g2)
-LDS buf(j&1)   : kstep j    — fully resident, being drained; A(j+2) overwriting it NOW
-LDS buf(1-j&1) : kstep j+1  — blocks 0–3 + scale1 complete (retired at W2), blocks 4–7
-                              + scale2 in flight (retire at W3); g1/g2 fragments being
-                              copied out to v[8:71] right now
-global → LDS   : kstep j+2  — A(j+2)+ScaleA(j+2) in flight (issued g3/g4)
+MFMA pipe      : kstep j   - B(j) v[136:167]+v208/209, A(j) m8-15 v[72:135]
+VGPR, incoming : kstep j+1 - B(j+1) v[168:199]+v210/211 in flight (issued g1/g2)
+LDS buf(j&1)   : kstep j   - fully resident, being drained; A(j+2) overwriting NOW
+LDS buf(1-j&1) : kstep j+1 - blocks 0-3 + scale1 complete (retired at W2),
+                             blocks 4-7 + scale2 in flight (retire at W3);
+                             g1/g2 fragments being copied out to v[8:71] now
+global -> LDS  : kstep j+2 - A(j+2)+ScaleA(j+2) in flight (issued g3/g4)
 ```
 
 So: **A's global path is 2 ksteps deep, B's is 1 kstep deep, and the LDS read path is 1–2 MFMA
@@ -375,24 +429,44 @@ Same 256-MFMA skeleton, same barrier/waitcnt positions relative to MFMA index (w
 of each half: body A lines 655/763/883/991, body B lines 1115/1223/1342/1450 — note body B's four
 waits are *not* at 883/991, it has its own four), same operand sequence. Two real differences:
 
-1. **Slot order swap in every 4-MFMA memory slot.** Body A issues `buffer_load` *before* the
-   paired `ds_read` (e.g. after mfma#2: load; after mfma#3: read), body B issues `ds_read`
-   *before* `buffer_load` (after mfma#2: read; after mfma#3: load) — systematic across all 32
-   slots of both halves (verified by diffing the non-MFMA instruction positions). In the g3/g4
-   triple slots the same idea shows as body A `m0 → ds_read → load-lds` vs body B `ds_read →
-   m0 → ds_read → load-lds` (body B's reads lead by one slot). Interpretation (not provable from
-   the .s): since the `s_barrier`s force all 4 waves through each W-point together, the two wave
-   pairs run the same barrier interval concurrently, and the swapped slot order makes wave-pair
-   A's VMEM bursts coincide with wave-pair B's LDS bursts and vice versa — staggering pressure on
-   the two memory pipes instead of doubling it. This is the most plausible reason the source
-   duplicated the loop at all.
+1. **Slot order swap in every 4-MFMA memory slot**, systematic across all 32 slots of both
+   halves (verified by diffing the non-MFMA instruction positions between the bodies):
+
+```
+one 4-mfma memory slot, each body:
+ mfma idx | body A (waves 0/1)        | body B (waves 2/3)
+ ---------+---------------------------+---------------------------
+ #2       | buffer_load B -> VGPR     | ds_read A (LDS)
+ #3       | ds_read A (LDS)           | buffer_load B -> VGPR
+ #6       | buffer_load ...           | ds_read ...
+ #7       | ds_read ...               | buffer_load ...
+  ...     | (load leads every slot)   | (read leads every slot)
+
+g3/g4 triple slot:
+ body A:  s_add m0 ; ds_read ; buffer_load-lds
+ body B:  ds_read ; s_add m0 ; ds_read ; buffer_load-lds  <- reads lead by 1 slot
+```
+
+   Interpretation (not provable from the .s): since the `s_barrier`s force all 4 waves through
+   each W-point together, the two wave pairs run the same barrier interval concurrently, and the
+   swapped slot order makes wave-pair A's VMEM bursts coincide with wave-pair B's LDS bursts and
+   vice versa — staggering pressure on the two memory pipes instead of doubling it. This is the
+   most plausible reason the source duplicated the loop at all.
+
 2. **The `s22` asymmetry** (already in §4.1): body A decrements ScaleA num_records twice per body
    (lines 875 and the second-half peer at 1103), body B never. Body B is consequently 2
    instructions shorter per body (199 vs 201 non-MFMA ops).
 
 Lockstep mechanics: `s_barrier` is workgroup-scope, so the two bodies' schedules interleave at
 barrier granularity — within a barrier interval each pair free-runs (drifting by the few cycles
-of their instruction-count and memory-latency differences), and every ~64 MFMAs they re-converge.
+of their instruction-count and memory-latency differences), and every ~64 MFMAs they re-converge:
+
+```
+waves 0/1: W1 ==g1/g2== W2 ==g3/g4== W3 ==g1/g2== W4 ==g3/g4== W1 ...
+waves 2/3: W1 ==g1/g2== W2 ==g3/g4== W3 ==g1/g2== W4 ==g3/g4== W1 ...
+           |<- free-run; A-pair hits VMEM while B-pair hits LDS ->|
+```
+
 Nothing in either body may legally depend on finer inter-wave-pair timing than that; the
 cooperative LDS scheme (all waves write disjoint chunks of the same A/ScaleA slabs, all waves read
 the whole slab) is safe precisely because the only cross-wave consumers sit behind a barrier whose
@@ -401,22 +475,28 @@ preceding `vmcnt`/`lgkmcnt` has retired the writes.
 #### 4.4.4 Latency-hiding budget (order-of-magnitude estimates, not measured)
 
 Using the CDNA4 ISA timing for `v_mfma_scale_f32_16x16x128_f8f6f4` with both operands FP4 =
-**16 cycles** (the "16 or 32" table entry; 32 only if an operand is FP8), one 32-MFMA group
-≈ 512 cycles, one half (128 MFMAs) ≈ 2050 cycles ≈ ~1 μs at ~2 GHz, per wave (the 4 waves have
-independent matrix pipes and proceed in parallel between barriers).
+**16 cycles** (the "16 or 32" table entry; 32 only if an operand is FP8). Per wave (the 4 waves
+have independent matrix pipes and proceed in parallel between barriers):
 
-- **B path (1 kstep deep):** a B quad issued in g1 is awaited at W3 ≈ 64–96 MFMAs later
-  ≈ 1000–1500 cycles ≈ 0.5–0.7 μs. Covers L2 hits with wide margin; covers DRAM latency only
-  because loads stream continuously (the wait is for the *oldest* bundle, issued earliest).
-- **A path (2 ksteps deep):** first 5 loads of a bundle awaited ≈ 1 half after issue
-  (≈ 1000–1450 cycles), the rest ≈ 1.5 halves (≈ 2000+ cycles ≈ 1 μs), and first MFMA use is
-  another half beyond that. This is the margin that absorbs DRAM bandwidth spikes.
-- **LDS ds_read path:** fragments are read 1–2 MFMA groups (≈ 512–1000 cycles) before use against
-  a ~30–40 cycle LDS latency — massively over-provisioned; the `lgkmcnt(0)`s are structural
-  (buffer-recycle) guards, not latency-critical waits.
-- **Net:** the loop is matrix-pipe issue-bound by design; the waitcnts should almost never stall
-  in steady state. Any edit that adds VMEM ops changes the outstanding ledger in 4.4.2 and the
-  `vmcnt(10/15)` constants must be re-derived the same way.
+```
+1 group = 32 mfma ~ 512 cyc;  1 half = 128 mfma ~ 2050 cyc ~ 1 us @ ~2 GHz
+
+B path (1 kstep deep) : issue g1/g2, awaited at W3 ~64-96 mfma later
+                        ~1000-1500 cyc (~0.5-0.7 us) of cover.
+                        L2 hits trivial; DRAM covered only because loads stream
+                        (the wait is for the OLDEST bundle, issued earliest).
+A path (2 ksteps deep): first 5 loads awaited ~1 half after issue (~1000-1450 cyc),
+                        rest ~1.5 halves (~2000+ cyc ~ 1 us), first mfma use yet
+                        another half later. Margin that absorbs DRAM spikes.
+LDS ds_read path      : read 1-2 groups (~512-1000 cyc) before use vs ~30-40 cyc
+                        LDS latency - massively over-provisioned; the lgkmcnt(0)s
+                        are structural (buffer-recycle) guards, not timing waits.
+net                   : loop is matrix-pipe issue-bound by design; the waitcnts
+                        should ~never stall in steady state.
+```
+
+Any edit that adds or removes VMEM ops changes the outstanding ledger in 4.4.2, and the
+`vmcnt(10/15)` constants must be re-derived the same way.
 
 ---
 
