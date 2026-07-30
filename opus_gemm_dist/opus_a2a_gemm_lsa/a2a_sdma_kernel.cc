@@ -19,7 +19,7 @@ __global__ void a2a_sdma_post_kernel(
     if (lane != 0 || peer >= dev_comm.lsaSize || peer == dev_comm.lsaRank) return;
 
     const size_t src_chunk = input_mode == 1 ? static_cast<size_t>(peer) : 0;
-    ccoSdma{dev_comm}.put<ccoCoopThread, true>(
+    ccoSdma{dev_comm}.put<ccoCoopThread>(
         peer,
         recv_win,
         recv_slot_offset + static_cast<size_t>(dev_comm.lsaRank) * bytes_per_peer,

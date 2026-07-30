@@ -244,7 +244,7 @@ __device__ inline void fused_sdma_post_all(
                 ? static_cast<uint64_t>(peer)
                 : 0;
         mori::cco::ccoSdma{*state->sdma_dev_comm}
-            .put<mori::cco::ccoCoopThread, true>(
+            .put<mori::cco::ccoCoopThread>(
                 peer,
                 state->sdma_recv_win,
                 state->sdma_recv_slot_offset +

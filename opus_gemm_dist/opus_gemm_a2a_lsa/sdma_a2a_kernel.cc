@@ -16,8 +16,8 @@ __global__ void opus_sdma_a2a_post_kernel(
     const int dst = static_cast<int>(threadIdx.x) / kWaveSize;
     if (lane != 0 || dst >= dev_comm.lsaSize || dst == dev_comm.lsaRank) return;
 
-    ccoSdma sdma{dev_comm};
-    sdma.put<ccoCoopThread, true>(
+    mori::cco::ccoSdma sdma{dev_comm};
+    sdma.put<mori::cco::ccoCoopThread>(
         dst, recv_win, static_cast<size_t>(dev_comm.lsaRank) * bytes_per_peer,
         staging_win, staging_slot_offset + static_cast<size_t>(dst) * bytes_per_peer,
         bytes_per_peer, 0);
@@ -29,7 +29,7 @@ __global__ void opus_sdma_a2a_quiet_notify_kernel(
     const int peer = static_cast<int>(threadIdx.x) / kWaveSize;
     if (lane != 0 || peer >= dev_comm.lsaSize || peer == dev_comm.lsaRank) return;
 
-    ccoSdma{dev_comm}.quietQueue(peer, 0);
+    mori::cco::ccoSdma{dev_comm}.quietQueue(peer, 0);
     auto* remote_ready = static_cast<uint64_t*>(ccoGetLsaPeerPtr(
         ready_win, peer,
         static_cast<size_t>(dev_comm.lsaRank) * sizeof(uint64_t)));

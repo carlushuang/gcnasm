@@ -105,9 +105,13 @@ Each send and receive window contains two slots. In parallel/intra mode, a
 `comm_ready[slot]` event makes the completed SDMA slot visible to the compute
 stream, and a `recv_free[slot]` event prevents the communication stream from
 overwriting a slot still consumed by GEMM. Serial mode relies on in-stream
-ordering instead. Each remote peer has one SDMA queue. The post
-kernel submits one PUT per remote peer, and the quiet/notify kernel waits for
-that peer queue before incrementing the destination's 64-bit ready counter.
+ordering instead. Each remote peer has one SDMA queue. The post kernel submits
+one no-signal PUT per remote peer, and the quiet/notify kernel drains that peer
+queue through MORI's rptr/wptr state before incrementing the destination's
+64-bit ready counter. No caller-owned expected-signal state or PUT-tail local
+atomic is required by the current MORI API. The host also clears MORI's benign
+`hipErrorPeerAccessAlreadyEnabled` status after DevComm creation before the
+first kernel launch.
 The destination polling kernel acquires every remote source counter for the
 slot's target epoch before recording `comm_ready`.
 The rank-local shard is copied into the same receive layout with an asynchronous
@@ -118,32 +122,35 @@ ready counter, so stale-slot reuse is observable rather than masked by identical
 inputs.
 
 The reported `comm_ms` and `compute_ms` are isolated per-epoch measurements.
+They now use one common warmed baseline before any schedule-specific workload,
+so serial/fused/parallel/intra measure the same comm and Mode 2 compute paths
+from equivalent stream, slot, and counter state.
 `pipeline_total_ms` is the end-to-end average across the requested epochs; for
 parallel mode it includes fill and drain, so use multiple warm iterations and
 at least 30 measured iterations for steady-state comparisons.
 
 On 8 ranks with generic A2A, `N=K=8192`, `K_SHARD=1024`,
-`--warmup 10 --iters 30`, the end-to-end results were:
+`--warmup 10 --iters 30`, the latest-MORI three-run medians were:
 
-- `M=2048`: fused LSA 0.3375 ms, split LSA 0.4618 ms, RCCL 0.4496 ms,
-  SDMA serial 0.3014 ms, SDMA parallel 0.2389 ms.
-- `M=6144`: fused LSA 0.8901 ms, split LSA 1.0070 ms, RCCL 1.0393 ms,
-  SDMA serial 0.8028 ms, SDMA parallel 0.6183 ms.
-- `M=16384`: fused LSA 2.2953 ms, split LSA 2.4239 ms, RCCL 2.7045 ms,
-  SDMA serial 2.0471 ms, SDMA parallel 1.5465 ms.
+- `M=2048`: fused LSA 0.3108 ms, split LSA 0.4196 ms, RCCL 0.4291 ms,
+  SDMA serial 0.2783 ms, SDMA parallel 0.2194 ms.
+- `M=6144`: fused LSA 0.9061 ms, split LSA 1.0102 ms, RCCL 1.0287 ms,
+  SDMA serial 0.7780 ms, SDMA parallel 0.6124 ms.
+- `M=16384`: fused LSA 2.2905 ms, split LSA 2.4332 ms, RCCL 2.6409 ms,
+  SDMA serial 2.0211 ms, SDMA parallel 1.5927 ms.
 
-The fused-LSA values are medians of three runs. SDMA parallel reduces latency
-by 29.2% to 32.6% versus fused LSA and by 20.7% to 24.5% versus SDMA serial,
-passing the retention gate on all three shapes. Mode 4 is retained as an
+Every displayed mode is the median of three process runs. Across all seven
+tested M values, SDMA parallel reduces latency by 27.0% to 33.1% versus fused
+LSA and by 19.6% to 22.1% versus SDMA serial. Mode 4 is retained as an
 opt-in backend; mode 0 remains the default because SDMA requires an SDMA-enabled
 MORI build and runtime configuration. Broadcast and generic inputs both pass
 serial and parallel correctness on 4 and 8 ranks.
 
-The isolated SDMA breakdown for the same three generic shapes was:
+The matching isolated SDMA breakdown medians were:
 
-- `M=2048`: 0.0909 ms communication and 0.1998 ms compute.
-- `M=6144`: 0.2359 ms communication and 0.6018 ms compute.
-- `M=16384`: 0.5715 ms communication and 1.5201 ms compute.
+- `M=2048`: 0.0925 ms communication and 0.2084 ms compute.
+- `M=6144`: 0.2329 ms communication and 0.6078 ms compute.
+- `M=16384`: 0.5753 ms communication and 1.5250 ms compute.
 
 The parallel steady state approaches the compute duration because the next
 epoch's SDMA transfer is shorter than the current epoch's GEMM.
@@ -152,15 +159,15 @@ The experimental intra schedule passed 4/8-rank broadcast and generic A2A
 correctness, including odd/even epoch alternation and pipeline-output checks.
 For 8-rank generic A2A, `N=K=8192`, `warmup=10,iters=30`:
 
-- `M=1024`: parallel 0.1721 ms, intra 0.1763 ms.
-- `M=2048`: 0.2411 ms vs 0.2488 ms; a repeated median was 0.2417 vs 0.2443 ms.
-- `M=4096`: 0.4265 ms vs 0.4371 ms.
-- `M=6144`: 0.6160 ms vs 0.6355 ms.
-- `M=8192`: 0.8016 ms vs 0.8330 ms.
-- `M=12288`: 1.1734 ms vs 1.2229 ms.
-- `M=16384`: 1.5352 ms vs 1.6121 ms.
+- `M=1024`: parallel 0.1705 ms, intra 0.1715 ms.
+- `M=2048`: 0.2194 ms vs 0.2271 ms.
+- `M=4096`: 0.4102 ms vs 0.4279 ms.
+- `M=6144`: 0.6124 ms vs 0.6289 ms.
+- `M=8192`: 0.8010 ms vs 0.8297 ms.
+- `M=12288`: 1.1959 ms vs 1.2256 ms.
+- `M=16384`: 1.5927 ms vs 1.6387 ms.
 
-Intra is 2.4% to 5.0% slower than parallel in steady state, averaging 3.5%,
+Intra is 0.6% to 4.3% slower than parallel in steady state, averaging 2.9%,
 because Mode 3 adds per-shard readiness synchronization while cross-epoch
 parallel already hides the full communication phase. For warmed
 `M=2048,broadcast,iters=1`, three-run medians were 0.4627 ms serial,
@@ -172,12 +179,12 @@ The literal fused schedule also passed 4/8-rank broadcast/generic correctness,
 dynamic M, and 1000-epoch stress. Static launch and the fused-only relaxed-ready
 protocol reduced the generic full E2E at
 `M=1024/2048/4096/6144/8192/12288/16384` to
-0.2029/0.2760/0.5250/0.7772/1.0305/1.5327/2.0417 ms.
+0.2067/0.2709/0.5216/0.7727/1.0228/1.5308/2.0447 ms.
 
 The dynamic-M remote fused results were
 0.2049/0.2635/0.5388/0.7750/1.0686/1.5363/2.0491 ms. The two literal kernels
 are now within roughly 5% on every shape: local is faster at five shapes and
-remote is faster at M=2048/6144. Both remain substantially slower than the
+remote is faster at M=1024/2048. Both remain substantially slower than the
 current cross-epoch parallel schedule, so literal fused stays experimental and
 `auto` remains parallel.
 
@@ -201,9 +208,9 @@ Additional fused A/B tests found:
 
 The clean gfx950 resource build reports:
 
-- `a2a_sdma_post_kernel`: 50 SGPR, 29 VGPR, 0 LDS, no SGPR/VGPR spill,
+- `a2a_sdma_post_kernel`: 30 SGPR, 32 VGPR, 0 LDS, no SGPR/VGPR spill,
   8 waves/SIMD.
-- `a2a_sdma_quiet_notify_kernel`: 18 SGPR, 10 VGPR, 0 LDS, no spill,
+- `a2a_sdma_quiet_notify_kernel`: 14 SGPR, 10 VGPR, 0 LDS, no spill,
   8 waves/SIMD.
 - `a2a_sdma_wait_ready_kernel`: 18 SGPR, 4 VGPR, 0 LDS, no spill,
   8 waves/SIMD.

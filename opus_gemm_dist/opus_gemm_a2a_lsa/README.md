@@ -169,8 +169,8 @@ For `M=2048, N=18432, K=8192, shard_n=2560`, three alternating
 
 - Direct LSA, `Tlsa`: 0.6136 ms.
 - GEMM plus local compact store, `Tlocal`: 0.5033 ms.
-- Three concurrent 10 MiB CCO SDMA PUTs, `Tsdma`: 0.1851 ms, or about
-  158.2 GiB/s per rank, including sender and receiver completion signals.
+- Three concurrent 10 MiB CCO SDMA PUTs, `Tsdma`: 0.1834 ms, or about
+  159.8 GiB/s per rank, including queue quiet and ready notification.
 
 Thus `max(Tlocal,Tsdma)=0.5033 ms`, an 18.0% predicted reduction from direct
 LSA, passed the 3% integration gate. Direct and local GEMM variants both use
@@ -221,7 +221,8 @@ max-rank medians versus Standard SDMA serial were:
 The 4-rank regression panel also improved: M=2048/4096/8192 changed from
 0.5936/0.9999/1.8570 ms with one-tile PUTs to
 0.5684/0.9353/1.7450 ms with the optimized default. The final chunk kernel
-uses 106 SGPR, 227 VGPR, 69 SGPR spills, no VGPR spills, and two waves/SIMD.
+uses 106 SGPR, 226 VGPR, 48 SGPR spills, no VGPR spills, and two waves/SIMD
+with the current MORI CCO headers.
 At 8-rank M=16384, rank-0 traces show the fused kernel falling from 4.551 to
 3.886 ms and quiet/notify from 1.086 to 0.129 ms. Optimized traces are under
 `build/traces/serial_breakdown_8rank/M{2048,16384}/chunk-sdma_optimized/`.
@@ -230,6 +231,15 @@ Three rejected codegen/synchronization experiments are retained as results:
 removing the post-submit barrier deadlocked and raised spills to 78; inlining
 the CCO submit raised spills to 99; replacing CCO rank lookups with kernel
 arguments raised spills to 72 without a measurable latency gain.
+
+The current MORI SDMA API drains queues from rptr/wptr state and no longer
+requires caller-owned expected-signal counters. GEMM->A2A therefore uses
+no-signal PUTs and relies on `quietQueue` plus its explicit ready window.
+Compared with the previous MORI build, the post kernel changed from
+50 SGPR/29 VGPR to 29 SGPR/32 VGPR, quiet/notify from 18 to 14 SGPR, and the
+chunk kernel from 69 to 48 SGPR spills. Three-run M=2048/M=8192 integrated
+latencies stayed within about 1%, while isolated 4-rank 10 MiB and 8-rank
+9 MiB transfers measured 0.1834/0.1682 ms.
 
 An experimental fused-quiet implementation let the last remote chunk submitter
 quiet all peer queues and publish ready counters inside the GEMM kernel,

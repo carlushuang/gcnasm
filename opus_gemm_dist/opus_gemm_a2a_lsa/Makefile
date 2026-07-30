@@ -53,7 +53,7 @@ $(BUILD)/gemm_a16w16_quad_subtile_kernel.o: gemm_a16w16_quad_subtile_kernel.cc g
 	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -D__HIPCC_RTC__ -Rpass-analysis=kernel-resource-usage -save-temps=obj -c -o $@
 
 $(BUILD)/sdma_a2a_kernel.o: sdma_a2a_kernel.cc | $(BUILD)
-	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -c -o $@
+	$(HIPCC) $< $(COMMON_FLAGS) $(HOST_INCLUDES) -Rpass-analysis=kernel-resource-usage -c -o $@
 
 $(BUILD)/lsa_a2a_kernel.o: lsa_a2a_kernel.cc gemm_defs.h | $(BUILD)
 	$(HIPCC) $< $(COMMON_FLAGS) -Rpass-analysis=kernel-resource-usage -c -o $@

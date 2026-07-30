@@ -97,6 +97,11 @@ int main(int argc, char** argv) {
     reqs.sdmaQueueCount = 1;
     ccoDevComm dev_comm{};
     CHECK_CCO(ccoDevCommCreate(comm, &reqs, &dev_comm));
+    const hipError_t cco_hip_status = hipGetLastError();
+    if (cco_hip_status != hipSuccess &&
+        cco_hip_status != hipErrorPeerAccessAlreadyEnabled) {
+        CHECK_HIP(cco_hip_status);
+    }
     if (dev_comm.sdma.sdmaNumQueue == 0 || !dev_comm.sdma.deviceHandles) {
         if (rank == 0) fprintf(stderr, "MORI did not materialize SDMA queues\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
@@ -143,14 +148,8 @@ int main(int argc, char** argv) {
     int mismatches = 0;
     std::vector<unsigned char> recv_host(buffer_bytes);
     std::vector<uint64_t> ready_host(static_cast<size_t>(nranks));
-    std::vector<uint64_t> cco_signal_host;
     CHECK_HIP(hipMemcpy(
         recv_host.data(), recv_local, buffer_bytes, hipMemcpyDeviceToHost));
-    cco_signal_host.resize(
-        static_cast<size_t>(nranks) * dev_comm.sdma.sdmaNumQueue);
-    CHECK_HIP(hipMemcpy(
-        cco_signal_host.data(), dev_comm.sdma.signalBuf,
-        cco_signal_host.size() * sizeof(uint64_t), hipMemcpyDeviceToHost));
     CHECK_HIP(hipMemcpy(
         ready_host.data(), ready_local,
         static_cast<size_t>(nranks) * sizeof(uint64_t),
@@ -172,19 +171,6 @@ int main(int argc, char** argv) {
                 ++mismatches;
             }
         }
-    }
-    const uint64_t expected_peer = static_cast<uint64_t>(warmup + iters);
-    for (int peer = 0; peer < nranks; ++peer) {
-        if (peer == rank) continue;
-        const uint64_t got =
-            cco_signal_host[static_cast<size_t>(peer) * dev_comm.sdma.sdmaNumQueue];
-        if (got == expected_peer) continue;
-        if (mismatches < 8) {
-            printf("[rank %d] completion mismatch peer=%d got=%llu expected=%llu\n",
-                   rank, peer, static_cast<unsigned long long>(got),
-                   static_cast<unsigned long long>(expected_peer));
-        }
-        ++mismatches;
     }
     const uint64_t expected_remote = static_cast<uint64_t>(warmup + iters);
     for (int src = 0; src < nranks; ++src) {

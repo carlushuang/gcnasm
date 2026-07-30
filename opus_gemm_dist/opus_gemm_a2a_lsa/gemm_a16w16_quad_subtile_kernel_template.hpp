@@ -18,7 +18,7 @@ __device__ __attribute__((noinline)) void opus_chunk_sdma_submit(
         __builtin_amdgcn_s_sleep(1);
     }
     auto* dev_comm = static_cast<mori::cco::ccoDevComm*>(dev_comm_ptr);
-    mori::cco::ccoSdma{*dev_comm}.put<mori::cco::ccoCoopThread, true>(
+    mori::cco::ccoSdma{*dev_comm}.put<mori::cco::ccoCoopThread>(
         dst, reinterpret_cast<mori::cco::ccoWindow_t>(recv_win_ptr), dst_offset,
         reinterpret_cast<mori::cco::ccoWindow_t>(staging_win_ptr), src_offset,
         bytes, 0);

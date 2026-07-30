@@ -459,15 +459,12 @@ int main(int argc, char** argv) {
         reqs.gdaCounterCount = 0;
         reqs.sdmaQueueCount = 1;
         CHECK_CCO(ccoDevCommCreate(comm, &reqs, &sdma_dev_comm));
+        const hipError_t cco_hip_status = hipGetLastError();
+        if (cco_hip_status != hipSuccess &&
+            cco_hip_status != hipErrorPeerAccessAlreadyEnabled) {
+            CHECK_HIP(cco_hip_status);
+        }
         sdma_dev_comm_created = true;
-        CHECK_HIP(hipMemset(
-            sdma_dev_comm.sdma.signalBuf, 0,
-            static_cast<size_t>(nranks) *
-                sdma_dev_comm.sdma.sdmaNumQueue * sizeof(uint64_t)));
-        CHECK_HIP(hipMemset(
-            sdma_dev_comm.sdma.expectSignals, 0,
-            static_cast<size_t>(nranks) *
-                sdma_dev_comm.sdma.sdmaNumQueue * sizeof(uint64_t)));
         if (comm_schedule == SdmaSchedule::Fused) {
             sdma_fused_dev_comm = ccoDevCommCopyToDevice(&sdma_dev_comm);
         }
@@ -810,7 +807,7 @@ int main(int argc, char** argv) {
         }
     };
     auto validate_sdma_ready_counts =
-        [&](int pipeline_epochs, int extra_epochs, int extra_passes,
+        [&](int pipeline_epochs, int common_epochs, int fused_extra_epochs,
             const char* label) {
             auto h_ready = std::make_unique<uint64_t[]>(
                 2 * static_cast<size_t>(nranks));
@@ -822,9 +819,10 @@ int main(int argc, char** argv) {
                 const uint64_t expected =
                     static_cast<uint64_t>(
                         (pipeline_epochs + (slot == 0 ? 1 : 0)) / 2) +
-                    static_cast<uint64_t>(extra_passes) *
-                        static_cast<uint64_t>(
-                            (extra_epochs + (slot == 0 ? 1 : 0)) / 2);
+                    static_cast<uint64_t>(
+                        (common_epochs + (slot == 0 ? 1 : 0)) / 2) +
+                    static_cast<uint64_t>(
+                        (fused_extra_epochs + (slot == 0 ? 1 : 0)) / 2);
                 for (int source = 0; source < nranks; ++source) {
                     const uint64_t got =
                         h_ready[static_cast<size_t>(slot) * nranks + source];
@@ -850,6 +848,41 @@ int main(int argc, char** argv) {
     CHECK_HIP(hipEventCreate(&stop));
     float total_ms = 0.0f, comm_total_ms = 0.0f, compute_total_ms = 0.0f;
     float fused_kernel_total_ms = 0.0f;
+    if (mode == 4) {
+        for (int i = 0; i < warmup; ++i) {
+            const int slot = i & 1;
+            if (!sdma_shared_stream && i >= 2) {
+                CHECK_HIP(hipStreamWaitEvent(
+                    sdma_comm_stream, sdma_recv_free[slot], 0));
+            }
+            launch_sdma_comm(slot);
+            launch_sdma_compute(slot);
+        }
+        CHECK_HIP(hipStreamSynchronize(sdma_comm_stream));
+        if (!sdma_shared_stream) {
+            CHECK_HIP(hipStreamSynchronize(sdma_compute_stream));
+        }
+        CHECK_CCO(ccoBarrierAll(comm));
+        CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
+        for (int i = 0; i < iters; ++i) {
+            launch_sdma_comm(i & 1);
+        }
+        CHECK_HIP(hipEventRecord(comm_stop, sdma_comm_stream));
+        CHECK_HIP(hipEventSynchronize(comm_stop));
+        CHECK_HIP(hipEventElapsedTime(
+            &comm_total_ms, start, comm_stop));
+
+        CHECK_CCO(ccoBarrierAll(comm));
+        CHECK_HIP(hipEventRecord(compute_start, sdma_compute_stream));
+        for (int i = 0; i < iters; ++i) {
+            launch_sdma_compute(i & 1);
+        }
+        CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
+        CHECK_HIP(hipEventSynchronize(stop));
+        CHECK_HIP(hipEventElapsedTime(
+            &compute_total_ms, compute_start, stop));
+        CHECK_CCO(ccoBarrierAll(comm));
+    }
     if (mode == 4 && comm_schedule == SdmaSchedule::Fused) {
         uint64_t epoch = 0;
         for (int i = 0; i < warmup; ++i) {
@@ -873,7 +906,7 @@ int main(int argc, char** argv) {
             validate_output_samples(
                 (warmup + iters - 1) & 1, "literal_fused");
             validate_sdma_ready_counts(
-                warmup + iters, 0, 0, "literal_fused");
+                warmup + iters, warmup + iters, 0, "literal_fused");
         }
 
         for (int i = 0; i < iters; ++i) {
@@ -890,22 +923,6 @@ int main(int argc, char** argv) {
             fused_kernel_total_ms += kernel_ms;
             CHECK_CCO(ccoBarrierAll(comm));
         }
-        CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
-        for (int i = 0; i < iters; ++i) {
-            launch_sdma_comm(i & 1);
-        }
-        CHECK_HIP(hipEventRecord(comm_stop, sdma_comm_stream));
-        CHECK_HIP(hipEventSynchronize(comm_stop));
-        CHECK_HIP(hipEventElapsedTime(&comm_total_ms, start, comm_stop));
-        CHECK_CCO(ccoBarrierAll(comm));
-        CHECK_HIP(hipEventRecord(compute_start, sdma_compute_stream));
-        for (int i = 0; i < iters; ++i) {
-            launch_sdma_compute(i & 1);
-        }
-        CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
-        CHECK_HIP(hipEventSynchronize(stop));
-        CHECK_HIP(hipEventElapsedTime(
-            &compute_total_ms, compute_start, stop));
     } else if (mode == 4) {
         uint64_t epoch = 0;
         auto launch_sdma_epoch = [&]() {
@@ -940,25 +957,8 @@ int main(int argc, char** argv) {
             validate_output_samples(
                 (warmup + iters - 1) & 1, "intra_pipeline");
             validate_sdma_ready_counts(
-                warmup + iters, 0, 0, "intra_pipeline");
+                warmup + iters, warmup + iters, 0, "intra_pipeline");
         }
-        CHECK_CCO(ccoBarrierAll(comm));
-        CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
-        for (int i = 0; i < iters; ++i) {
-            launch_sdma_comm(i & 1);
-        }
-        CHECK_HIP(hipEventRecord(comm_stop, sdma_comm_stream));
-        CHECK_HIP(hipEventSynchronize(comm_stop));
-        CHECK_HIP(hipEventElapsedTime(&comm_total_ms, start, comm_stop));
-        CHECK_CCO(ccoBarrierAll(comm));
-        CHECK_HIP(hipEventRecord(compute_start, sdma_compute_stream));
-        for (int i = 0; i < iters; ++i) {
-            launch_sdma_compute(i & 1);
-        }
-        CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
-        CHECK_HIP(hipEventSynchronize(stop));
-        CHECK_HIP(hipEventElapsedTime(
-            &compute_total_ms, compute_start, stop));
     } else if (mode == 3) {
         for (int i = 0; i < warmup; ++i) {
             clear_for_launch();
@@ -1054,8 +1054,8 @@ int main(int argc, char** argv) {
     if (validate) {
         if (mode == 4) {
             validate_sdma_ready_counts(
-                warmup + iters, iters,
-                comm_schedule == SdmaSchedule::Fused ? 2 : 1,
+                warmup + iters, warmup + iters,
+                comm_schedule == SdmaSchedule::Fused ? iters : 0,
                 "final");
         }
         validate_output_samples(

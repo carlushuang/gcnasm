@@ -293,6 +293,11 @@ int main(int argc, char** argv) {
         reqs.gdaCounterCount = 0;
         reqs.sdmaQueueCount = 1;
         CHECK_CCO(ccoDevCommCreate(comm, &reqs, &dev_comm));
+        const hipError_t cco_hip_status = hipGetLastError();
+        if (cco_hip_status != hipSuccess &&
+            cco_hip_status != hipErrorPeerAccessAlreadyEnabled) {
+            CHECK_HIP(cco_hip_status);
+        }
         dev_comm_created = true;
         if (dev_comm.sdma.sdmaNumQueue == 0 || !dev_comm.sdma.deviceHandles) {
             if (rank == 0) fprintf(stderr, "MORI did not materialize SDMA queues\n");
@@ -400,16 +405,8 @@ int main(int argc, char** argv) {
             CHECK_HIP(hipMemset(
                 sdma_recv, 0, recv_elems * sizeof(bf16_t)));
             CHECK_HIP(hipMemset(
-                dev_comm.sdma.signalBuf, 0,
-                static_cast<size_t>(nranks) *
-                    dev_comm.sdma.sdmaNumQueue * sizeof(uint64_t)));
-            CHECK_HIP(hipMemset(
                 sdma_ready_local, 0,
                 static_cast<size_t>(nranks) * sizeof(uint64_t)));
-            CHECK_HIP(hipMemset(
-                dev_comm.sdma.expectSignals, 0,
-                static_cast<size_t>(nranks) *
-                    dev_comm.sdma.sdmaNumQueue * sizeof(uint64_t)));
         }
         CHECK_HIP(hipMemset(d_tail, 0, local_c_elems * sizeof(bf16_t)));
         CHECK_HIP(hipDeviceSynchronize());
