@@ -23,6 +23,32 @@ __global__ void opus_sdma_a2a_post_kernel(
         bytes_per_peer, 0);
 }
 
+__global__ void opus_sdma_a2a_chunked_post_kernel(
+    ccoWindow_t staging_win,
+    ccoWindow_t recv_win,
+    ccoDevComm dev_comm,
+    size_t staging_slot_offset,
+    size_t bytes_per_peer,
+    size_t chunk_bytes) {
+    const int lane = static_cast<int>(threadIdx.x) % kWaveSize;
+    const int dst = static_cast<int>(threadIdx.x) / kWaveSize;
+    if (lane != 0 || dst >= dev_comm.lsaSize || dst == dev_comm.lsaRank) return;
+
+    mori::cco::ccoSdma sdma{dev_comm};
+    const size_t peer_src_offset =
+        staging_slot_offset + static_cast<size_t>(dst) * bytes_per_peer;
+    const size_t peer_dst_offset =
+        static_cast<size_t>(dev_comm.lsaRank) * bytes_per_peer;
+    for (size_t chunk_offset = 0; chunk_offset < bytes_per_peer;
+         chunk_offset += chunk_bytes) {
+        const size_t remaining = bytes_per_peer - chunk_offset;
+        const size_t bytes = remaining < chunk_bytes ? remaining : chunk_bytes;
+        sdma.put<mori::cco::ccoCoopThread>(
+            dst, recv_win, peer_dst_offset + chunk_offset,
+            staging_win, peer_src_offset + chunk_offset, bytes, 0);
+    }
+}
+
 __global__ void opus_sdma_a2a_quiet_notify_kernel(
     ccoWindow_t ready_win, ccoDevComm dev_comm) {
     const int lane = static_cast<int>(threadIdx.x) % kWaveSize;

@@ -130,6 +130,23 @@ Chunk-SDMA serial (3.7% and 3.4%). Symbolized traces are under
 `build/traces/chunk_serial_single_stream_M2048/`; all timed dispatches use the
 same stream.
 
+An experimental standard-SDMA post path can split each peer's completed
+`[M, shard_n]` slab into multiple M-chunk PUTs without changing the GEMM:
+
+```bash
+# 0 is the default one-bulk-PUT path; auto uses up to eight M tiles per PUT.
+./build/quad_lsa_direct.exe --output-mode sdma --comm-schedule serial \
+  --sdma-post-m-tiles auto
+```
+
+This path uses one posting lane per peer and serially submits disjoint chunks
+to queue 0 before the existing quiet/notify kernel. The chunked post kernel
+uses 47 SGPR and 42 VGPR, with no spill and eight waves/SIMD, versus
+29 SGPR and 32 VGPR for the bulk post kernel. Three-run 4/8-rank sweeps found
+no end-to-end benefit: auto chunking averaged 0.37%/0.34% higher latency, and
+one-M-tile PUTs regressed representative large shapes by roughly 3.5%–5.1%.
+The default therefore remains one bulk PUT per remote peer.
+
 An optional direct self-store experiment removes the post-GEMM self-shard D2D
 copy by routing `dst == my_rank` C stores directly into the receive layout:
 

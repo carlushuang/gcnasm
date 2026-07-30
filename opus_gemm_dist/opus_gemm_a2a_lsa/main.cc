@@ -58,6 +58,8 @@ template<typename Traits,
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs);
 __global__ void opus_sdma_a2a_post_kernel(
     ccoWindow_t, ccoWindow_t, ccoDevComm, size_t, size_t);
+__global__ void opus_sdma_a2a_chunked_post_kernel(
+    ccoWindow_t, ccoWindow_t, ccoDevComm, size_t, size_t, size_t);
 __global__ void opus_sdma_a2a_quiet_notify_kernel(ccoWindow_t, ccoDevComm);
 __global__ void opus_lsa_a2a_copy_kernel(
     const bf16_t*, void*, bf16_t*, size_t, int, int);
@@ -135,6 +137,7 @@ int main(int argc, char** argv) {
     int iters = 20;
     int chunk_m_tiles_per_put = 1;
     bool chunk_m_tiles_explicit = false;
+    int sdma_post_m_tiles_per_put = 0;
     OutputMode output_mode = OutputMode::Direct;
     CommSchedule comm_schedule = CommSchedule::Auto;
     for (int i = 1; i < argc; ++i) {
@@ -147,6 +150,12 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--chunk-m-tiles") == 0 && i + 1 < argc) {
             chunk_m_tiles_per_put = std::atoi(argv[++i]);
             chunk_m_tiles_explicit = true;
+        }
+        else if (std::strcmp(argv[i], "--sdma-post-m-tiles") == 0 &&
+                 i + 1 < argc) {
+            const char* value = argv[++i];
+            sdma_post_m_tiles_per_put =
+                std::strcmp(value, "auto") == 0 ? -1 : std::atoi(value);
         }
         else if (std::strcmp(argv[i], "--output-mode") == 0 && i + 1 < argc) {
             const char* value = argv[++i];
@@ -182,6 +191,12 @@ int main(int argc, char** argv) {
     const bool sdma_pipeline = output_mode == OutputMode::Sdma;
     const bool chunk_fused = output_mode == OutputMode::ChunkSdma;
     const bool uses_sdma = sdma_pipeline || chunk_fused;
+    if (sdma_post_m_tiles_per_put != 0 && !sdma_pipeline) {
+        if (rank == 0) {
+            fprintf(stderr, "--sdma-post-m-tiles requires --output-mode sdma\n");
+        }
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
     const bool overlap_epochs =
         comm_schedule == CommSchedule::Parallel ||
         (comm_schedule == CommSchedule::Auto && sdma_pipeline);
@@ -349,6 +364,26 @@ int main(int argc, char** argv) {
     const int num_tiles_m = ceil_div(M, Traits::B_M);
     const int num_tiles_n = ceil_div(N, Traits::B_N);
     const int total_tiles = num_tiles_m * num_tiles_n * kargs.batch;
+    if (sdma_post_m_tiles_per_put < 0) {
+        sdma_post_m_tiles_per_put = num_tiles_m < 8 ? num_tiles_m : 8;
+        while (num_tiles_m % sdma_post_m_tiles_per_put != 0) {
+            --sdma_post_m_tiles_per_put;
+        }
+    }
+    if (sdma_post_m_tiles_per_put > 0 &&
+        num_tiles_m % sdma_post_m_tiles_per_put != 0) {
+        if (rank == 0) {
+            fprintf(
+                stderr,
+                "--sdma-post-m-tiles must be positive and divide M/B_M\n");
+        }
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    const size_t sdma_post_chunk_bytes =
+        sdma_post_m_tiles_per_put > 0
+            ? static_cast<size_t>(Traits::B_M) *
+                  sdma_post_m_tiles_per_put * shard_n * sizeof(bf16_t)
+            : 0;
     if (chunk_fused) {
         if (!chunk_m_tiles_explicit) {
             chunk_m_tiles_per_put = num_tiles_m < 8 ? num_tiles_m : 8;
@@ -484,9 +519,19 @@ int main(int argc, char** argv) {
                 CHECK_HIP(hipStreamWaitEvent(
                     transfer_stream, stage_ready[slot], 0));
             }
-            opus_sdma_a2a_post_kernel<<<1, sdma_block, 0, transfer_stream>>>(
-                sdma_staging_win, sdma_recv_win, dev_comm,
-                static_cast<size_t>(slot) * staging_bytes, bytes_per_peer);
+            if (sdma_post_chunk_bytes != 0) {
+                opus_sdma_a2a_chunked_post_kernel
+                    <<<1, sdma_block, 0, transfer_stream>>>(
+                        sdma_staging_win, sdma_recv_win, dev_comm,
+                        static_cast<size_t>(slot) * staging_bytes,
+                        bytes_per_peer, sdma_post_chunk_bytes);
+            } else {
+                opus_sdma_a2a_post_kernel
+                    <<<1, sdma_block, 0, transfer_stream>>>(
+                        sdma_staging_win, sdma_recv_win, dev_comm,
+                        static_cast<size_t>(slot) * staging_bytes,
+                        bytes_per_peer);
+            }
             CHECK_HIP(hipGetLastError());
 #if !OPUS_SDMA_DIRECT_SELF_STORE
             CHECK_HIP(hipMemcpyAsync(
@@ -670,10 +715,11 @@ int main(int argc, char** argv) {
                           ? "local"
                           : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma")));
         const char* schedule_name = overlap_epochs ? "parallel" : "serial";
-        printf("quad_gemm_a2a output=%s schedule=%s chunk_m_tiles=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
+        printf("quad_gemm_a2a output=%s schedule=%s chunk_m_tiles=%d sdma_post_m_tiles=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
                output_name,
                schedule_name,
                chunk_m_tiles_per_put,
+               sdma_post_m_tiles_per_put,
                OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
                avg_ms, max_ms, flops / (max_ms * 1.0e9),
                total_mism == 0 ? "SUCCESS" : "FAILED");
