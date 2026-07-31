@@ -129,6 +129,17 @@ from equivalent stream, slot, and counter state.
 parallel mode it includes fill and drain, so use multiple warm iterations and
 at least 30 measured iterations for steady-state comparisons.
 
+Split LSA and single-stream SDMA serial additionally report strict
+`critical_*` fields. Four phase-boundary HIP events are recorded per measured
+epoch; rank 0 gathers every rank's averages, selects the rank with the largest
+E2E, and reports that same rank's communication, compute, and
+`barrier_idle_ms`. Consequently
+`critical_comm_ms + critical_compute_ms + barrier_idle_ms` equals
+`critical_e2e_ms` by construction. SDMA fused uses the same four-event
+instrumentation around self-copy and the fused kernel for a like-for-like
+strict E2E comparison. These instrumented numbers include event overhead and
+therefore supplement rather than replace the lower-overhead headline timings.
+
 On 8 ranks with generic A2A, `N=K=8192`, `K_SHARD=1024`,
 `--warmup 10 --iters 30`, the latest-MORI three-run medians were:
 
@@ -252,6 +263,22 @@ GEMM dispatch; block 0 performs SDMA packet submission and
 per-shard quiet/notify inside that dispatch. The ATT capture can report cutoff
 waves because only one target CU/shader engine is traced, but the symbolized
 kernel timeline and correctness result are complete.
+
+The 8-rank `M=16384` captures use the symbolized
+`build_thread_trace_m16384` binary and are under
+`build_thread_trace_m16384/traces/`:
+
+- `serial_system/` and `fused_system/` contain rank-0 kernel/ HIP API CSV,
+  JSON, and Perfetto traces.
+- `serial_att_compute/`, `serial_att_post/`, `serial_att_quiet/`, and
+  `serial_att_wait/` contain decoded `ui_output_*` ATT projects for each
+  serial phase.
+- `fused_att_compute/` traces a normal compute CU (`SE0/CU7`), while
+  `fused_att_block0/` traces the communication-owning block 0 on `SE2/CU5`.
+
+ATT serialization strongly perturbs reported latency, so those runs are used
+only for wave/ISA attribution. Separate normal warmup=10/iters=30 serial and
+fused runs both passed correctness.
 
 Persistent compute scheduling is available for fused mode 0:
 

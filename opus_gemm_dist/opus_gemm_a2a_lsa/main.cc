@@ -138,6 +138,7 @@ int main(int argc, char** argv) {
     int chunk_m_tiles_per_put = 1;
     bool chunk_m_tiles_explicit = false;
     int sdma_post_m_tiles_per_put = 0;
+    int fused_lsa_stripe_override = -1;
     OutputMode output_mode = OutputMode::Direct;
     CommSchedule comm_schedule = CommSchedule::Auto;
     for (int i = 1; i < argc; ++i) {
@@ -156,6 +157,22 @@ int main(int argc, char** argv) {
             const char* value = argv[++i];
             sdma_post_m_tiles_per_put =
                 std::strcmp(value, "auto") == 0 ? -1 : std::atoi(value);
+        }
+        else if (std::strcmp(argv[i], "--fused-lsa-stripe") == 0 &&
+                 i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "auto") == 0) {
+                fused_lsa_stripe_override = -1;
+            } else if (std::strcmp(value, "0") == 0) {
+                fused_lsa_stripe_override = 0;
+            } else if (std::strcmp(value, "1") == 0) {
+                fused_lsa_stripe_override = 1;
+            } else {
+                if (rank == 0) {
+                    fprintf(stderr, "--fused-lsa-stripe must be auto, 0, or 1\n");
+                }
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
         }
         else if (std::strcmp(argv[i], "--output-mode") == 0 && i + 1 < argc) {
             const char* value = argv[++i];
@@ -191,6 +208,16 @@ int main(int argc, char** argv) {
     const bool sdma_pipeline = output_mode == OutputMode::Sdma;
     const bool chunk_fused = output_mode == OutputMode::ChunkSdma;
     const bool uses_sdma = sdma_pipeline || chunk_fused;
+    if (fused_lsa_stripe_override >= 0 && output_mode != OutputMode::Direct) {
+        if (rank == 0) {
+            fprintf(stderr, "--fused-lsa-stripe requires --output-mode direct\n");
+        }
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    const bool fused_lsa_stripe =
+        output_mode == OutputMode::Direct &&
+        (fused_lsa_stripe_override > 0 ||
+         (fused_lsa_stripe_override < 0 && nranks >= 8 && M >= 8192));
     if (sdma_post_m_tiles_per_put != 0 && !sdma_pipeline) {
         if (rank == 0) {
             fprintf(stderr, "--sdma-post-m-tiles requires --output-mode sdma\n");
@@ -454,7 +481,7 @@ int main(int argc, char** argv) {
 #endif
         if (staging_compute) {
             gemm_a16w16_quad_subtile_kernel<Traits, true><<<grid, block>>>(kargs);
-        } else if (nranks >= 8 && M >= 8192) {
+        } else if (fused_lsa_stripe) {
             gemm_a16w16_quad_subtile_kernel<Traits, false, false, true>
                 <<<grid, block>>>(kargs);
         } else {
@@ -462,8 +489,7 @@ int main(int argc, char** argv) {
         }
         CHECK_HIP(hipGetLastError());
     };
-    auto launch_split_lsa = [&]() {
-        launch();
+    auto launch_split_lsa_comm = [&]() {
         opus_lsa_a2a_copy_kernel<<<lsa_copy_grid, lsa_copy_block>>>(
             static_cast<const bf16_t*>(staging_local),
             win,
@@ -473,21 +499,77 @@ int main(int argc, char** argv) {
             rank);
         CHECK_HIP(hipGetLastError());
     };
+    auto launch_split_lsa = [&]() {
+        launch();
+        launch_split_lsa_comm();
+    };
 
     hipEvent_t start, stop;
     CHECK_HIP(hipEventCreate(&start));
     CHECK_HIP(hipEventCreate(&stop));
+    float total_ms = 0.0f;
+    float strict_compute_total_ms = 0.0f;
+    float strict_comm_total_ms = 0.0f;
+    float strict_barrier_idle_total_ms = 0.0f;
+    bool used_strict_measurement = false;
+    auto measure_strict_phases =
+        [&](hipStream_t stream, auto&& launch_compute_phase,
+            auto&& launch_comm_phase) {
+            auto phase_events =
+                std::make_unique<hipEvent_t[]>(4 * static_cast<size_t>(iters));
+            for (int i = 0; i < 4 * iters; ++i) {
+                CHECK_HIP(hipEventCreate(&phase_events[i]));
+            }
+            for (int i = 0; i < iters; ++i) {
+                const int event_base = 4 * i;
+                CHECK_HIP(hipEventRecord(phase_events[event_base], stream));
+                launch_compute_phase(i);
+                CHECK_HIP(hipEventRecord(phase_events[event_base + 1], stream));
+                CHECK_HIP(hipEventRecord(phase_events[event_base + 2], stream));
+                launch_comm_phase(i);
+                CHECK_HIP(hipEventRecord(phase_events[event_base + 3], stream));
+            }
+            CHECK_HIP(hipEventSynchronize(phase_events[4 * iters - 1]));
+            CHECK_HIP(hipEventElapsedTime(
+                &total_ms, phase_events[0], phase_events[4 * iters - 1]));
+            for (int i = 0; i < iters; ++i) {
+                const int event_base = 4 * i;
+                float compute_ms = 0.0f, comm_ms = 0.0f;
+                CHECK_HIP(hipEventElapsedTime(
+                    &compute_ms,
+                    phase_events[event_base], phase_events[event_base + 1]));
+                CHECK_HIP(hipEventElapsedTime(
+                    &comm_ms,
+                    phase_events[event_base + 2], phase_events[event_base + 3]));
+                strict_compute_total_ms += compute_ms;
+                strict_comm_total_ms += comm_ms;
+            }
+            strict_barrier_idle_total_ms =
+                total_ms - strict_compute_total_ms - strict_comm_total_ms;
+            for (int i = 0; i < 4 * iters; ++i) {
+                CHECK_HIP(hipEventDestroy(phase_events[i]));
+            }
+            used_strict_measurement = true;
+        };
     clear_buffers();
     if (split_lsa) {
         for (int i = 0; i < warmup; ++i) launch_split_lsa();
-        CHECK_HIP(hipEventRecord(start));
-        for (int i = 0; i < iters; ++i) launch_split_lsa();
-        CHECK_HIP(hipEventRecord(stop));
+        measure_strict_phases(
+            nullptr,
+            [&](int) { launch(); },
+            [&](int) { launch_split_lsa_comm(); });
     } else if (!uses_sdma) {
         for (int i = 0; i < warmup; ++i) launch();
-        CHECK_HIP(hipEventRecord(start));
-        for (int i = 0; i < iters; ++i) launch();
-        CHECK_HIP(hipEventRecord(stop));
+        if (output_mode == OutputMode::Direct) {
+            measure_strict_phases(
+                nullptr,
+                [&](int) { launch(); },
+                [&](int) {});
+        } else {
+            CHECK_HIP(hipEventRecord(start));
+            for (int i = 0; i < iters; ++i) launch();
+            CHECK_HIP(hipEventRecord(stop));
+        }
     } else if (sdma_pipeline) {
         uint64_t pipeline_epoch = 0;
         const size_t bytes_per_peer =
@@ -499,8 +581,7 @@ int main(int argc, char** argv) {
         hipStream_t transfer_stream =
             overlap_epochs ? comm_stream : compute_stream;
 
-        auto launch_sdma_epoch = [&]() {
-            const int slot = static_cast<int>(pipeline_epoch & 1);
+        auto launch_sdma_compute_phase = [&](int slot) {
             if (overlap_epochs && pipeline_epoch >= 2) {
                 CHECK_HIP(hipStreamWaitEvent(
                     compute_stream, slot_free[slot], 0));
@@ -516,6 +597,10 @@ int main(int argc, char** argv) {
             CHECK_HIP(hipGetLastError());
             if (overlap_epochs) {
                 CHECK_HIP(hipEventRecord(stage_ready[slot], compute_stream));
+            }
+        };
+        auto launch_sdma_comm_phase = [&](int slot) {
+            if (overlap_epochs) {
                 CHECK_HIP(hipStreamWaitEvent(
                     transfer_stream, stage_ready[slot], 0));
             }
@@ -545,6 +630,11 @@ int main(int argc, char** argv) {
             if (overlap_epochs) {
                 CHECK_HIP(hipEventRecord(slot_free[slot], transfer_stream));
             }
+        };
+        auto launch_sdma_epoch = [&]() {
+            const int slot = static_cast<int>(pipeline_epoch & 1);
+            launch_sdma_compute_phase(slot);
+            launch_sdma_comm_phase(slot);
             ++pipeline_epoch;
         };
 
@@ -553,9 +643,23 @@ int main(int argc, char** argv) {
         CHECK_HIP(hipStreamSynchronize(comm_stream));
         CHECK_CCO(ccoBarrierAll(comm));
 
-        CHECK_HIP(hipEventRecord(start, compute_stream));
-        for (int i = 0; i < iters; ++i) launch_sdma_epoch();
-        CHECK_HIP(hipEventRecord(stop, transfer_stream));
+        if (!overlap_epochs) {
+            measure_strict_phases(
+                compute_stream,
+                [&](int) {
+                    const int slot = static_cast<int>(pipeline_epoch & 1);
+                    launch_sdma_compute_phase(slot);
+                },
+                [&](int) {
+                    const int slot = static_cast<int>(pipeline_epoch & 1);
+                    launch_sdma_comm_phase(slot);
+                    ++pipeline_epoch;
+                });
+        } else {
+            CHECK_HIP(hipEventRecord(start, compute_stream));
+            for (int i = 0; i < iters; ++i) launch_sdma_epoch();
+            CHECK_HIP(hipEventRecord(stop, transfer_stream));
+        }
     } else {
         uint64_t round = 0;
         [[maybe_unused]] const size_t bytes_per_peer =
@@ -566,8 +670,7 @@ int main(int argc, char** argv) {
         const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
         hipStream_t transfer_stream =
             overlap_epochs ? comm_stream : compute_stream;
-        auto launch_chunk_round = [&]() {
-            const int slot = overlap_epochs ? static_cast<int>(round & 1) : 0;
+        auto launch_chunk_compute_phase = [&](int slot) {
             if (overlap_epochs && round >= 2) {
                 CHECK_HIP(hipStreamWaitEvent(compute_stream, slot_free[slot], 0));
             }
@@ -592,6 +695,10 @@ int main(int argc, char** argv) {
             CHECK_HIP(hipGetLastError());
             if (overlap_epochs) {
                 CHECK_HIP(hipEventRecord(stage_ready[slot], compute_stream));
+            }
+        };
+        auto launch_chunk_comm_phase = [&](int slot) {
+            if (overlap_epochs) {
                 CHECK_HIP(hipStreamWaitEvent(
                     transfer_stream, stage_ready[slot], 0));
             }
@@ -607,25 +714,76 @@ int main(int argc, char** argv) {
             if (overlap_epochs) {
                 CHECK_HIP(hipEventRecord(slot_free[slot], transfer_stream));
             }
+        };
+        auto launch_chunk_round = [&]() {
+            const int slot = overlap_epochs ? static_cast<int>(round & 1) : 0;
+            launch_chunk_compute_phase(slot);
+            launch_chunk_comm_phase(slot);
             ++round;
         };
         for (int i = 0; i < warmup; ++i) launch_chunk_round();
         CHECK_HIP(hipStreamSynchronize(compute_stream));
         CHECK_HIP(hipStreamSynchronize(comm_stream));
         CHECK_CCO(ccoBarrierAll(comm));
-        CHECK_HIP(hipEventRecord(start, compute_stream));
-        for (int i = 0; i < iters; ++i) launch_chunk_round();
-        CHECK_HIP(hipEventRecord(stop, transfer_stream));
+        if (!overlap_epochs) {
+            measure_strict_phases(
+                compute_stream,
+                [&](int) {
+                    const int slot = 0;
+                    launch_chunk_compute_phase(slot);
+                },
+                [&](int) {
+                    const int slot = 0;
+                    launch_chunk_comm_phase(slot);
+                    ++round;
+                });
+        } else {
+            CHECK_HIP(hipEventRecord(start, compute_stream));
+            for (int i = 0; i < iters; ++i) launch_chunk_round();
+            CHECK_HIP(hipEventRecord(stop, transfer_stream));
+        }
     }
-    CHECK_HIP(hipEventSynchronize(stop));
-
-    float total_ms = 0.0f;
-    CHECK_HIP(hipEventElapsedTime(&total_ms, start, stop));
+    if (!used_strict_measurement) {
+        CHECK_HIP(hipEventSynchronize(stop));
+        CHECK_HIP(hipEventElapsedTime(&total_ms, start, stop));
+    }
     const double local_ms = static_cast<double>(total_ms) / iters;
     double avg_ms = 0.0, max_ms = 0.0;
     MPI_Allreduce(&local_ms, &avg_ms, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(&local_ms, &max_ms, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     avg_ms /= nranks;
+    const double local_strict_metrics[4] = {
+        local_ms,
+        static_cast<double>(strict_compute_total_ms) / iters,
+        static_cast<double>(strict_comm_total_ms) / iters,
+        static_cast<double>(strict_barrier_idle_total_ms) / iters};
+    std::unique_ptr<double[]> gathered_strict_metrics;
+    if (rank == 0) {
+        gathered_strict_metrics =
+            std::make_unique<double[]>(static_cast<size_t>(nranks) * 4);
+    }
+    MPI_Gather(
+        local_strict_metrics, 4, MPI_DOUBLE,
+        rank == 0 ? gathered_strict_metrics.get() : nullptr,
+        4, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    int critical_rank = 0;
+    double critical_total_ms = 0.0;
+    double critical_compute_ms = 0.0;
+    double critical_comm_ms = 0.0;
+    double critical_barrier_idle_ms = 0.0;
+    if (rank == 0) {
+        for (int candidate = 0; candidate < nranks; ++candidate) {
+            const double* metrics =
+                gathered_strict_metrics.get() + static_cast<size_t>(candidate) * 4;
+            if (candidate == 0 || metrics[0] > critical_total_ms) {
+                critical_rank = candidate;
+                critical_total_ms = metrics[0];
+                critical_compute_ms = metrics[1];
+                critical_comm_ms = metrics[2];
+                critical_barrier_idle_ms = metrics[3];
+            }
+        }
+    }
 
     MPI_Barrier(MPI_COMM_WORLD);
     void* output_device = local_staging
@@ -715,14 +873,35 @@ int main(int argc, char** argv) {
                           ? "local"
                           : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma")));
         const char* schedule_name = overlap_epochs ? "parallel" : "serial";
-        printf("quad_gemm_a2a output=%s schedule=%s chunk_m_tiles=%d sdma_post_m_tiles=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
-               output_name,
-               schedule_name,
-               chunk_m_tiles_per_put,
-               sdma_post_m_tiles_per_put,
-               OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
-               avg_ms, max_ms, flops / (max_ms * 1.0e9),
-               total_mism == 0 ? "SUCCESS" : "FAILED");
+        if (used_strict_measurement) {
+            printf("quad_gemm_a2a M=%d output=%s schedule=%s shard_n=%d chunk_m_tiles=%d sdma_post_m_tiles=%d fused_lsa_stripe=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms critical_rank=%d critical_compute_ms=%.4f critical_comm_ms=%.4f comm_plus_compute=%.4f barrier_idle_residual_ms=%.4f critical_e2e_ms=%.4f aggregate=%.2f TFLOP/s %s\n",
+                   M,
+                   output_name,
+                   schedule_name,
+                   shard_n,
+                   chunk_m_tiles_per_put,
+                   sdma_post_m_tiles_per_put,
+                   fused_lsa_stripe ? 1 : 0,
+                   OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
+                   avg_ms, max_ms,
+                   critical_rank, critical_compute_ms, critical_comm_ms,
+                   critical_compute_ms + critical_comm_ms,
+                   critical_barrier_idle_ms, critical_total_ms,
+                   flops / (max_ms * 1.0e9),
+                   total_mism == 0 ? "SUCCESS" : "FAILED");
+        } else {
+            printf("quad_gemm_a2a M=%d output=%s schedule=%s shard_n=%d chunk_m_tiles=%d sdma_post_m_tiles=%d fused_lsa_stripe=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
+                   M,
+                   output_name,
+                   schedule_name,
+                   shard_n,
+                   chunk_m_tiles_per_put,
+                   sdma_post_m_tiles_per_put,
+                   fused_lsa_stripe ? 1 : 0,
+                   OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
+                   avg_ms, max_ms, flops / (max_ms * 1.0e9),
+                   total_mism == 0 ? "SUCCESS" : "FAILED");
+        }
     }
 
     CHECK_HIP(hipEventDestroy(start));

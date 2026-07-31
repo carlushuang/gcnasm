@@ -101,6 +101,26 @@ slower than inline; rank-aware stagger was mixed below 1%;
 `STORE_PIPELINE=2` used 13 spills; and `C_STORE_MODE=1` regressed by roughly
 1-3%.
 
+The runtime override `--fused-lsa-stripe auto|0|1` isolates this scheduling
+effect without rebuilding. A 2026-07-31 three-run ablation
+(`warmup=10,iters=30`) found:
+
+- At 8-rank full-N (`shard_n=2304`), stripe reduced latency by
+  0.8/1.5/4.9/12.9/17.3/23.8/27.0% for
+  M=1024/2048/4096/6144/8192/12288/16384. Forced stripe made Direct/Fused LSA
+  faster than Fused SDMA on all seven shapes.
+- At 4-rank full-N (`shard_n=4608`), stripe gains were
+  4.6/0.0/-0.8/4.0/6.7/12.6/15.5%. Direct/Fused LSA won through M=4096,
+  while Fused SDMA won for M>=6144.
+- At the original 4-rank partial-N configuration (`shard_n=2560`), stripe was
+  weaker and Fused SDMA remained faster on all seven shapes.
+
+This confirms that both the 8-rank stripe specialization and the mismatched
+4/8-rank communication range affected the earlier mode ordering. With full-N,
+4 ranks send to 3 peers at 4608 columns each while 8 ranks send to 7 peers at
+2304 columns each; the wider fanout is also consistent with better distribution
+of rank-rotated direct stores.
+
 For the SDMA pipeline, set the transport variables before MORI initialization:
 
 ```bash
@@ -146,6 +166,17 @@ uses 47 SGPR and 42 VGPR, with no spill and eight waves/SIMD, versus
 no end-to-end benefit: auto chunking averaged 0.37%/0.34% higher latency, and
 one-M-tile PUTs regressed representative large shapes by roughly 3.5%–5.1%.
 The default therefore remains one bulk PUT per remote peer.
+
+Direct/Fused LSA, Split LSA, Split SDMA, Split SDMA v2, and Fused SDMA serial
+now also report strict `critical_*` phase fields. Four HIP events bracket
+compute and communication in every measured epoch; rank 0 gathers all ranks,
+selects the largest-E2E rank, and reports that rank's compute, communication,
+and `barrier_idle_residual_ms`. The residual is calculated as
+`critical_e2e_ms - critical_compute_ms - critical_comm_ms`. Report tables use
+the complete record from the three-run median-E2E run instead of mixing
+independently reduced max-rank phases or rocprof traces. Event instrumentation
+raises absolute latency, so these values are for decomposition rather than the
+low-overhead headline comparison.
 
 An optional direct self-store experiment removes the post-GEMM self-shard D2D
 copy by routing `dst == my_rank` C stores directly into the receive layout:
