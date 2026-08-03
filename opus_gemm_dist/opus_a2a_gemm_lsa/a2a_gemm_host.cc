@@ -211,6 +211,7 @@ int main(int argc, char** argv) {
     bool comm_backend_sdma = false;
     SdmaSchedule comm_schedule = SdmaSchedule::Parallel;
     bool record_wg_hw = false;
+    bool strict_timing = true;
     bool validate = true;
     for (int i = 1; i < argc; ++i) {
         if ((std::strcmp(argv[i], "-m") == 0 || std::strcmp(argv[i], "--m") == 0) && i + 1 < argc) M = std::atoi(argv[++i]);
@@ -255,6 +256,16 @@ int main(int argc, char** argv) {
             }
         }
         else if (std::strcmp(argv[i], "--record-wg-hw") == 0) record_wg_hw = true;
+        else if (std::strcmp(argv[i], "--strict-timing") == 0 &&
+                 i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "0") == 0) strict_timing = false;
+            else if (std::strcmp(value, "1") == 0) strict_timing = true;
+            else {
+                if (rank == 0) fprintf(stderr, "--strict-timing must be 0 or 1\n");
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+        }
         else if (std::strcmp(argv[i], "--no-validate") == 0) validate = false;
     }
 
@@ -676,11 +687,13 @@ int main(int argc, char** argv) {
         CHECK_HIP(hipEventRecord(sdma_stage_ready[slot], sdma_comm_stream));
         launch_sdma_quiet_notify(slot);
     };
-    auto launch_sdma_compute = [&](int slot) {
+    auto wait_sdma_compute = [&](int slot) {
         if (!sdma_shared_stream) {
             CHECK_HIP(hipStreamWaitEvent(
                 sdma_compute_stream, sdma_comm_ready[slot], 0));
         }
+    };
+    auto launch_sdma_compute_kernel = [&](int slot) {
         opus_a2a_gemm_kargs slot_args = kargs;
         slot_args.recv_a_local =
             static_cast<char*>(sdma_recv_local) +
@@ -692,9 +705,15 @@ int main(int argc, char** argv) {
         CHECK_HIP(hipGetLastError());
         CHECK_HIP(hipEventRecord(sdma_recv_free[slot], sdma_compute_stream));
     };
-    auto launch_sdma_intra_compute = [&](int slot) {
+    auto launch_sdma_compute = [&](int slot) {
+        wait_sdma_compute(slot);
+        launch_sdma_compute_kernel(slot);
+    };
+    auto wait_sdma_intra_compute = [&](int slot) {
         CHECK_HIP(hipStreamWaitEvent(
             sdma_compute_stream, sdma_stage_ready[slot], 0));
+    };
+    auto launch_sdma_intra_compute_kernel = [&](int slot) {
         opus_a2a_gemm_kargs slot_args = kargs;
         slot_args.recv_a_local =
             static_cast<char*>(sdma_recv_local) +
@@ -709,6 +728,10 @@ int main(int argc, char** argv) {
             <<<gemm_grid, block, 0, sdma_compute_stream>>>(slot_args);
         CHECK_HIP(hipGetLastError());
         CHECK_HIP(hipEventRecord(sdma_recv_free[slot], sdma_compute_stream));
+    };
+    auto launch_sdma_intra_compute = [&](int slot) {
+        wait_sdma_intra_compute(slot);
+        launch_sdma_intra_compute_kernel(slot);
     };
     const bool fused_persistent = false;
     const int fused_compute_wgs = compute_tasks;
@@ -853,6 +876,7 @@ int main(int argc, char** argv) {
     float strict_comm_total_ms = 0.0f;
     float strict_compute_total_ms = 0.0f;
     float strict_barrier_idle_total_ms = 0.0f;
+    float strict_overlap_total_ms = 0.0f;
     if (mode == 4) {
         for (int i = 0; i < warmup; ++i) {
             const int slot = i & 1;
@@ -982,7 +1006,13 @@ int main(int argc, char** argv) {
             CHECK_HIP(hipStreamSynchronize(sdma_compute_stream));
         }
         CHECK_CCO(ccoBarrierAll(comm));
-        if (comm_schedule == SdmaSchedule::Serial) {
+        if (!strict_timing) {
+            CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
+            for (int i = 0; i < iters; ++i) launch_sdma_epoch();
+            CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
+            CHECK_HIP(hipEventSynchronize(stop));
+            CHECK_HIP(hipEventElapsedTime(&total_ms, start, stop));
+        } else if (comm_schedule == SdmaSchedule::Serial) {
             auto phase_events =
                 std::make_unique<hipEvent_t[]>(4 * static_cast<size_t>(iters));
             for (int i = 0; i < 4 * iters; ++i) {
@@ -1027,11 +1057,117 @@ int main(int argc, char** argv) {
                 CHECK_HIP(hipEventDestroy(phase_events[i]));
             }
         } else {
-            CHECK_HIP(hipEventRecord(start, sdma_comm_stream));
-            for (int i = 0; i < iters; ++i) launch_sdma_epoch();
-            CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
-            CHECK_HIP(hipEventSynchronize(stop));
-            CHECK_HIP(hipEventElapsedTime(&total_ms, start, stop));
+            auto phase_events =
+                std::make_unique<hipEvent_t[]>(4 * static_cast<size_t>(iters));
+            for (int i = 0; i < 4 * iters; ++i) {
+                CHECK_HIP(hipEventCreate(&phase_events[i]));
+            }
+            hipEvent_t strict_start, comm_done, compute_done, strict_stop;
+            hipStream_t timing_stream;
+            CHECK_HIP(hipEventCreate(&strict_start));
+            CHECK_HIP(hipEventCreate(&comm_done));
+            CHECK_HIP(hipEventCreate(&compute_done));
+            CHECK_HIP(hipEventCreate(&strict_stop));
+            CHECK_HIP(hipStreamCreateWithFlags(
+                &timing_stream, hipStreamNonBlocking));
+            CHECK_HIP(hipEventRecord(strict_start, sdma_comm_stream));
+            CHECK_HIP(hipStreamWaitEvent(
+                sdma_compute_stream, strict_start, 0));
+            for (int i = 0; i < iters; ++i) {
+                const int event_base = 4 * i;
+                const int slot = static_cast<int>(epoch & 1);
+                if (epoch >= 2) {
+                    CHECK_HIP(hipStreamWaitEvent(
+                        sdma_comm_stream, sdma_recv_free[slot], 0));
+                }
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base], sdma_comm_stream));
+                if (comm_schedule == SdmaSchedule::Intra) {
+                    launch_sdma_intra_comm(slot);
+                } else {
+                    launch_sdma_comm(slot);
+                }
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base + 1], sdma_comm_stream));
+                if (comm_schedule == SdmaSchedule::Intra) {
+                    wait_sdma_intra_compute(slot);
+                } else {
+                    wait_sdma_compute(slot);
+                }
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base + 2], sdma_compute_stream));
+                if (comm_schedule == SdmaSchedule::Intra) {
+                    launch_sdma_intra_compute_kernel(slot);
+                } else {
+                    launch_sdma_compute_kernel(slot);
+                }
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base + 3], sdma_compute_stream));
+                ++epoch;
+            }
+            CHECK_HIP(hipEventRecord(comm_done, sdma_comm_stream));
+            CHECK_HIP(hipEventRecord(compute_done, sdma_compute_stream));
+            CHECK_HIP(hipStreamWaitEvent(timing_stream, comm_done, 0));
+            CHECK_HIP(hipStreamWaitEvent(timing_stream, compute_done, 0));
+            CHECK_HIP(hipEventRecord(strict_stop, timing_stream));
+            CHECK_HIP(hipEventSynchronize(strict_stop));
+            CHECK_HIP(hipEventElapsedTime(
+                &strict_total_ms, strict_start, strict_stop));
+
+            auto comm_intervals =
+                std::make_unique<float[]>(2 * static_cast<size_t>(iters));
+            auto compute_intervals =
+                std::make_unique<float[]>(2 * static_cast<size_t>(iters));
+            for (int i = 0; i < iters; ++i) {
+                const int event_base = 4 * i;
+                float comm_start_ms = 0.0f, comm_end_ms = 0.0f;
+                float compute_start_ms = 0.0f, compute_end_ms = 0.0f;
+                CHECK_HIP(hipEventElapsedTime(
+                    &comm_start_ms, strict_start, phase_events[event_base]));
+                CHECK_HIP(hipEventElapsedTime(
+                    &comm_end_ms, strict_start, phase_events[event_base + 1]));
+                CHECK_HIP(hipEventElapsedTime(
+                    &compute_start_ms, strict_start, phase_events[event_base + 2]));
+                CHECK_HIP(hipEventElapsedTime(
+                    &compute_end_ms, strict_start, phase_events[event_base + 3]));
+                comm_intervals[2 * i] = comm_start_ms;
+                comm_intervals[2 * i + 1] = comm_end_ms;
+                compute_intervals[2 * i] = compute_start_ms;
+                compute_intervals[2 * i + 1] = compute_end_ms;
+                strict_comm_total_ms += comm_end_ms - comm_start_ms;
+                strict_compute_total_ms += compute_end_ms - compute_start_ms;
+            }
+            for (int comm_index = 0; comm_index < iters; ++comm_index) {
+                for (int compute_index = 0; compute_index < iters;
+                     ++compute_index) {
+                    const float overlap_begin =
+                        comm_intervals[2 * comm_index] >
+                                compute_intervals[2 * compute_index]
+                            ? comm_intervals[2 * comm_index]
+                            : compute_intervals[2 * compute_index];
+                    const float overlap_end =
+                        comm_intervals[2 * comm_index + 1] <
+                                compute_intervals[2 * compute_index + 1]
+                            ? comm_intervals[2 * comm_index + 1]
+                            : compute_intervals[2 * compute_index + 1];
+                    if (overlap_end > overlap_begin) {
+                        strict_overlap_total_ms += overlap_end - overlap_begin;
+                    }
+                }
+            }
+            strict_barrier_idle_total_ms =
+                strict_total_ms -
+                (strict_comm_total_ms + strict_compute_total_ms -
+                 strict_overlap_total_ms);
+            total_ms = strict_total_ms;
+            for (int i = 0; i < 4 * iters; ++i) {
+                CHECK_HIP(hipEventDestroy(phase_events[i]));
+            }
+            CHECK_HIP(hipEventDestroy(strict_start));
+            CHECK_HIP(hipEventDestroy(comm_done));
+            CHECK_HIP(hipEventDestroy(compute_done));
+            CHECK_HIP(hipEventDestroy(strict_stop));
+            CHECK_HIP(hipStreamDestroy(timing_stream));
         }
         if (validate && comm_schedule == SdmaSchedule::Intra) {
             validate_output_samples(
@@ -1107,6 +1243,8 @@ int main(int argc, char** argv) {
         static_cast<double>(strict_compute_total_ms) / iters;
     const double local_strict_barrier_idle_ms =
         static_cast<double>(strict_barrier_idle_total_ms) / iters;
+    const double local_strict_overlap_ms =
+        static_cast<double>(strict_overlap_total_ms) / iters;
     const double local_fused_kernel_ms =
         static_cast<double>(fused_kernel_total_ms) / iters;
     double max_ms = 0.0, max_comm_ms = 0.0, max_compute_ms = 0.0;
@@ -1117,35 +1255,38 @@ int main(int argc, char** argv) {
     MPI_Reduce(
         &local_fused_kernel_ms, &max_fused_kernel_ms,
         1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-    const double local_strict_metrics[4] = {
+    const double local_strict_metrics[5] = {
         local_strict_total_ms,
         local_strict_comm_ms,
         local_strict_compute_ms,
-        local_strict_barrier_idle_ms};
+        local_strict_barrier_idle_ms,
+        local_strict_overlap_ms};
     std::unique_ptr<double[]> gathered_strict_metrics;
     if (rank == 0) {
         gathered_strict_metrics =
-            std::make_unique<double[]>(static_cast<size_t>(nranks) * 4);
+            std::make_unique<double[]>(static_cast<size_t>(nranks) * 5);
     }
     MPI_Gather(
-        local_strict_metrics, 4, MPI_DOUBLE,
+        local_strict_metrics, 5, MPI_DOUBLE,
         rank == 0 ? gathered_strict_metrics.get() : nullptr,
-        4, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        5, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     int critical_rank = 0;
     double critical_total_ms = 0.0;
     double critical_comm_ms = 0.0;
     double critical_compute_ms = 0.0;
     double critical_barrier_idle_ms = 0.0;
+    double critical_overlap_ms = 0.0;
     if (rank == 0) {
         for (int candidate = 0; candidate < nranks; ++candidate) {
             const double* metrics =
-                gathered_strict_metrics.get() + static_cast<size_t>(candidate) * 4;
+                gathered_strict_metrics.get() + static_cast<size_t>(candidate) * 5;
             if (candidate == 0 || metrics[0] > critical_total_ms) {
                 critical_rank = candidate;
                 critical_total_ms = metrics[0];
                 critical_comm_ms = metrics[1];
                 critical_compute_ms = metrics[2];
                 critical_barrier_idle_ms = metrics[3];
+                critical_overlap_ms = metrics[4];
             }
         }
     }
@@ -1213,25 +1354,38 @@ int main(int argc, char** argv) {
                    flops / (max_ms * 1.0e9),
                    (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
         } else if (mode == 4) {
-            if (comm_schedule == SdmaSchedule::Serial) {
-                const double critical_phase_sum =
-                    critical_comm_ms + critical_compute_ms +
-                    critical_barrier_idle_ms;
-                printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=serial comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f pipeline_total_ms=%.4f critical_rank=%d critical_comm_ms=%.4f critical_compute_ms=%.4f barrier_idle_ms=%.4f critical_phase_sum=%.4f critical_e2e_ms=%.4f %.2f TFLOP/s %s\n",
-                       M, N, K, nranks, input_mode_name,
-                       max_comm_ms, max_compute_ms,
-                       max_comm_ms + max_compute_ms, max_ms,
-                       critical_rank, critical_comm_ms, critical_compute_ms,
-                       critical_barrier_idle_ms, critical_phase_sum,
-                       critical_total_ms,
-                       flops / (max_ms * 1.0e9),
-                       (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
-            } else {
-                printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=%s comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f pipeline_total_ms=%.4f %.2f TFLOP/s %s\n",
+            if (!strict_timing) {
+                printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=%s comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f pipeline_total_ms=%.4f strict_timing=0 %.2f TFLOP/s %s\n",
                        M, N, K, nranks, input_mode_name,
                        sdma_schedule_name,
                        max_comm_ms, max_compute_ms,
                        max_comm_ms + max_compute_ms, max_ms,
+                       flops / (max_ms * 1.0e9),
+                       (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
+            } else if (comm_schedule == SdmaSchedule::Serial) {
+                const double critical_phase_sum =
+                    critical_comm_ms + critical_compute_ms +
+                    critical_barrier_idle_ms;
+                printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=serial comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f pipeline_total_ms=%.4f critical_rank=%d critical_comm_ms=%.4f critical_compute_ms=%.4f overlap_ms=0.0000 exposed_comm_ms=%.4f fill_drain_idle_ms=%.4f critical_phase_sum=%.4f critical_e2e_ms=%.4f %.2f TFLOP/s %s\n",
+                       M, N, K, nranks, input_mode_name,
+                       max_comm_ms, max_compute_ms,
+                       max_comm_ms + max_compute_ms, max_ms,
+                       critical_rank, critical_comm_ms, critical_compute_ms,
+                       critical_comm_ms, critical_barrier_idle_ms, critical_phase_sum,
+                       critical_total_ms,
+                       flops / (max_ms * 1.0e9),
+                       (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
+            } else {
+                const double exposed_comm_ms =
+                    critical_comm_ms - critical_overlap_ms;
+                printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=%s comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f pipeline_total_ms=%.4f critical_rank=%d critical_comm_ms=%.4f critical_compute_ms=%.4f overlap_ms=%.4f exposed_comm_ms=%.4f fill_drain_idle_ms=%.4f critical_e2e_ms=%.4f %.2f TFLOP/s %s\n",
+                       M, N, K, nranks, input_mode_name,
+                       sdma_schedule_name,
+                       max_comm_ms, max_compute_ms,
+                       max_comm_ms + max_compute_ms, max_ms,
+                       critical_rank, critical_comm_ms, critical_compute_ms,
+                       critical_overlap_ms, exposed_comm_ms,
+                       critical_barrier_idle_ms, critical_total_ms,
                        flops / (max_ms * 1.0e9),
                        (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
             }

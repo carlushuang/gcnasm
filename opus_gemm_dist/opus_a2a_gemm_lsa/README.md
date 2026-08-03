@@ -140,6 +140,26 @@ instrumentation around self-copy and the fused kernel for a like-for-like
 strict E2E comparison. These instrumented numbers include event overhead and
 therefore supplement rather than replace the lower-overhead headline timings.
 
+Parallel and intra additionally report an actual cross-stream timeline.
+Communication and compute streams wait on one common start event; a timing
+stream joins their final done events. Per-epoch start/end events provide
+`critical_comm_ms`, `critical_compute_ms`, and `overlap_ms`; the report also
+emits `exposed_comm_ms = comm - overlap` and
+`fill_drain_idle_ms = E2E - (comm + compute - overlap)`. Intra compute time
+includes Mode-3's in-kernel remote-ready stalls. Event insertion can materially
+perturb small shapes, especially 8-rank parallel, so this path is intended for
+decomposition rather than headline ranking.
+
+For low-perturbation overlap analysis, pass `--strict-timing 0` and use
+rocprofv3 kernel trace. The 2026-07-31 report profiles every rank concurrently
+with `warmup=3,iters=10`, selects each rank's final ten measured epochs, and
+chooses the rank with the largest trace timeline. Communication spans
+post-to-wait-ready for serial/parallel and post-to-quiet for intra; compute spans
+the corresponding Mode-2/Mode-3 GEMM kernel. Interval intersections yield
+overlap, with `exposed_comm = comm - overlap` and
+`E2E = comm + compute - overlap + fill/drain idle`. These traces are under
+`build/system_trace_overlap_20260731/`.
+
 On 8 ranks with generic A2A, `N=K=8192`, `K_SHARD=1024`,
 `--warmup 10 --iters 30`, the latest-MORI three-run medians were:
 
