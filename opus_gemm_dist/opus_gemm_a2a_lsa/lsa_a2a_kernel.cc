@@ -4,6 +4,9 @@
 
 using lsa_copy_vec_t = uint4;
 
+// Retained optimization: split-LSA baseline uses 16-byte vector copies and
+// partitions each destination slab across peer_block workgroups. The final
+// release fence makes all remote stores visible before host-side completion.
 __global__ void opus_lsa_a2a_copy_kernel(
     const bf16_t* staging,
     void* recv_win,

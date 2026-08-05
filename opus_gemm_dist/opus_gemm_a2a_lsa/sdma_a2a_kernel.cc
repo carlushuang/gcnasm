@@ -6,6 +6,8 @@ using namespace mori::cco;
 
 static constexpr int kWaveSize = 64;
 
+// Retained optimization: one lane per destination submits one bulk no-signal
+// PUT; data completion is deferred to the separate quiet/notify kernel.
 __global__ void opus_sdma_a2a_post_kernel(
     ccoWindow_t staging_win,
     ccoWindow_t recv_win,
@@ -23,6 +25,8 @@ __global__ void opus_sdma_a2a_post_kernel(
         bytes_per_peer, 0);
 }
 
+// Experimental split-SDMA-v2 baseline: submit multiple M-aligned no-signal
+// PUTs per peer without changing the staging GEMM.
 __global__ void opus_sdma_a2a_chunked_post_kernel(
     ccoWindow_t staging_win,
     ccoWindow_t recv_win,
@@ -49,6 +53,8 @@ __global__ void opus_sdma_a2a_chunked_post_kernel(
     }
 }
 
+// Retained optimization: drain each peer queue from MORI rptr/wptr state and
+// publish one release-ordered ready epoch, avoiding per-PUT signal atomics.
 __global__ void opus_sdma_a2a_quiet_notify_kernel(
     ccoWindow_t ready_win, ccoDevComm dev_comm) {
     const int lane = static_cast<int>(threadIdx.x) % kWaveSize;

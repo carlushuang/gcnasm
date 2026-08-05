@@ -139,6 +139,10 @@ E2E, and reports that same rank's communication, compute, and
 instrumentation around self-copy and the fused kernel for a like-for-like
 strict E2E comparison. These instrumented numbers include event overhead and
 therefore supplement rather than replace the lower-overhead headline timings.
+Literal fused now also honors `--strict-timing 0`: one start/stop pair encloses
+self-copy plus the fused kernel for every measured epoch. Five-run M=1024/2048
+tests found that strict timing added 16.9-19.6 us, while low-overhead E2E
+matched the historical report values within 0.5%.
 
 Parallel and intra additionally report an actual cross-stream timeline.
 Communication and compute streams wait on one common start event; a timing
@@ -348,15 +352,10 @@ tile, so their accumulated overhead grows slightly with larger tile counts.
 
 ## Communication peer ordering
 
-`COMM_PEER_ORDER=1` (the default) phase-shifts each communication WG's peer
-sequence. Concurrent copy WGs therefore write to different peers
-instead of all bursting stores to one peer before moving to the next. Build the
-legacy order for comparison with:
-
-```bash
-make BUILD=build_peer_order0 COMM_PEER_ORDER=0
-make BUILD=build_peer_order1 COMM_PEER_ORDER=1
-```
+The retained communication order phase-shifts each communication WG's peer
+sequence. Concurrent copy WGs therefore write to different peers instead of
+all bursting stores to one peer before moving to the next. The historical
+`COMM_PEER_ORDER=0/1` build switch has been removed after the A/B below.
 
 Five alternating 8-rank runs of the default shape with static compute scheduling
 measured 0.8170 ms for the legacy order and 0.7736 ms for the staggered order,
@@ -405,17 +404,17 @@ within 1%.
 
 ## Optimization ladder
 
-The final default communication configuration is:
+The final communication and compute configuration is now fixed in the source:
 
 ```text
-COMM_WG_PLACEMENT=1   # contiguous bx, spread across XCCs
-COMM_PEER_ORDER=1     # phase-shift peers across communication WGs
-COMM_COPY_MODE=2      # OPUS buffer copy with streaming/cache policy
-comm_wgs=16           # two communication WGs per XCC on gfx950
-A2A_C_STORE_MODE=2    # pair-coalesced ds_bpermute C store
-TILE_READY=0
-READY_AWARE_K=0
-PRESTORE_BARRIER=1
+contiguous communication WGs spread across XCCs
+phase-shifted peers across communication WGs
+OPUS buffer copy with streaming/cache policy
+one ready counter per source shard
+rank-rotated fixed K-shard order
+pair-coalesced ds_bpermute C store
+pre-store workgroup barrier retained
+comm_wgs=16 by default
 ```
 
 For 8-rank generic `M=6144,N=K=8192`:
@@ -429,8 +428,32 @@ For 8-rank generic `M=6144,N=K=8192`:
 Per-M-tile ready was correct but regressed from 0.896 ms to 1.558 ms because of
 per-tile fences, barriers, and atomics. Ready-aware K ordering made that path a
 further 3.9% slower. Removing the pre-store barrier was also about 8% slower.
-These experiments remain available as compile-time switches but are disabled
-by default.
+The seven historical switches for peer order, WG placement, copy mode,
+per-tile ready, ready-aware K, C-store mode, and pre-store barrier have been
+removed. Their winning behavior is directly encoded in the kernel. Only
+`RECORD_WG_HW` remains as an optional diagnostic build switch.
+
+The 2026-08-05 cleanup produced identical gfx950 resource reports for every
+kernel instance: Mode 0 static/persistent remain 95/106 SGPR and 212/224 VGPR,
+Mode 1 remains 56/218, Mode 2 remains 76/210, Mode 3 remains 84/212, and
+Mode 4 static/persistent remain 91/103 SGPR and 214/222 VGPR. All GEMM modes
+retain zero spill and two waves/SIMD; the LSA communication kernel remains
+75 SGPR / 53 VGPR with eight waves/SIMD.
+
+Three-run low-overhead medians before and after cleanup
+(`warmup=10,iters=30`) were:
+
+- `M=2048`: SDMA serial 0.2791 -> 0.2789 ms, parallel
+  0.2191 -> 0.2175 ms, intra 0.2279 -> 0.2257 ms, and literal fused
+  0.2898 -> 0.2882 ms.
+- `M=8192`: fused LSA 1.1529 -> 1.1540 ms, SDMA serial
+  1.0223 -> 1.0217 ms, parallel 0.8052 -> 0.7999 ms, intra
+  0.8257 -> 0.8348 ms, and literal fused 1.0393 -> 1.0376 ms.
+
+An additional five-run alternating generic fused-LSA A/B at `M=2048`
+measured 0.3249 ms before and 0.3278 ms after cleanup. All changes are within
+1.1%. Four-rank modes 0/1/2/3, 4-rank SDMA serial/parallel/intra/fused, and
+the matching 8-rank fused-LSA and SDMA schedules all passed correctness.
 
 ## Multi-shape baseline comparison
 

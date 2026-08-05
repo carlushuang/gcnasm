@@ -19,9 +19,6 @@ using namespace mori::cco;
 #ifndef OPUS_PERSISTENT
 #define OPUS_PERSISTENT 1
 #endif
-#ifndef OPUS_SDMA_DIRECT_SELF_STORE
-#define OPUS_SDMA_DIRECT_SELF_STORE 0
-#endif
 
 #if !defined(HIP_INCLUDE_HIP_HIP_RUNTIME_API_H)
 extern "C" hipError_t hipGetDeviceCount(int* count);
@@ -139,6 +136,7 @@ int main(int argc, char** argv) {
     bool chunk_m_tiles_explicit = false;
     int sdma_post_m_tiles_per_put = 0;
     int fused_lsa_stripe_override = -1;
+    bool strict_timing = true;
     OutputMode output_mode = OutputMode::Direct;
     CommSchedule comm_schedule = CommSchedule::Auto;
     for (int i = 1; i < argc; ++i) {
@@ -170,6 +168,20 @@ int main(int argc, char** argv) {
             } else {
                 if (rank == 0) {
                     fprintf(stderr, "--fused-lsa-stripe must be auto, 0, or 1\n");
+                }
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+        }
+        else if (std::strcmp(argv[i], "--strict-timing") == 0 &&
+                 i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "0") == 0) {
+                strict_timing = false;
+            } else if (std::strcmp(value, "1") == 0) {
+                strict_timing = true;
+            } else {
+                if (rank == 0) {
+                    fprintf(stderr, "--strict-timing must be 0 or 1\n");
                 }
                 MPI_Abort(MPI_COMM_WORLD, 1);
             }
@@ -376,7 +388,6 @@ int main(int argc, char** argv) {
     kargs.a2a_M = M;
     kargs.a2a_span = scatter_n;
     kargs.stride_c_full = N;
-    kargs.sdma_self_recv = uses_sdma ? static_cast<void*>(sdma_recv) : nullptr;
     kargs.m = M;
     kargs.n = N;
     kargs.k = K;
@@ -554,13 +565,19 @@ int main(int argc, char** argv) {
     clear_buffers();
     if (split_lsa) {
         for (int i = 0; i < warmup; ++i) launch_split_lsa();
-        measure_strict_phases(
-            nullptr,
-            [&](int) { launch(); },
-            [&](int) { launch_split_lsa_comm(); });
+        if (strict_timing) {
+            measure_strict_phases(
+                nullptr,
+                [&](int) { launch(); },
+                [&](int) { launch_split_lsa_comm(); });
+        } else {
+            CHECK_HIP(hipEventRecord(start));
+            for (int i = 0; i < iters; ++i) launch_split_lsa();
+            CHECK_HIP(hipEventRecord(stop));
+        }
     } else if (!uses_sdma) {
         for (int i = 0; i < warmup; ++i) launch();
-        if (output_mode == OutputMode::Direct) {
+        if (output_mode == OutputMode::Direct && strict_timing) {
             measure_strict_phases(
                 nullptr,
                 [&](int) { launch(); },
@@ -574,7 +591,7 @@ int main(int argc, char** argv) {
         uint64_t pipeline_epoch = 0;
         const size_t bytes_per_peer =
             static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
-        [[maybe_unused]] const size_t elems_per_peer =
+        const size_t elems_per_peer =
             static_cast<size_t>(M) * shard_n;
         const size_t staging_bytes = staging_elems * sizeof(bf16_t);
         const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
@@ -618,12 +635,10 @@ int main(int argc, char** argv) {
                         bytes_per_peer);
             }
             CHECK_HIP(hipGetLastError());
-#if !OPUS_SDMA_DIRECT_SELF_STORE
             CHECK_HIP(hipMemcpyAsync(
                 sdma_recv + static_cast<size_t>(rank) * elems_per_peer,
                 sdma_staging[slot] + static_cast<size_t>(rank) * elems_per_peer,
                 bytes_per_peer, hipMemcpyDeviceToDevice, transfer_stream));
-#endif
             opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, transfer_stream>>>(
                 sdma_ready_win, dev_comm);
             CHECK_HIP(hipGetLastError());
@@ -644,17 +659,23 @@ int main(int argc, char** argv) {
         CHECK_CCO(ccoBarrierAll(comm));
 
         if (!overlap_epochs) {
-            measure_strict_phases(
-                compute_stream,
-                [&](int) {
-                    const int slot = static_cast<int>(pipeline_epoch & 1);
-                    launch_sdma_compute_phase(slot);
-                },
-                [&](int) {
-                    const int slot = static_cast<int>(pipeline_epoch & 1);
-                    launch_sdma_comm_phase(slot);
-                    ++pipeline_epoch;
-                });
+            if (strict_timing) {
+                measure_strict_phases(
+                    compute_stream,
+                    [&](int) {
+                        const int slot = static_cast<int>(pipeline_epoch & 1);
+                        launch_sdma_compute_phase(slot);
+                    },
+                    [&](int) {
+                        const int slot = static_cast<int>(pipeline_epoch & 1);
+                        launch_sdma_comm_phase(slot);
+                        ++pipeline_epoch;
+                    });
+            } else {
+                CHECK_HIP(hipEventRecord(start, compute_stream));
+                for (int i = 0; i < iters; ++i) launch_sdma_epoch();
+                CHECK_HIP(hipEventRecord(stop, transfer_stream));
+            }
         } else {
             CHECK_HIP(hipEventRecord(start, compute_stream));
             for (int i = 0; i < iters; ++i) launch_sdma_epoch();
@@ -662,9 +683,9 @@ int main(int argc, char** argv) {
         }
     } else {
         uint64_t round = 0;
-        [[maybe_unused]] const size_t bytes_per_peer =
+        const size_t bytes_per_peer =
             static_cast<size_t>(M) * shard_n * sizeof(bf16_t);
-        [[maybe_unused]] const size_t elems_per_peer =
+        const size_t elems_per_peer =
             static_cast<size_t>(M) * shard_n;
         const size_t staging_bytes = staging_elems * sizeof(bf16_t);
         const dim3 sdma_block(static_cast<unsigned>(nranks * WAVE_SIZE));
@@ -702,12 +723,10 @@ int main(int argc, char** argv) {
                 CHECK_HIP(hipStreamWaitEvent(
                     transfer_stream, stage_ready[slot], 0));
             }
-#if !OPUS_SDMA_DIRECT_SELF_STORE
             CHECK_HIP(hipMemcpyAsync(
                 sdma_recv + static_cast<size_t>(rank) * elems_per_peer,
                 sdma_staging[slot] + static_cast<size_t>(rank) * elems_per_peer,
                 bytes_per_peer, hipMemcpyDeviceToDevice, transfer_stream));
-#endif
             opus_sdma_a2a_quiet_notify_kernel<<<1, sdma_block, 0, transfer_stream>>>(
                 sdma_ready_win, dev_comm);
             CHECK_HIP(hipGetLastError());
@@ -726,17 +745,23 @@ int main(int argc, char** argv) {
         CHECK_HIP(hipStreamSynchronize(comm_stream));
         CHECK_CCO(ccoBarrierAll(comm));
         if (!overlap_epochs) {
-            measure_strict_phases(
-                compute_stream,
-                [&](int) {
-                    const int slot = 0;
-                    launch_chunk_compute_phase(slot);
-                },
-                [&](int) {
-                    const int slot = 0;
-                    launch_chunk_comm_phase(slot);
-                    ++round;
-                });
+            if (strict_timing) {
+                measure_strict_phases(
+                    compute_stream,
+                    [&](int) {
+                        const int slot = 0;
+                        launch_chunk_compute_phase(slot);
+                    },
+                    [&](int) {
+                        const int slot = 0;
+                        launch_chunk_comm_phase(slot);
+                        ++round;
+                    });
+            } else {
+                CHECK_HIP(hipEventRecord(start, compute_stream));
+                for (int i = 0; i < iters; ++i) launch_chunk_round();
+                CHECK_HIP(hipEventRecord(stop, transfer_stream));
+            }
         } else {
             CHECK_HIP(hipEventRecord(start, compute_stream));
             for (int i = 0; i < iters; ++i) launch_chunk_round();
@@ -874,7 +899,7 @@ int main(int argc, char** argv) {
                           : (output_mode == OutputMode::Sdma ? "sdma" : "chunk-sdma")));
         const char* schedule_name = overlap_epochs ? "parallel" : "serial";
         if (used_strict_measurement) {
-            printf("quad_gemm_a2a M=%d output=%s schedule=%s shard_n=%d chunk_m_tiles=%d sdma_post_m_tiles=%d fused_lsa_stripe=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms critical_rank=%d critical_compute_ms=%.4f critical_comm_ms=%.4f comm_plus_compute=%.4f barrier_idle_residual_ms=%.4f critical_e2e_ms=%.4f aggregate=%.2f TFLOP/s %s\n",
+            printf("quad_gemm_a2a M=%d output=%s schedule=%s shard_n=%d chunk_m_tiles=%d sdma_post_m_tiles=%d fused_lsa_stripe=%d strict_timing=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms critical_rank=%d critical_compute_ms=%.4f critical_comm_ms=%.4f comm_plus_compute=%.4f barrier_idle_residual_ms=%.4f critical_e2e_ms=%.4f aggregate=%.2f TFLOP/s %s\n",
                    M,
                    output_name,
                    schedule_name,
@@ -882,6 +907,7 @@ int main(int argc, char** argv) {
                    chunk_m_tiles_per_put,
                    sdma_post_m_tiles_per_put,
                    fused_lsa_stripe ? 1 : 0,
+                   strict_timing ? 1 : 0,
                    OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
                    avg_ms, max_ms,
                    critical_rank, critical_compute_ms, critical_comm_ms,
@@ -890,7 +916,7 @@ int main(int argc, char** argv) {
                    flops / (max_ms * 1.0e9),
                    total_mism == 0 ? "SUCCESS" : "FAILED");
         } else {
-            printf("quad_gemm_a2a M=%d output=%s schedule=%s shard_n=%d chunk_m_tiles=%d sdma_post_m_tiles=%d fused_lsa_stripe=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
+            printf("quad_gemm_a2a M=%d output=%s schedule=%s shard_n=%d chunk_m_tiles=%d sdma_post_m_tiles=%d fused_lsa_stripe=%d strict_timing=%d %s grid=%u avg_rank_time=%.4f ms max_rank_time=%.4f ms aggregate=%.2f TFLOP/s %s\n",
                    M,
                    output_name,
                    schedule_name,
@@ -898,6 +924,7 @@ int main(int argc, char** argv) {
                    chunk_m_tiles_per_put,
                    sdma_post_m_tiles_per_put,
                    fused_lsa_stripe ? 1 : 0,
+                   strict_timing ? 1 : 0,
                    OPUS_PERSISTENT ? "persistent" : "non-persistent", grid.x,
                    avg_ms, max_ms, flops / (max_ms * 1.0e9),
                    total_mism == 0 ? "SUCCESS" : "FAILED");

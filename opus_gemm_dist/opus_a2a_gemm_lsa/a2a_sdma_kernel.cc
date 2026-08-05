@@ -6,6 +6,8 @@ using namespace mori::cco;
 
 static constexpr int kWaveSize = 64;
 
+// Retained optimization: one lane per remote peer posts one bulk no-signal
+// PUT into that peer's queue; generic A2A selects a distinct source chunk.
 __global__ void a2a_sdma_post_kernel(
     ccoWindow_t send_win,
     ccoWindow_t recv_win,
@@ -29,6 +31,8 @@ __global__ void a2a_sdma_post_kernel(
         0);
 }
 
+// Retained optimization: quietQueue supplies transfer completion, then one
+// release-ordered epoch wakes the destination without a PUT-tail signal.
 __global__ void a2a_sdma_quiet_notify_kernel(
     ccoWindow_t ready_win,
     ccoDevComm dev_comm,
@@ -47,6 +51,8 @@ __global__ void a2a_sdma_quiet_notify_kernel(
         remote_ready, 1ULL, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
+// Cross-epoch pipeline join: wait for every remote source's monotonic epoch.
+// Sleeping failed polls reduces CU pressure while SDMA is still in flight.
 __global__ void a2a_sdma_wait_ready_kernel(
     const uint64_t* ready_local,
     size_t ready_slot_offset,

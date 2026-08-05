@@ -97,9 +97,41 @@ and retains two waves/SIMD. Optimized rank-0 traces are under
 
 Rejected experiments are retained as results: source-rank rotation without
 M striping was <=1%; outlined stripe decode removed spills but was 12-15%
-slower than inline; rank-aware stagger was mixed below 1%;
-`STORE_PIPELINE=2` used 13 spills; and `C_STORE_MODE=1` regressed by roughly
-1-3%.
+slower than inline; and rank-aware stagger was mixed below 1%.
+
+The removed store-pipeline and C-store branches had these results:
+
+- Store-pipeline mode 0 was the original post-compute store with a tail
+  barrier. Mode 1 moved the first two half-tile stores into the final compute
+  sequence. Neither beat mode 3, which stores all four half-tiles together and
+  drops the unnecessary tail barrier. The old per-shape mode 0/1 numbers were
+  not retained.
+- Store-pipeline mode 2 prefetched the next persistent tile before storing the
+  current C tile, but raised the optimized Direct kernel to 13 SGPR spills and
+  failed the resource gate.
+- C-store mode 0 was the original MFMA-layout store. Mode 1 staged C through
+  LDS for coalesced writes but regressed by roughly 1-3%. Mode 2's wave-local
+  `ds_bpermute` pair-coalesced store remained the winner.
+
+The implementation now directly contains the retained mode-3 pipeline and
+mode-2 C store; the historical compile-time branches have been removed.
+The optimized peer round-robin, chunk-contiguous, and Direct stripe tile
+mapping is also unconditional; the old `TILE_ORDER=0` baseline switch has been
+removed.
+
+The original `16 phases x 4 delay` store stagger was re-tested before removal.
+Five-run max-rank medians with stagger on versus off
+(`warmup=10,iters=30`) were:
+
+- 4-rank `M=2048,shard_n=2560`: 0.6412 vs 0.6273 ms (off 2.2% faster).
+- 4-rank `M=8192,shard_n=2560`: 2.0092 vs 2.0116 ms (off 0.1% slower).
+- 8-rank `M=8192,shard_n=2304`: 1.9231 vs 1.9152 ms (off 0.4% faster).
+- 8-rank `M=16384,shard_n=2304`: 3.6983 vs 3.7041 ms (off 0.2% slower).
+
+Stagger had no stable benefit and materially regressed the smallest shape, so
+the delay loop and both build switches were removed. This also reduced Direct
+SGPR spills from 6 to 4 and striped Direct spills from 16 to 14 without
+changing occupancy.
 
 The runtime override `--fused-lsa-stripe auto|0|1` isolates this scheduling
 effect without rebuilding. A 2026-07-31 three-run ablation
@@ -178,19 +210,48 @@ independently reduced max-rank phases or rocprof traces. Event instrumentation
 raises absolute latency, so these values are for decomposition rather than the
 low-overhead headline comparison.
 
-An optional direct self-store experiment removes the post-GEMM self-shard D2D
-copy by routing `dst == my_rank` C stores directly into the receive layout:
+Pass `--strict-timing 0` to replace the four per-epoch phase events with one
+start/stop pair around the full measured loop. On the 2026-08-05 exclusive-GPU
+M=1024 retest, strict timing added 17.4-18.7 us for 4-rank bulk/auto/chunk SDMA
+and 9.5-17.8 us for the corresponding 8-rank paths. The low-overhead medians
+matched the report values within 0.5%; use this mode for headline E2E ranking
+and strict timing only for phase decomposition.
 
-```bash
-make BUILD=build_self_direct SDMA_DIRECT_SELF_STORE=1
-```
-
-It is disabled by default. With the current single-stream serial path, the
+A removed direct self-store experiment routed `dst == my_rank` C stores
+directly into the receive layout to eliminate the post-GEMM self-shard D2D
+copy. With the single-stream serial path,
 `M=2048,warmup=10,iters=30` three-run median changes versus the normal copy
 path ranged from a 0.2% regression to a 1.1% improvement. M=4096/8192 sweeps
 were also mixed (roughly -0.7% to +1.3%) with no benefit that consistently grew
-with copy size. The local-staging GEMM SGPR spill count increased from 6 to 11,
-and chunk-SDMA from 68 to 76, so the experiment remains opt-in.
+with copy size. At the time of the experiment, the local-staging GEMM SGPR
+spill count increased from 6 to 11 and chunk-SDMA from 68 to 76. The code
+branch and its `SDMA_DIRECT_SELF_STORE` build switch have been removed; this
+record is retained for reference.
+
+The 2026-08-05 branch cleanup fixed the retained store pipeline, C-store, and
+tile-order implementations directly in the kernel; removed the
+direct-self-store argument; and removed store stagger after the A/B above. A
+clean gfx950 resource build reports 106 SGPR / 226 VGPR for all four GEMM
+instances: Direct uses 4 SGPR spills, striped Direct uses 14, local staging uses
+6, and chunk-SDMA uses 48. All retain zero VGPR spill, zero scratch,
+135172-byte LDS, and two waves/SIMD.
+
+Three-run max-rank medians before and after cleanup
+(`warmup=10,iters=30`) were:
+
+- 4-rank `M=2048,shard_n=2560`: Direct 0.6402 -> 0.6448 ms,
+  standard SDMA serial 0.6994 -> 0.6996 ms, and chunk-SDMA serial
+  0.5776 -> 0.5782 ms.
+- 8-rank `M=8192,shard_n=2304`: Direct 1.9339 -> 1.9298 ms,
+  standard SDMA serial 2.4789 -> 2.4758 ms, and chunk-SDMA serial
+  1.9397 -> 1.9396 ms.
+- 8-rank `M=16384,shard_n=2304`: Direct 3.7178 -> 3.7222 ms,
+  standard SDMA serial 4.7399 -> 4.7519 ms, and chunk-SDMA serial
+  3.7677 -> 3.7618 ms.
+
+The largest change was a 0.72% regression at the smallest Direct shape; every
+other result changed by at most 0.25%. Local, split-LSA, standard/chunk SDMA
+serial, and standard/chunk SDMA parallel correctness checks all passed.
 
 The current MORI SDMA setup assumes local rank `r` is bound to visible device
 ordinal `r`; the SDMA results below were collected on physical GPUs 0–3.

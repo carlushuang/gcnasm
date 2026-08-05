@@ -15,28 +15,6 @@ using copy_vec_t = unsigned int __attribute__((ext_vector_type(4)));
 #ifndef A2A_GEMM_RECORD_WG_HW
 #define A2A_GEMM_RECORD_WG_HW 0
 #endif
-#ifndef A2A_GEMM_COMM_PEER_ORDER
-#define A2A_GEMM_COMM_PEER_ORDER 1
-#endif
-#ifndef A2A_GEMM_COMM_WG_PLACEMENT
-#define A2A_GEMM_COMM_WG_PLACEMENT 1
-#endif
-#ifndef A2A_GEMM_COMM_COPY_MODE
-#define A2A_GEMM_COMM_COPY_MODE 2
-#endif
-#ifndef A2A_GEMM_TILE_READY
-#define A2A_GEMM_TILE_READY 0
-#endif
-#ifndef A2A_GEMM_READY_AWARE_K
-#define A2A_GEMM_READY_AWARE_K 0
-#endif
-#ifndef A2A_GEMM_C_STORE_MODE
-#define A2A_GEMM_C_STORE_MODE 2
-#endif
-#ifndef A2A_GEMM_PRESTORE_BARRIER
-#define A2A_GEMM_PRESTORE_BARRIER 1
-#endif
-
 __device__ inline unsigned current_xcc_id() {
     return __builtin_amdgcn_s_getreg(GETREG_IMMED(3, 0, HWREG_XCC_ID));
 }
@@ -66,6 +44,9 @@ __device__ inline void warmup_input_shard(opus_a2a_gemm_kargs kargs, int k_part,
     }
 }
 
+// Retained communication optimizations: contiguous communication WGs are
+// distributed by the hardware scheduler, peers are phase-shifted per WG, and
+// eight 16-byte vectors are pipelined through buffer operations with SC0|SC1.
 template<typename T>
 __device__ inline void copy_local_a_to_peer(opus_a2a_gemm_kargs kargs, int comm_slot, int comm_slots) {
     const int tid = opus::thread_id_x();
@@ -76,12 +57,10 @@ __device__ inline void copy_local_a_to_peer(opus_a2a_gemm_kargs kargs, int comm_
     const size_t vec_count = bytes / sizeof(copy_vec_t);
 
     for (int step = 1; step <= step_count; ++step) {
-        int peer_step = step;
-#if A2A_GEMM_COMM_PEER_ORDER == 1
         // Phase-shift each communication WG so concurrent WGs target different
         // peers instead of bursting all stores to one peer at a time.
-        peer_step = 1 + ((step - 1 + comm_slot) % step_count);
-#endif
+        const int peer_step =
+            1 + ((step - 1 + comm_slot) % step_count);
         const int dst_rank = (src_rank - peer_step + kargs.rank_count) & rank_mask;
         const size_t src_chunk = kargs.input_mode == OPUS_A2A_INPUT_GENERIC
                                      ? static_cast<size_t>(dst_rank)
@@ -90,42 +69,23 @@ __device__ inline void copy_local_a_to_peer(opus_a2a_gemm_kargs kargs, int comm_
                                 src_chunk * vec_count;
         char* peer_a = static_cast<char*>(cco_lsa_peer_c(kargs.recv_a_win, dst_rank));
         copy_vec_t* dst = reinterpret_cast<copy_vec_t*>(peer_a + static_cast<size_t>(src_rank) * bytes);
-#if A2A_GEMM_COMM_COPY_MODE == 2
+        // Buffer descriptors plus streaming cache policy were ~15% faster than
+        // the original pointer-copy path on the representative large shape.
         auto src_mem = opus::make_gmem(src, static_cast<unsigned int>(bytes));
         auto dst_mem = opus::make_gmem(dst, static_cast<unsigned int>(bytes));
-#endif
         auto load_vec = [&](size_t idx) -> copy_vec_t {
-#if A2A_GEMM_COMM_COPY_MODE == 2
             return src_mem.template load<1>(static_cast<int>(idx), 0,
                                             opus::number<CPOL_SC0_SC1_LOCAL>{});
-#else
-            return src[idx];
-#endif
         };
         auto store_vec = [&](size_t idx, const copy_vec_t& value) {
-#if A2A_GEMM_COMM_COPY_MODE == 2
             dst_mem.template store<1>(value, static_cast<int>(idx), 0,
                                       opus::number<CPOL_SC0_SC1_LOCAL>{});
-#else
-            dst[idx] = value;
-#endif
         };
 
         const size_t stride = static_cast<size_t>(comm_slots) * T::BLOCK_SIZE;
-#if A2A_GEMM_TILE_READY
-        const int ready_tile_count = kargs.num_m_tiles;
-        const size_t vecs_per_ready_tile =
-            static_cast<size_t>(T::B_M) * kargs.k_shard * sizeof(typename T::D_A) /
-            sizeof(copy_vec_t);
-#else
-        const int ready_tile_count = 1;
-        const size_t vecs_per_ready_tile = vec_count;
-#endif
-        for (int ready_tile = 0; ready_tile < ready_tile_count; ++ready_tile) {
-        const size_t tile_begin = static_cast<size_t>(ready_tile) * vecs_per_ready_tile;
-        const size_t tile_end = tile_begin + vecs_per_ready_tile;
-        for (size_t i = tile_begin + static_cast<size_t>(comm_slot * T::BLOCK_SIZE + tid);
-             i < tile_end;
+        for (size_t i =
+                 static_cast<size_t>(comm_slot * T::BLOCK_SIZE + tid);
+             i < vec_count;
              i += stride * 8) {
             const size_t i0 = i;
             const size_t i1 = i + stride;
@@ -136,14 +96,14 @@ __device__ inline void copy_local_a_to_peer(opus_a2a_gemm_kargs kargs, int comm_
             const size_t i6 = i + stride * 6;
             const size_t i7 = i + stride * 7;
             copy_vec_t v0, v1, v2, v3, v4, v5, v6, v7;
-            const bool p0 = i0 < tile_end;
-            const bool p1 = i1 < tile_end;
-            const bool p2 = i2 < tile_end;
-            const bool p3 = i3 < tile_end;
-            const bool p4 = i4 < tile_end;
-            const bool p5 = i5 < tile_end;
-            const bool p6 = i6 < tile_end;
-            const bool p7 = i7 < tile_end;
+            const bool p0 = i0 < vec_count;
+            const bool p1 = i1 < vec_count;
+            const bool p2 = i2 < vec_count;
+            const bool p3 = i3 < vec_count;
+            const bool p4 = i4 < vec_count;
+            const bool p5 = i5 < vec_count;
+            const bool p6 = i6 < vec_count;
+            const bool p7 = i7 < vec_count;
             if (p0) v0 = load_vec(i0);
             if (p1) v1 = load_vec(i1);
             if (p2) v2 = load_vec(i2);
@@ -152,9 +112,6 @@ __device__ inline void copy_local_a_to_peer(opus_a2a_gemm_kargs kargs, int comm_
             if (p5) v5 = load_vec(i5);
             if (p6) v6 = load_vec(i6);
             if (p7) v7 = load_vec(i7);
-#if A2A_GEMM_COMM_COPY_MODE == 0
-            asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-#endif
             if (p0) store_vec(i0, v0);
             if (p1) store_vec(i1, v1);
             if (p2) store_vec(i2, v2);
@@ -169,29 +126,23 @@ __device__ inline void copy_local_a_to_peer(opus_a2a_gemm_kargs kargs, int comm_
         __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "");
         __builtin_amdgcn_s_barrier();
         if (tid == 0) {
+            // Retained shard-level readiness: one counter per source avoids the
+            // per-M-tile fences, barriers, and atomics of the rejected variant.
             unsigned int* peer_ready = static_cast<unsigned int*>(cco_lsa_peer_c(kargs.ready_win, dst_rank));
-#if A2A_GEMM_TILE_READY
-            const int ready_index = src_rank * kargs.num_m_tiles + ready_tile;
-#else
             const int ready_index = src_rank;
-#endif
             __atomic_fetch_add(peer_ready + ready_index, 1u, __ATOMIC_RELAXED);
             asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
             __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "");
-        }
         }
     }
 }
 
 template<typename T>
-__device__ inline void wait_input_ready(opus_a2a_gemm_kargs kargs, int k_part, int m_tile, int tid, int wave_id) {
+__device__ inline void wait_input_ready(
+    opus_a2a_gemm_kargs kargs, int k_part, int tid, int wave_id) {
     if (tid == 0 && k_part != kargs.my_rank) {
         unsigned int* local_ready = static_cast<unsigned int*>(kargs.ready_local);
-#if A2A_GEMM_TILE_READY
-        const int ready_index = k_part * kargs.num_m_tiles + m_tile;
-#else
         const int ready_index = k_part;
-#endif
         while (flat_load_u32(local_ready + ready_index) < static_cast<unsigned int>(kargs.comm_wgs)) {
         }
     } else {
@@ -233,6 +184,8 @@ template<typename D_A>
 __device__ inline void fused_sdma_post_all(
     opus_a2a_gemm_sdma_fused_kargs kargs,
     int bx, int wave_id, int lane_id) {
+    // Literal fused optimization: block 0 posts all no-signal peer PUTs while
+    // the full grid proceeds with the local-ready GEMM work.
     if (bx != 0) return;
     const int peer = wave_id;
     if (lane_id == 0 &&
@@ -262,6 +215,8 @@ __device__ inline void fused_sdma_post_all(
 __device__ inline void fused_sdma_quiet_and_signal(
     opus_a2a_gemm_sdma_fused_kargs kargs,
     int bx, int shard_iter, int tid) {
+    // Drain only the peer needed by the next rank-rotated K shard, then publish
+    // its monotonic ready epoch with no world barrier.
     if (bx != 0) return;
     if (tid == 0) {
         const auto* state = kargs.sdma_comm_state;
@@ -302,8 +257,6 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
     static_assert(Mode >= 0 && Mode <= 4);
     static_assert(!Persistent || Mode == 0 || Mode == 4,
                   "persistent scheduling is only enabled for fused modes");
-    static_assert(Mode != 3 || !A2A_GEMM_READY_AWARE_K,
-                  "SDMA intra mode uses its own uint64 ready protocol");
     using namespace opus;
     using namespace gemm_quad_subtile;
     using namespace a2a_gemm_lsa;
@@ -322,17 +275,10 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
         fused_sdma_post_all<D_A>(kargs, bx, wave_id, lane_id);
     }
 
-#if A2A_GEMM_COMM_WG_PLACEMENT == 1
+    // Retained placement optimization: contiguous communication WGs spread
+    // across XCCs instead of bx=0,8,... concentrating them on one XCC.
     const bool is_comm_wg = Mode == 0 && bx < kargs.comm_wgs;
     const int comm_slot = bx;
-#else
-    constexpr int kXccStride = 8;
-    const int comm_span = kargs.comm_wgs * kXccStride;
-    const bool is_comm_wg = Mode == 0 &&
-                            bx < comm_span &&
-                            ((bx & (kXccStride - 1)) == 0);
-    const int comm_slot = bx >> 3;
-#endif
 #if A2A_GEMM_RECORD_WG_HW
     if (tid == 0 && kargs.record_wg_hw && kargs.wg_hw_records != nullptr && bx < kargs.wg_hw_record_count) {
         const unsigned hw_id = current_hw_id();
@@ -350,14 +296,7 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
         return;
     }
 
-    int comm_before = 0;
-    if constexpr (Mode == 0) {
-#if A2A_GEMM_COMM_WG_PLACEMENT == 1
-        comm_before = kargs.comm_wgs;
-#else
-        comm_before = bx < comm_span ? ((bx + kXccStride - 1) >> 3) : kargs.comm_wgs;
-#endif
-    }
+    const int comm_before = Mode == 0 ? kargs.comm_wgs : 0;
     const int compute_worker = bx - comm_before;
     constexpr int kComputeNWorkers = 28;
 
@@ -459,23 +398,14 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
     clear(v_c[1][1]);
     constexpr int kFullLocalShardTiles = 1024 / T::B_K;
     static_assert((kFullLocalShardTiles & (kFullLocalShardTiles - 1)) == 0);
-#if A2A_GEMM_READY_AWARE_K
-    [[maybe_unused]] int active_part = kargs.my_rank;
-    [[maybe_unused]] unsigned int processed_parts = 1u << kargs.my_rank;
-    __shared__ int selected_ready_part;
-#endif
-#if !A2A_GEMM_READY_AWARE_K
+    // Retained fixed K order: compute the local shard first, then rotate source
+    // rank deterministically. Dynamic ready-aware selection was slower.
     auto ordered_part = [&](int tile_k) {
         return (kargs.my_rank + (tile_k >> 4)) & (kargs.rank_count - 1);
     };
-#endif
     auto a_offset = [&](int half_tile_m, int tile_k) {
         const int shard_tile_k = tile_k & (kFullLocalShardTiles - 1);
-#if A2A_GEMM_READY_AWARE_K
-        const int part = Mode != 1 ? active_part : 0;
-#else
         const int part = Mode != 1 ? ordered_part(tile_k) : 0;
-#endif
         return part * kargs.m * kargs.k_shard +
                half_tile_m * T::HALF_B_M * kargs.stride_a + shard_tile_k * T::B_K;
     };
@@ -483,11 +413,7 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
         if constexpr (Mode != 1) {
             const int shard_tile_k = tile_k & (kFullLocalShardTiles - 1);
             return half_tile_n * T::HALF_B_N * kargs.stride_b +
-#if A2A_GEMM_READY_AWARE_K
-                   active_part * kargs.k_shard + shard_tile_k * T::B_K;
-#else
                    ordered_part(tile_k) * kargs.k_shard + shard_tile_k * T::B_K;
-#endif
         }
         return half_tile_n * T::HALF_B_N * kargs.stride_b + tile_k * T::B_K;
     };
@@ -498,11 +424,7 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
     int tic = 0, toc = 1;
 
     for (int shard_iter = 0; shard_iter < shard_outer_loops; ++shard_iter) {
-#if A2A_GEMM_READY_AWARE_K
-    const int shard_base_tile = 0;
-#else
     const int shard_base_tile = Mode != 1 ? shard_iter * kFullLocalShardTiles : 0;
-#endif
     if constexpr (Mode != 1) {
         if (shard_iter != 0) {
             s_waitcnt_vmcnt(0_I);
@@ -510,37 +432,7 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
         }
     }
     if constexpr (Mode != 1) {
-#if A2A_GEMM_READY_AWARE_K
-        if (shard_iter != 0) {
-            if (tid == 0) {
-                unsigned int* local_ready = static_cast<unsigned int*>(kargs.ready_local);
-                int found = -1;
-                while (found < 0) {
-                    for (int delta = 1; delta < kargs.rank_count; ++delta) {
-                        const int candidate = (kargs.my_rank + delta) & (kargs.rank_count - 1);
-                        if (processed_parts & (1u << candidate)) continue;
-#if A2A_GEMM_TILE_READY
-                        const int ready_index = candidate * kargs.num_m_tiles + m_tile;
-#else
-                        const int ready_index = candidate;
-#endif
-                        if (flat_load_u32(local_ready + ready_index) >=
-                            static_cast<unsigned int>(kargs.comm_wgs)) {
-                            found = candidate;
-                            break;
-                        }
-                    }
-                }
-                selected_ready_part = found;
-            }
-            __builtin_amdgcn_s_barrier();
-            active_part = selected_ready_part;
-            processed_parts |= 1u << active_part;
-        }
-        const int part = active_part;
-#else
         const int part = ordered_part(shard_base_tile);
-#endif
         if constexpr (Mode == 4) {
             if (part != kargs.my_rank) {
                 wait_fused_sdma_input_ready(kargs, part, tid);
@@ -550,7 +442,7 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
                 wait_sdma_input_ready(kargs, part, tid);
             }
         } else if constexpr (Mode == 0) {
-            wait_input_ready<T>(kargs, part, m_tile, tid, wave_id);
+            wait_input_ready<T>(kargs, part, tid, wave_id);
         }
     }
 
@@ -736,11 +628,10 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
     }
     }
 
-#if A2A_GEMM_PRESTORE_BARRIER
+    // Retained synchronization: removing this pre-store barrier was correct
+    // but about 8% slower because waves reached the C-store phase unevenly.
     if (wave_id_m == 0) __builtin_amdgcn_s_barrier();
-#endif
 
-    [[maybe_unused]] auto u_gc = make_layout_gc<T>(lane_id, wave_id_m, wave_id_n, kargs.stride_c);
     auto c_offset = [&](int half_tile_m, int half_tile_n) {
         return half_tile_m * T::HALF_B_M * kargs.stride_c + half_tile_n * T::HALF_B_N + col;
     };
@@ -758,7 +649,8 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
             p[0] = r0[0]; p[2] = r0[1];
             p[1] = r1[0]; p[3] = r1[1];
         });
-#if A2A_GEMM_C_STORE_MODE == 2
+        // Retained C-store optimization: gather adjacent vec8 outputs with
+        // ds_bpermute instead of staging the half-tile through LDS.
         static_for<num_chunks>([&](auto c) {
             auto* p = p_u32 + c.value * u32_per_chunk;
             const int half_col_block = lane_id / 32;
@@ -782,9 +674,6 @@ void a2a_gemm_lsa_kernel(Kargs kargs) {
                 g_c, v, c_offset(half_tile_m, half_tile_n) +
                             row_in_half * kargs.stride_c + col_vec * T::VEC_C);
         });
-#else
-        g_c.template store<T::VEC_C>(v_c_f16, u_gc, c_offset(half_tile_m, half_tile_n));
-#endif
     };
 
     direct_store(v_c[0][0], 0, 0);

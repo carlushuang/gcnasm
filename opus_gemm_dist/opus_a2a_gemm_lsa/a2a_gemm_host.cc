@@ -12,13 +12,6 @@
 
 #include "gemm_defs.h"
 
-#ifndef A2A_GEMM_COMM_WG_PLACEMENT
-#define A2A_GEMM_COMM_WG_PLACEMENT 1
-#endif
-#ifndef A2A_GEMM_TILE_READY
-#define A2A_GEMM_TILE_READY 0
-#endif
-
 using namespace mori::cco;
 
 using ncclResult_t = int;
@@ -363,8 +356,7 @@ int main(int argc, char** argv) {
     const size_t recv_elems = static_cast<size_t>(nranks) * a_chunk_elems;
     const int num_m_tiles = ceil_div(M, Traits::B_M);
     const int num_n_tiles = ceil_div(N, Traits::B_N);
-    const size_t ready_elems = static_cast<size_t>(nranks) *
-                               (A2A_GEMM_TILE_READY ? num_m_tiles : 1);
+    const size_t ready_elems = static_cast<size_t>(nranks);
     static constexpr int kComputeNWorkers = 28;
     const bool n_outer_mode = mode == 1;
     const int compute_tasks = n_outer_mode ? (num_m_tiles * kComputeNWorkers)
@@ -374,12 +366,10 @@ int main(int argc, char** argv) {
         const int auto_compute_wgs = cu_count - comm_wgs;
         compute_wgs = compute_wgs_arg > 0 ? compute_wgs_arg : auto_compute_wgs;
         if (compute_wgs > compute_tasks) compute_wgs = compute_tasks;
-        const int min_compute_wgs_for_interleaved_comm =
-            A2A_GEMM_COMM_WG_PLACEMENT == 0 ? 7 * (comm_wgs - 1) : 1;
-        if (compute_wgs <= 0 || compute_wgs < min_compute_wgs_for_interleaved_comm) {
+        if (compute_wgs <= 0) {
             if (rank == 0) {
                 fprintf(stderr,
-                        "persistent compute WG count %d is too small for %d interleaved comm WGs\n",
+                        "persistent compute WG count %d is invalid for %d communication WGs\n",
                         compute_wgs, comm_wgs);
             }
             MPI_Abort(MPI_COMM_WORLD, 1);
@@ -922,45 +912,61 @@ int main(int argc, char** argv) {
         CHECK_HIP(hipStreamSynchronize(sdma_compute_stream));
         CHECK_CCO(ccoBarrierAll(comm));
 
-        auto phase_events =
-            std::make_unique<hipEvent_t[]>(4 * static_cast<size_t>(iters));
-        for (int i = 0; i < 4 * iters; ++i) {
-            CHECK_HIP(hipEventCreate(&phase_events[i]));
-        }
-        for (int i = 0; i < iters; ++i) {
-            const int event_base = 4 * i;
-            CHECK_HIP(hipEventRecord(
-                phase_events[event_base], sdma_compute_stream));
-            auto fused_args = prepare_literal_fused(static_cast<int>(epoch & 1));
-            CHECK_HIP(hipEventRecord(
-                phase_events[event_base + 1], sdma_compute_stream));
-            CHECK_HIP(hipEventRecord(
-                phase_events[event_base + 2], sdma_compute_stream));
-            launch_literal_fused(fused_args);
-            CHECK_HIP(hipEventRecord(
-                phase_events[event_base + 3], sdma_compute_stream));
-            ++epoch;
-        }
-        CHECK_HIP(hipEventSynchronize(phase_events[4 * iters - 1]));
-        CHECK_HIP(hipEventElapsedTime(
-            &total_ms, phase_events[0], phase_events[4 * iters - 1]));
-        for (int i = 0; i < iters; ++i) {
-            const int event_base = 4 * i;
-            float self_copy_ms = 0.0f, fused_compute_ms = 0.0f;
+        if (!strict_timing) {
+            CHECK_HIP(hipEventRecord(start, sdma_compute_stream));
+            for (int i = 0; i < iters; ++i) {
+                auto fused_args =
+                    prepare_literal_fused(static_cast<int>(epoch & 1));
+                launch_literal_fused(fused_args);
+                ++epoch;
+            }
+            CHECK_HIP(hipEventRecord(stop, sdma_compute_stream));
+            CHECK_HIP(hipEventSynchronize(stop));
+            CHECK_HIP(hipEventElapsedTime(&total_ms, start, stop));
+        } else {
+            auto phase_events =
+                std::make_unique<hipEvent_t[]>(4 * static_cast<size_t>(iters));
+            for (int i = 0; i < 4 * iters; ++i) {
+                CHECK_HIP(hipEventCreate(&phase_events[i]));
+            }
+            for (int i = 0; i < iters; ++i) {
+                const int event_base = 4 * i;
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base], sdma_compute_stream));
+                auto fused_args =
+                    prepare_literal_fused(static_cast<int>(epoch & 1));
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base + 1], sdma_compute_stream));
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base + 2], sdma_compute_stream));
+                launch_literal_fused(fused_args);
+                CHECK_HIP(hipEventRecord(
+                    phase_events[event_base + 3], sdma_compute_stream));
+                ++epoch;
+            }
+            CHECK_HIP(hipEventSynchronize(phase_events[4 * iters - 1]));
             CHECK_HIP(hipEventElapsedTime(
-                &self_copy_ms,
-                phase_events[event_base], phase_events[event_base + 1]));
-            CHECK_HIP(hipEventElapsedTime(
-                &fused_compute_ms,
-                phase_events[event_base + 2], phase_events[event_base + 3]));
-            strict_comm_total_ms += self_copy_ms;
-            strict_compute_total_ms += fused_compute_ms;
-        }
-        strict_total_ms = total_ms;
-        strict_barrier_idle_total_ms =
-            strict_total_ms - strict_comm_total_ms - strict_compute_total_ms;
-        for (int i = 0; i < 4 * iters; ++i) {
-            CHECK_HIP(hipEventDestroy(phase_events[i]));
+                &total_ms, phase_events[0], phase_events[4 * iters - 1]));
+            for (int i = 0; i < iters; ++i) {
+                const int event_base = 4 * i;
+                float self_copy_ms = 0.0f, fused_compute_ms = 0.0f;
+                CHECK_HIP(hipEventElapsedTime(
+                    &self_copy_ms,
+                    phase_events[event_base], phase_events[event_base + 1]));
+                CHECK_HIP(hipEventElapsedTime(
+                    &fused_compute_ms,
+                    phase_events[event_base + 2],
+                    phase_events[event_base + 3]));
+                strict_comm_total_ms += self_copy_ms;
+                strict_compute_total_ms += fused_compute_ms;
+            }
+            strict_total_ms = total_ms;
+            strict_barrier_idle_total_ms =
+                strict_total_ms - strict_comm_total_ms -
+                strict_compute_total_ms;
+            for (int i = 0; i < 4 * iters; ++i) {
+                CHECK_HIP(hipEventDestroy(phase_events[i]));
+            }
         }
         if (validate) {
             validate_output_samples(
@@ -1344,15 +1350,24 @@ int main(int argc, char** argv) {
             const double critical_phase_sum =
                 critical_comm_ms + critical_compute_ms +
                 critical_barrier_idle_ms;
-            printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=fused comm_ms=%.4f compute_ms=%.4f split_sum_ms=%.4f fused_kernel_ms=%.4f fused_e2e_ms=%.4f fusion_win=%.2f%% critical_rank=%d critical_self_copy_ms=%.4f critical_fused_kernel_ms=%.4f barrier_idle_ms=%.4f critical_phase_sum=%.4f critical_e2e_ms=%.4f %.2f TFLOP/s %s\n",
-                   M, N, K, nranks, input_mode_name,
-                   max_comm_ms, max_compute_ms, split_sum,
-                   max_fused_kernel_ms, max_ms, fusion_win,
-                   critical_rank, critical_comm_ms, critical_compute_ms,
-                   critical_barrier_idle_ms, critical_phase_sum,
-                   critical_total_ms,
-                   flops / (max_ms * 1.0e9),
-                   (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
+            if (!strict_timing) {
+                printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=fused comm_ms=%.4f compute_ms=%.4f split_sum_ms=%.4f fused_kernel_ms=%.4f fused_e2e_ms=%.4f fusion_win=%.2f%% strict_timing=0 %.2f TFLOP/s %s\n",
+                       M, N, K, nranks, input_mode_name,
+                       max_comm_ms, max_compute_ms, split_sum,
+                       max_fused_kernel_ms, max_ms, fusion_win,
+                       flops / (max_ms * 1.0e9),
+                       (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
+            } else {
+                printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=fused comm_ms=%.4f compute_ms=%.4f split_sum_ms=%.4f fused_kernel_ms=%.4f fused_e2e_ms=%.4f fusion_win=%.2f%% strict_timing=1 critical_rank=%d critical_self_copy_ms=%.4f critical_fused_kernel_ms=%.4f barrier_idle_ms=%.4f critical_phase_sum=%.4f critical_e2e_ms=%.4f %.2f TFLOP/s %s\n",
+                       M, N, K, nranks, input_mode_name,
+                       max_comm_ms, max_compute_ms, split_sum,
+                       max_fused_kernel_ms, max_ms, fusion_win,
+                       critical_rank, critical_comm_ms, critical_compute_ms,
+                       critical_barrier_idle_ms, critical_phase_sum,
+                       critical_total_ms,
+                       flops / (max_ms * 1.0e9),
+                       (!validate || total_mism == 0) ? "SUCCESS" : "FAILED");
+            }
         } else if (mode == 4) {
             if (!strict_timing) {
                 printf("a2a_gemm_sdma M=%d N=%d K=%d ranks=%d input_mode=%s schedule=%s comm_ms=%.4f compute_ms=%.4f comm_plus_compute=%.4f pipeline_total_ms=%.4f strict_timing=0 %.2f TFLOP/s %s\n",

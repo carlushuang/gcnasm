@@ -5,6 +5,11 @@
 #include <opus/hip_minimal.hpp>
 #include "gemm_defs.h"
 
+// Optimized instance map:
+//   <false,false,false>: Direct LSA / local-output baseline.
+//   <false,false,true >: rank-rotated two-M-tile Direct LSA stripe.
+//   <true, false,false>: compact local staging for split LSA / bulk SDMA.
+//   <true, true, false>: chunk-ready in-kernel SDMA submission.
 #ifndef __HIP_DEVICE_COMPILE__
 template<typename Traits, bool LocalStaging, bool ChunkFused, bool DirectStriped>
 __global__ void gemm_a16w16_quad_subtile_kernel(opus_gemm_kargs kargs) {}
