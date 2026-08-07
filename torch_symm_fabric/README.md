@@ -234,6 +234,42 @@ One more, in the code rather than the environment: a HIP call that fails leaves
 here deliberately provoke failures, so they clear the error before returning -- otherwise
 an unrelated `torch.arange` a few lines later dies with "CUDA error: invalid argument".
 
+## Cross-process, and the road to cross-node
+
+`main.py` runs under torchrun, so its ranks share a parent and a rendezvous. `xproc.py`
+deliberately does not: two processes are started independently and meet over a TCP socket,
+which is all a fabric handle needs.
+
+```bash
+python3 xproc.py serve   --gpu 0 --port 55600 --method rebind
+python3 xproc.py connect --gpu 1 --port 55600 --method rebind --host <server-ip>
+```
+
+Verified on 4x gfx1250, with `own` and with `rebind`, and -- the stronger case -- between
+**two separate containers**, each `pid 1` in its own namespace, sharing no launcher, no fd
+table and no PID namespace:
+
+```
+[serve]   pid 1 gpu 0 method=rebind: buf 0x771ee3400000, exported 64-byte fabric handle 07145b3e...
+[connect] pid 1 gpu 1 method=rebind: connected, imported peer window -> 0x766bda600000
+[connect] read server's buffer: OK
+[serve]   our buffer now holds the client's pattern: OK
+```
+
+Both directions are checked: the client reads the server's sentinel, writes its own pattern
+back through the mapping, and the server verifies it.
+
+This is exactly why fabric matters rather than POSIX fds. An fd is a number in one
+process's descriptor table -- to hand it to another process you need `SCM_RIGHTS` over a
+unix socket or `pidfd_getfd`, and neither crosses a machine boundary. A fabric handle is 64
+opaque position-independent bytes you can put on any wire, which is why `xproc.py` needs
+nothing more than `struct.pack` and `sendall`.
+
+For real cross-node, only `--host` changes. Note the caveat: this test proves the software
+shape on one host. Two arbitrary nodes can only map each other if their GPUs are actually
+part of the same fabric domain -- the handle being portable does not by itself create a
+path between them.
+
 ## The CUDA control case
 
 [`nvidia/`](nvidia/) runs the same experiment on CUDA in **pure python** -- no C++ at all.
@@ -256,6 +292,7 @@ three methods here have to give up.
 | `fabric_shim.cpp` | `LD_PRELOAD` interposer on `hipMemCreate` (method `shim` only) |
 | `hip_fabric.py` | ctypes bindings, `OwnFabricBuffer`, `rebind_to_fabric`, `SymmFabricWindow` |
 | `main.py` | rank driver: build the buffer by `--method`, probe, exchange, verify, benchmark |
+| `xproc.py` | two independently-started processes swapping handles over TCP -- the cross-node shape |
 | `build.sh` | builds `libfabric_symm.so` and `libfabric_shim.so` |
 | `run.sh` | builds if needed, preloads the shim when asked, launches under `torchrun` |
 | `bench_methods.sh` | runs all three methods and collates the comparison table |
