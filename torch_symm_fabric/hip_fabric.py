@@ -1,7 +1,7 @@
-"""ctypes bindings for fabric_symm.hip, plus the zero-copy torch tensor wrapper.
+"""ctypes bindings for fabric_symm.hip.
 
-Nothing in here imports torch at module scope except `tensor_from_ptr`, so the
-low-level pieces can be reused from a plain HIP script if you want.
+The buffer is always allocated by torch. This module only exports it over fabric,
+imports peers, and hands back peer pointers (and torch views onto them).
 """
 
 import ctypes
@@ -28,14 +28,14 @@ def load(path=None):
     lib.fs_last_error.restype = ctypes.c_char_p
     lib.fs_device_count.argtypes = [ctypes.POINTER(ctypes.c_int)]
     lib.fs_fabric_supported.argtypes = [ctypes.c_int] + [ctypes.POINTER(ctypes.c_int)] * 2
-    lib.fs_alloc.argtypes = [
-        ctypes.c_int,
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_size_t),
+    lib.fs_export_ptr.argtypes = [
+        ctypes.c_void_p,
         ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_size_t),
     ]
+    lib.fs_release_handle.argtypes = [ctypes.c_uint64]
     lib.fs_import.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -43,7 +43,7 @@ def load(path=None):
         ctypes.POINTER(ctypes.c_void_p),
         ctypes.POINTER(ctypes.c_uint64),
     ]
-    lib.fs_release.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64]
+    lib.fs_release_import.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64]
     lib.fs_probe_ptr.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(ctypes.c_int)] * 3
     lib.fs_copy.argtypes = [
         ctypes.c_int,
@@ -69,8 +69,7 @@ def load(path=None):
 
 def _check(rc, what):
     if rc != 0:
-        msg = _lib.fs_last_error().decode()
-        raise RuntimeError(f"{what} failed: hip error {rc} ({msg})")
+        raise RuntimeError(f"{what} failed: hip error {rc} ({_lib.fs_last_error().decode()})")
 
 
 def device_count():
@@ -117,76 +116,11 @@ def bench(dev, dst, src, nbytes, num_cu, warmup, loop):
     ms = ctypes.c_double()
     _check(
         load().fs_bench(
-            dev,
-            ctypes.c_void_p(dst),
-            ctypes.c_void_p(src),
-            nbytes,
-            num_cu,
-            warmup,
-            loop,
-            ctypes.byref(ms),
+            dev, ctypes.c_void_p(dst), ctypes.c_void_p(src), nbytes, num_cu, warmup, loop, ctypes.byref(ms)
         ),
         "fs_bench",
     )
     return ms.value
-
-
-class FabricWindow:
-    """The local half of a symmetric window, plus every peer's imported pointer.
-
-    local_ptr  -- this rank's buffer, mapped read/write on this rank's device
-    handle     -- the 64-byte fabric handle to hand to peers
-    peer_ptr[] -- filled in by import_peers(); peer_ptr[my_rank] is local_ptr
-    """
-
-    def __init__(self, dev, nbytes):
-        self.dev = dev
-        lib = load()
-        buf = ctypes.create_string_buffer(FABRIC_HANDLE_BYTES)
-        ptr, h, total = ctypes.c_void_p(), ctypes.c_uint64(), ctypes.c_size_t()
-        _check(
-            lib.fs_alloc(
-                dev,
-                nbytes,
-                ctypes.byref(ptr),
-                ctypes.byref(h),
-                ctypes.byref(total),
-                buf,
-            ),
-            "fs_alloc",
-        )
-        self.local_ptr = ptr.value
-        self._handle = h.value
-        self.total = total.value
-        self.handle = buf.raw[:FABRIC_HANDLE_BYTES]
-        self.peer_ptr = []
-        self._imported = []
-
-    def import_peers(self, handles, totals, my_rank):
-        """Map every peer's window. `handles`/`totals` are all-gathered, indexed by rank."""
-        lib = load()
-        self.peer_ptr = []
-        for rank, (fh, total) in enumerate(zip(handles, totals)):
-            if rank == my_rank:
-                self.peer_ptr.append(self.local_ptr)
-                continue
-            ptr, h = ctypes.c_void_p(), ctypes.c_uint64()
-            _check(
-                lib.fs_import(self.dev, fh, total, ctypes.byref(ptr), ctypes.byref(h)),
-                f"fs_import(rank={rank})",
-            )
-            self.peer_ptr.append(ptr.value)
-            self._imported.append((ptr.value, total, h.value))
-        return self.peer_ptr
-
-    def close(self):
-        lib = load()
-        for ptr, total, h in self._imported:
-            lib.fs_release(ctypes.c_void_p(ptr), total, h)
-        self._imported = []
-        if self.local_ptr is not None:
-            lib.fs_release(ctypes.c_void_p(self.local_ptr), self.total, self._handle)
-            self.local_ptr = None
 
 
 _TYPESTR = {
@@ -194,7 +128,7 @@ _TYPESTR = {
     "torch.int64": "<i8",
     "torch.float32": "<f4",
     "torch.float16": "<f2",
-    "torch.bfloat16": "<f2",  # no bf16 code in the array interface; only the size matters here
+    "torch.bfloat16": "<f2",  # the array interface has no bf16 code; only the width matters
     "torch.uint8": "|u1",
 }
 
@@ -202,9 +136,9 @@ _TYPESTR = {
 def tensor_from_ptr(ptr, numel, dtype, device):
     """Wrap a raw device pointer as a torch tensor with no copy.
 
-    Uses __cuda_array_interface__, which torch.as_tensor consumes directly. The
-    returned tensor aliases the fabric mapping, so torch ops read and write the
-    exact memory peers see through their imported pointers.
+    Uses __cuda_array_interface__, which torch.as_tensor consumes directly. Applied to a
+    fabric-imported peer pointer this yields a tensor that torch ops read and write
+    straight across the fabric.
     """
     import torch
 
@@ -226,3 +160,93 @@ def tensor_from_ptr(ptr, numel, dtype, device):
     if t.data_ptr() != ptr:
         raise RuntimeError("torch.as_tensor copied instead of aliasing the pointer")
     return t.view(dtype) if t.dtype != dtype else t
+
+
+class SymmFabricWindow:
+    """Fabric export/import for a torch symmetric-memory tensor.
+
+    torch owns the buffer; this only borrows its allocation handle. Mirrors the shape of
+    torch's own rendezvous handle -- ``get_buffer(peer, sizes, dtype)`` returns a tensor
+    on the peer's memory -- but reaches peers over fabric instead of POSIX fds.
+
+        win = SymmFabricWindow(t, dev)
+        win.import_peers(all_gathered_descriptors, my_rank)
+        win.get_buffer(peer, (n,), torch.int32)
+    """
+
+    def __init__(self, tensor, dev):
+        self.dev = dev
+        self.device = tensor.device
+        self.tensor = tensor
+        lib = load()
+
+        fh = ctypes.create_string_buffer(FABRIC_HANDLE_BYTES)
+        handle, base, size = ctypes.c_uint64(), ctypes.c_void_p(), ctypes.c_size_t()
+        rc = lib.fs_export_ptr(
+            ctypes.c_void_p(tensor.data_ptr()),
+            fh,
+            ctypes.byref(handle),
+            ctypes.byref(base),
+            ctypes.byref(size),
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"fabric export of the torch buffer failed: hip error {rc} "
+                f"({lib.fs_last_error().decode()}). The allocation is not fabric-capable -- "
+                f"preload libfabric_shim.so (use ./run.sh)."
+            )
+
+        self._handle = handle.value
+        self.base = base.value
+        self.size = size.value
+        # torch may place the tensor at an offset inside its allocation; peers need it
+        self.offset = tensor.data_ptr() - self.base
+        self.handle = fh.raw[:FABRIC_HANDLE_BYTES]
+        self.peer_ptr = []
+        self._imported = []
+
+    def descriptor(self):
+        """What a peer needs in order to map this rank's buffer: (handle, size, offset)."""
+        return (self.handle, self.size, self.offset)
+
+    def import_peers(self, descriptors, my_rank):
+        """Map every peer's buffer. `descriptors` is all-gathered, indexed by rank."""
+        lib = load()
+        self.peer_ptr = []
+        for rank, (fh, size, offset) in enumerate(descriptors):
+            if rank == my_rank:
+                self.peer_ptr.append(self.tensor.data_ptr())
+                continue
+            ptr, h = ctypes.c_void_p(), ctypes.c_uint64()
+            _check(
+                lib.fs_import(self.dev, fh, size, ctypes.byref(ptr), ctypes.byref(h)),
+                f"fs_import(rank={rank})",
+            )
+            self._imported.append((ptr.value, size, h.value))
+            # the peer's tensor sits at the same offset inside its own allocation
+            self.peer_ptr.append(ptr.value + offset)
+        return self.peer_ptr
+
+    def get_buffer(self, peer, sizes, dtype, storage_offset=0):
+        """A torch tensor aliasing `peer`'s buffer, reachable over the fabric mapping."""
+        numel = 1
+        for s in sizes:
+            numel *= s
+        ptr = self.peer_ptr[peer] + storage_offset * _itemsize(dtype)
+        t = tensor_from_ptr(ptr, numel, dtype, self.device)
+        return t.view(*sizes) if tuple(sizes) != (numel,) else t
+
+    def close(self):
+        lib = load()
+        for ptr, size, h in self._imported:
+            lib.fs_release_import(ctypes.c_void_p(ptr), size, h)
+        self._imported = []
+        if self._handle is not None:
+            lib.fs_release_handle(self._handle)
+            self._handle = None
+
+
+def _itemsize(dtype):
+    import torch
+
+    return torch.empty(0, dtype=dtype).element_size()

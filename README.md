@@ -79,7 +79,7 @@ See the [detailed README](vector_add_asm/README.md).
 
 | Tag | Folder | Description |
 |-----|--------|-------------|
-| `[H+]` | [`torch_symm_fabric`](torch_symm_fabric/) | **Cross-GPU transfer over HIP fabric handles** -- symmetric window via HIP VMM (`hipMemHandleTypeFabric`), aliased zero-copy as torch tensors, handles all-gathered over `torch.distributed`; correctness + read/write bandwidth sweep. Explains why `torch.distributed._symmetric_memory` cannot do this on ROCm. See the [detailed README](torch_symm_fabric/README.md). |
+| `[H+]` | [`torch_symm_fabric`](torch_symm_fabric/) | **Fabric export for pure-torch symmetric memory** -- the buffer is a plain `symm_mem.empty()` tensor; an `LD_PRELOAD` shim makes torch's `hipMemCreate` ask for `hipMemHandleTypeFabric`, then peers are reached over 64-byte fabric handles instead of POSIX fds. Correctness + cross-GPU read/write bandwidth sweep. See the [detailed README](torch_symm_fabric/README.md). |
 
 ### Warp / Wave Primitives
 

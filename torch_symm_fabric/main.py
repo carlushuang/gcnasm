@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Cross-GPU transfer over a HIP fabric-handle symmetric window, driven from torch.
+"""Cross-GPU transfer over HIP fabric handles, on a pure-torch symmetric memory buffer.
 
-Each rank owns one GPU and builds the local half of a symmetric window with the HIP
-VMM API (hipMemCreate with requestedHandleTypes = hipMemHandleTypeFabric), wraps it
-zero-copy as a torch tensor, all-gathers the 64-byte fabric handle, and imports every
-peer's window. After that a peer's buffer is just a device pointer, so an ordinary
-kernel can read or write it.
+The buffer is a plain `torch.distributed._symmetric_memory` tensor -- allocated,
+filled and compared with ordinary torch code. The only thing this example adds is the
+piece torch lacks on ROCm: exporting that buffer as a fabric handle so peers can map it.
 
-    Phase 0  probe what torch.distributed._symmetric_memory hands you on this build
-    Phase 1  correctness -- every rank reads every peer's window and checks the sentinel
+    Phase 0  probe the handle types torch's allocation actually supports
+    Phase 1  correctness -- read every peer's buffer with pure torch ops
     Phase 2  bandwidth   -- ring read / write sweep across the fabric mapping
 
-    ./run.sh                        # all visible GPUs
-    ./run.sh --window-mib 512 --sizes 1,16,64,256
+Run through ./run.sh, which preloads libfabric_shim.so; without it torch allocates
+POSIX-fd-only memory and the export in phase 0 fails with a pointer to the fix.
 """
 
 import argparse
@@ -21,6 +19,7 @@ import sys
 
 import torch
 import torch.distributed as dist
+import torch.distributed._symmetric_memory as symm_mem
 
 import hip_fabric as hf
 
@@ -36,29 +35,12 @@ def human(nbytes):
 
 
 def sentinel(n, rank, device):
-    """Per-rank pattern so a mismatch tells you which window you actually read."""
+    """Per-rank pattern so a mismatch tells you which buffer you actually read."""
     return torch.arange(n, device=device, dtype=torch.int32) + rank * 100000
 
 
-def probe_torch_symm_mem(device):
-    """Report whether a torch symm_mem buffer is VMM-backed and fabric-exportable.
-
-    On ROCm builds c10::cuda::get_fabric_access() is compiled out (`#if !defined(USE_ROCM)`),
-    so torch always allocates symmetric memory with the POSIX-fd handle type and the fabric
-    export below fails. That is exactly why this example allocates its own window.
-    """
-    try:
-        import torch.distributed._symmetric_memory as symm_mem
-    except ImportError:
-        print("[probe] torch.distributed._symmetric_memory unavailable")
-        return
-
-    try:
-        t = symm_mem.empty(MIB, dtype=torch.uint8, device=device)
-    except Exception as exc:  # allocation can fail if no symm-mem backend is present
-        print(f"[probe] symm_mem.empty failed: {type(exc).__name__}: {exc}")
-        return
-
+def report_handle_types(t, rank):
+    """Print which shareable handle types torch's own allocation supports."""
     retain, fabric, fd = hf.probe_ptr(t.data_ptr())
     ok = lambda rc: "ok" if rc == 0 else f"FAIL(hip {rc})"  # noqa: E731
     print(
@@ -67,19 +49,25 @@ def probe_torch_symm_mem(device):
     )
     if fabric != 0:
         print(
-            "[probe] -> torch cannot export this buffer over fabric on ROCm; "
-            "this example allocates its own fabric-capable window instead"
+            "[probe] torch allocated this POSIX-fd-only, so it cannot cross a fabric.\n"
+            "[probe] c10::cuda::get_fabric_access() is inside `#if !defined(USE_ROCM)`, and the\n"
+            "[probe] handle types of a VMM allocation are frozen at hipMemCreate time.\n"
+            "[probe] Preload libfabric_shim.so to flip that one bit -- use ./run.sh."
         )
+    else:
+        print("[probe] fabric-exportable (libfabric_shim.so is active)")
+    return fabric == 0
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--window-mib", type=int, default=256, help="symmetric window size per rank")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--buffer-mib", type=int, default=256, help="symm_mem tensor per rank")
     p.add_argument("--verify-mib", type=int, default=16, help="bytes checked in the correctness phase")
     p.add_argument("--sizes", type=str, default="1,16,64,256", help="bandwidth sweep sizes, MiB")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--loop", type=int, default=20)
-    p.add_argument("--no-probe", action="store_true", help="skip the torch symm_mem probe")
     p.add_argument("--verbose", action="store_true", help="print correctness lines from every rank")
     return p.parse_args()
 
@@ -91,7 +79,7 @@ def main():
     world = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
-    # gloo is enough: the only thing exchanged collectively is 64 bytes of handle per rank
+    # gloo is enough: all that is exchanged collectively is 64 bytes of handle per rank
     dist.init_process_group("gloo")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
@@ -102,53 +90,65 @@ def main():
     num_cu = torch.cuda.get_device_properties(dev).multi_processor_count
     supported, detail = hf.fabric_supported(dev)
     if not supported:
-        print(f"[fatal] rank {rank} dev {dev}: fabric handle unusable -- {detail}", flush=True)
+        if rank == 0:
+            print(f"[fatal] device {dev}: fabric handle unusable -- {detail}")
         dist.destroy_process_group()
         return 2
 
-    window_bytes = args.window_mib * MIB
-    verify_bytes = min(args.verify_mib, args.window_mib) * MIB
+    buffer_bytes = args.buffer_mib * MIB
+    verify_bytes = min(args.verify_mib, args.buffer_mib) * MIB
     sizes = [int(s) * MIB for s in args.sizes.split(",") if s.strip()]
-    sizes = [s for s in sizes if s <= window_bytes]
+    sizes = [s for s in sizes if s <= buffer_bytes]
 
     if rank == 0:
         print(f"torch {torch.__version__}, hip {torch.version.hip}")
-        print(f"{world} rank(s), {num_cu} CUs/GPU, window {human(window_bytes)}/rank\n")
-        if not args.no_probe:
-            probe_torch_symm_mem(device)
-            print()
+        print(f"{world} rank(s), {num_cu} CUs/GPU, symm_mem buffer {human(buffer_bytes)}/rank\n")
 
-    # ---- build the symmetric window and exchange fabric handles ----
-    win = hf.FabricWindow(dev, window_bytes)
-    buf = hf.tensor_from_ptr(win.local_ptr, win.total // 4, torch.int32, device)
-
+    # ---- pure torch: allocate the symmetric buffer and fill it with torch ops ----
+    numel = buffer_bytes // 4
+    buf = symm_mem.empty(numel, dtype=torch.int32, device=device)
     n_ver = verify_bytes // 4
     buf[:n_ver] = sentinel(n_ver, rank, device)
     torch.cuda.synchronize()
 
-    gathered = [None] * world
-    dist.all_gather_object(gathered, (win.handle, win.total))
-    win.import_peers([g[0] for g in gathered], [g[1] for g in gathered], rank)
+    if rank == 0:
+        exportable = report_handle_types(buf, rank)
+        print()
+    else:
+        exportable = hf.probe_ptr(buf.data_ptr())[1] == 0
 
-    print(
-        f"[rank {rank}] dev {dev}: local {win.local_ptr:#x} "
-        f"({human(win.total)}) -> peers {[hex(p) for p in win.peer_ptr]}",
-        flush=True,
-    )
+    flag = torch.tensor([0 if exportable else 1], dtype=torch.int64)
+    dist.all_reduce(flag, op=dist.ReduceOp.SUM)
+    if flag.item() != 0:
+        dist.destroy_process_group()
+        return 2
+
+    # ---- our part: export over fabric, exchange, import every peer ----
+    win = hf.SymmFabricWindow(buf, dev)
+
+    descriptors = [None] * world
+    dist.all_gather_object(descriptors, win.descriptor())
+    win.import_peers(descriptors, rank)
+
+    if rank == 0 or args.verbose:
+        print(
+            f"[rank {rank}] dev {dev}: torch buf {buf.data_ptr():#x} "
+            f"(alloc {human(win.size)} +{win.offset}) -> peers {[hex(p) for p in win.peer_ptr]}",
+            flush=True,
+        )
     dist.barrier()
 
-    # ---- phase 1: read every peer's window and check its sentinel ----
+    # ---- phase 1: read every peer's buffer with pure torch ops ----
     errors = 0
-    staging = torch.empty(n_ver, dtype=torch.int32, device=device)
     for peer in range(world):
-        hf.copy(dev, staging.data_ptr(), win.peer_ptr[peer], verify_bytes, num_cu)
-        bad = int((staging != sentinel(n_ver, peer, device)).sum().item())
+        # a torch tensor aliasing the peer's memory; the comparison is the transfer
+        peer_buf = win.get_buffer(peer, (n_ver,), torch.int32)
+        bad = int((peer_buf != sentinel(n_ver, peer, device)).sum().item())
         errors += bad != 0
-        # only rank 0 narrates the happy path; a mismatch always speaks up
         if bad or rank == 0 or args.verbose:
             tag = "local" if peer == rank else "peer "
             status = "OK" if bad == 0 else f"MISMATCH ({bad} elems)"
-            print(f"[rank {rank}] read {tag} {peer}: {human(verify_bytes)} {status}", flush=True)
+            print(f"[rank {rank}] torch read {tag} {peer}: {human(verify_bytes)} {status}", flush=True)
     dist.barrier()
 
     # ---- phase 2: ring bandwidth over the fabric mapping ----
@@ -165,7 +165,8 @@ def main():
             print(f"{'----':>10} {'----------':>13} {'---------':>13} {'----------':>13}")
 
         def timed(dst, src, nbytes):
-            return nbytes / (hf.bench(dev, dst, src, nbytes, num_cu, args.warmup, args.loop) / 1e3) / 1e9
+            ms = hf.bench(dev, dst, src, nbytes, num_cu, args.warmup, args.loop)
+            return nbytes / (ms / 1e3) / 1e9
 
         for nbytes in sizes:
             # device-local copy with the same kernel, as a reference for the fabric numbers
@@ -184,7 +185,7 @@ def main():
                     f"{gbps[1].item():13.1f} {gbps[2].item():13.1f}"
                 )
 
-    # the write phase overwrote peer windows, so tear down without re-checking
+    # the write phase overwrote peer buffers, so tear down without re-checking
     dist.barrier()
     win.close()
 

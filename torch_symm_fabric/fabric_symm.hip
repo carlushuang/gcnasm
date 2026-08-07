@@ -1,11 +1,10 @@
 // fabric_symm.hip -- HIP VMM fabric-handle symmetric window + cross-GPU copy kernels.
 //
-// A "symmetric window" here is one physical allocation per rank, created through the
-// HIP virtual memory management API with requestedHandleTypes = hipMemHandleTypeFabric
-// so it can be exported as a 64-byte POD fabric handle. Every rank exchanges its handle,
-// imports every peer's handle into its own address space, and ends up with a peer pointer
-// per rank -- the same shape torch.distributed._symmetric_memory gives you, but built on
-// fabric handles so the mapping also works across processes and across nodes.
+// The buffer itself is allocated by torch.distributed._symmetric_memory in pure torch.
+// This file supplies only the piece torch lacks on ROCm: exporting that buffer as a
+// 64-byte POD fabric handle, importing every peer's handle, and moving data across the
+// resulting mapping. Ranks exchange handles however they like -- main.py uses
+// torch.distributed -- and each ends up with a peer pointer per rank.
 //
 // This file is the raw HIP half; hip_fabric.py binds it with ctypes and main.py drives it.
 // Everything is a plain C ABI so ctypes can call it without pybind11.
@@ -108,44 +107,47 @@ extern "C" int fs_fabric_supported(int dev, int* supported, int* failed_step) {
     return 0;
 }
 
-// Create the local half of the symmetric window and export it as a fabric handle.
-// out_total is the granularity-rounded size peers must use when they import.
-extern "C" int fs_alloc(int dev,
-                        size_t bytes,
-                        void** out_ptr,
-                        uint64_t* out_handle,
-                        size_t* out_total,
-                        unsigned char* out_fh) {
-    TRY(hipSetDevice(dev));
-
-    hipMemAllocationProp prop = {};
-    prop.type = hipMemAllocationTypePinned;
-    prop.requestedHandleTypes = hipMemHandleTypeFabric;
-    prop.location.type = hipMemLocationTypeDevice;
-    prop.location.id = dev;
-
-    size_t gran = 0;
-    TRY(hipMemGetAllocationGranularity(&gran, &prop, hipMemAllocationGranularityRecommended));
-    size_t total = ((bytes + gran - 1) / gran) * gran;
+// Export a buffer that somebody else allocated -- specifically a torch
+// symmetric-memory tensor -- as a fabric handle.
+//
+// hipMemGetAddressRange recovers the base and length of the VMM allocation backing the
+// pointer (torch gives each symm_mem.empty its own granularity-rounded allocation), and
+// hipMemRetainAllocationHandle takes a reference on its physical handle. torch keeps
+// ownership of the mapping; we only borrow the handle, so release it with
+// fs_release_handle and never unmap.
+//
+// This only succeeds if the allocation was created with hipMemHandleTypeFabric, which
+// torch does not do on its own -- see fabric_shim.cpp.
+extern "C" int fs_export_ptr(void* ptr,
+                             unsigned char* out_fh,
+                             uint64_t* out_handle,
+                             void** out_base,
+                             size_t* out_size) {
+    void* base = nullptr;
+    size_t size = 0;
+    TRY(hipMemGetAddressRange(&base, &size, ptr));
 
     hipMemGenericAllocationHandle_t h;
-    TRY(hipMemCreate(&h, total, &prop, 0));
+    TRY(hipMemRetainAllocationHandle(&h, base));
 
-    void* p = nullptr;
-    TRY(hipMemAddressReserve(&p, total, 0, 0, 0));
-    TRY(hipMemMap(p, total, 0, h, 0));
+    hipError_t err = hipMemExportToShareableHandle(out_fh, h, hipMemHandleTypeFabric, 0);
+    if (err != hipSuccess) {
+        g_last = err;
+        hipError_t rel = hipMemRelease(h);
+        (void)rel;
+        clear_sticky_error();
+        return (int)err;
+    }
 
-    hipMemAccessDesc ad = {};
-    ad.location.type = hipMemLocationTypeDevice;
-    ad.location.id = dev;
-    ad.flags = hipMemAccessFlagsProtReadWrite;
-    TRY(hipMemSetAccess(p, total, &ad, 1));
-
-    TRY(hipMemExportToShareableHandle(out_fh, h, hipMemHandleTypeFabric, 0));
-
-    *out_ptr = p;
     *out_handle = (uint64_t)h;
-    *out_total = total;
+    *out_base = base;
+    *out_size = size;
+    return 0;
+}
+
+// Drop the reference taken by fs_export_ptr. Does not unmap: torch owns the mapping.
+extern "C" int fs_release_handle(uint64_t handle) {
+    TRY(hipMemRelease((hipMemGenericAllocationHandle_t)handle));
     return 0;
 }
 
@@ -176,7 +178,8 @@ extern "C" int fs_import(int dev,
     return 0;
 }
 
-extern "C" int fs_release(void* ptr, size_t total, uint64_t handle) {
+// Tear down a peer mapping created by fs_import (we own its VA reservation).
+extern "C" int fs_release_import(void* ptr, size_t total, uint64_t handle) {
     TRY(hipMemUnmap(ptr, total));
     TRY(hipMemAddressFree(ptr, total));
     TRY(hipMemRelease((hipMemGenericAllocationHandle_t)handle));
