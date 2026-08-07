@@ -179,15 +179,41 @@ def main():
     win.import_peers(descriptors, rank)
 
     if rank == 0 or args.verbose:
+        strides = [win.peer_ptr[i + 1] - win.peer_ptr[i] for i in range(world - 1)]
+        uniform = len(set(strides)) <= 1
         print(
-            f"[rank {rank}] dev {dev}: buf {buf.data_ptr():#x} "
-            f"(alloc {human(win.size)} +{win.offset}) -> peers {[hex(p) for p in win.peer_ptr]}",
+            f"[rank {rank}] dev {dev}: buf {buf.data_ptr():#x} (alloc {human(win.size)} +{win.offset})",
             flush=True,
+        )
+        print(
+            f"[flat] heap {win.flat_base:#x} .. {win.flat_base + win.span:#x} "
+            f"({human(win.span)}), stride {human(win.stride)}, slot offset {win.slot_offset}"
+        )
+        print(f"[flat] peers {[hex(p) for p in win.peer_ptr]}")
+        print(
+            f"[flat] stride uniform across all {world} ranks: {uniform} "
+            f"-> peer(r) = base + r*stride{' + off' if win.slot_offset else ''}"
         )
     dist.barrier()
 
     # ---- phase 1: read every peer's buffer with pure torch ops ----
     errors = 0
+    # our own slot in the flat heap is a second alias of the torch tensor: same physical
+    # memory, different VA. Prove it by writing through one and reading through the other.
+    self_alias = win.get_buffer(rank, (n_ver,), torch.int32)
+    if self_alias.data_ptr() == buf.data_ptr():
+        raise RuntimeError("self slot is not a distinct VA -- the flat heap was not built")
+    buf[0] = 0x5EED
+    torch.cuda.synchronize()
+    if int(self_alias[0].item()) != 0x5EED:
+        raise RuntimeError("self slot does not alias the torch tensor")
+    buf[0] = sentinel(1, rank, device)[0]
+    torch.cuda.synchronize()
+    if rank == 0:
+        print(
+            f"[flat] self slot {self_alias.data_ptr():#x} aliases torch buf "
+            f"{buf.data_ptr():#x} (distinct VA, same memory) OK"
+        )
     for peer in range(world):
         # a torch tensor aliasing the peer's memory; the comparison is the transfer
         peer_buf = win.get_buffer(peer, (n_ver,), torch.int32)
@@ -197,6 +223,23 @@ def main():
             tag = "local" if peer == rank else "peer "
             status = "OK" if bad == 0 else f"MISMATCH ({bad} elems)"
             print(f"[rank {rank}] torch read {tag} {peer}: {human(verify_bytes)} {status}", flush=True)
+    dist.barrier()
+
+    # ---- phase 1b: the point of the flat heap -- one kernel, no per-peer pointer array ----
+    gathered = torch.empty(world * n_ver, dtype=torch.int32, device=device)
+    hf.gather_flat(
+        dev, gathered.data_ptr(), win.flat_base, win.stride, win.slot_offset,
+        world, verify_bytes, num_cu,
+    )
+    expected = torch.cat([sentinel(n_ver, p, device) for p in range(world)])
+    bad = int((gathered != expected).sum().item())
+    errors += bad != 0
+    if bad or rank == 0 or args.verbose:
+        print(
+            f"[rank {rank}] gather_flat: all {world} ranks via base+r*stride, "
+            f"{human(world * verify_bytes)} {'OK' if not bad else f'MISMATCH ({bad})'}",
+            flush=True,
+        )
     dist.barrier()
 
     # ---- phase 2: ring bandwidth over the fabric mapping ----

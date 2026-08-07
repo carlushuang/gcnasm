@@ -236,6 +236,133 @@ extern "C" int fs_release_handle(uint64_t handle) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------
+// Flat symmetric heap: one reservation, every rank at base + r*stride.
+//
+// Handle types have nothing to do with this -- it is local address-space bookkeeping and
+// works just as well with POSIX fds, or with no shareable handle at all. Neither torch's
+// rendezvous nor a per-peer hipMemAddressReserve gives you a uniform stride (peers land
+// wherever the driver puts them, and your own buffer is nowhere near them), so if you
+// want peer(r) = base + r*stride you have to reserve the span yourself and map into it.
+//
+// The payoff is device-side: a kernel takes one base pointer and a stride instead of an
+// N-entry pointer array, and can address a rank computed at run time. See fs_gather_flat.
+// ---------------------------------------------------------------------------------
+
+extern "C" int fs_granularity(int dev, size_t* gran) {
+    hipMemAllocationProp prop = {};
+    prop.type = hipMemAllocationTypePinned;
+    prop.requestedHandleTypes = hipMemHandleTypeFabric;
+    prop.location.type = hipMemLocationTypeDevice;
+    prop.location.id = dev;
+    TRY(hipMemGetAllocationGranularity(gran, &prop, hipMemAllocationGranularityRecommended));
+    return 0;
+}
+
+// Reserve the whole span up front so every slot is at a known address.
+extern "C" int fs_flat_reserve(size_t span, size_t alignment, void** out_base) {
+    void* p = nullptr;
+    TRY(hipMemAddressReserve(&p, span, alignment, 0, 0));
+    *out_base = p;
+    return 0;
+}
+
+extern "C" int fs_flat_free(void* base, size_t span) {
+    TRY(hipMemAddressFree(base, span));
+    return 0;
+}
+
+static int flat_map(int dev, hipMemGenericAllocationHandle_t h, void* va, size_t size) {
+    TRY(hipMemMap(va, size, 0, h, 0));
+    hipMemAccessDesc ad = {};
+    ad.location.type = hipMemLocationTypeDevice;
+    ad.location.id = dev;
+    ad.flags = hipMemAccessFlagsProtReadWrite;
+    TRY(hipMemSetAccess(va, size, &ad, 1));
+    return 0;
+}
+
+// Import a peer's handle and map it at an exact address inside the reservation.
+extern "C" int fs_flat_map_peer(int dev,
+                                const unsigned char* fh,
+                                size_t size,
+                                void* va,
+                                uint64_t* out_handle) {
+    TRY(hipSetDevice(dev));
+    hipMemGenericAllocationHandle_t h;
+    TRY(hipMemImportFromShareableHandle(&h, (void*)fh, hipMemHandleTypeFabric));
+    int rc = flat_map(dev, h, va, size);
+    if (rc != 0) {
+        hipError_t rel = hipMemRelease(h);
+        (void)rel;
+        return rc;
+    }
+    *out_handle = (uint64_t)h;
+    return 0;
+}
+
+// Map our own buffer into its slot as a second alias, so the flat space is complete and
+// peer(my_rank) works like any other rank. The original pointer keeps working untouched.
+extern "C" int fs_flat_map_self(int dev, void* local_ptr, void* va, size_t* out_size, uint64_t* out_handle) {
+    TRY(hipSetDevice(dev));
+    void* base = nullptr;
+    size_t size = 0;
+    TRY(hipMemGetAddressRange(&base, &size, local_ptr));
+
+    hipMemGenericAllocationHandle_t h;
+    TRY(hipMemRetainAllocationHandle(&h, base));
+    int rc = flat_map(dev, h, va, size);
+    if (rc != 0) {
+        hipError_t rel = hipMemRelease(h);
+        (void)rel;
+        return rc;
+    }
+    *out_size = size;
+    *out_handle = (uint64_t)h;
+    return 0;
+}
+
+extern "C" int fs_flat_unmap(void* va, size_t size, uint64_t handle) {
+    TRY(hipMemUnmap(va, size));
+    TRY(hipMemRelease((hipMemGenericAllocationHandle_t)handle));
+    return 0;
+}
+
+// The reason the flat layout is worth building: one base pointer, no per-peer array.
+__global__ void gather_flat(uint4* __restrict__ dst,
+                            const char* __restrict__ flat_base,
+                            size_t stride,
+                            size_t offset,
+                            int nranks,
+                            size_t n_per_rank) {
+    for (int r = 0; r < nranks; ++r) {
+        const uint4* src = (const uint4*)(flat_base + (size_t)r * stride + offset);
+        uint4* out = dst + (size_t)r * n_per_rank;
+        size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+        size_t step = (size_t)gridDim.x * blockDim.x;
+        for (; i < n_per_rank; i += step) {
+            out[i] = src[i];
+        }
+    }
+}
+
+extern "C" int fs_gather_flat(int dev,
+                              void* dst,
+                              const void* flat_base,
+                              size_t stride,
+                              size_t offset,
+                              int nranks,
+                              size_t bytes_per_rank,
+                              int num_cu) {
+    TRY(hipSetDevice(dev));
+    gather_flat<<<num_cu * FS_BLOCKS_PER_CU, FS_THREADS>>>(
+        (uint4*)dst, (const char*)flat_base, stride, offset, nranks,
+        bytes_per_rank / sizeof(uint4));
+    TRY(hipGetLastError());
+    TRY(hipDeviceSynchronize());
+    return 0;
+}
+
 // Map a peer's exported window into this rank's address space. The resulting pointer is
 // an ordinary device pointer: kernels running on `dev` can load and store through it.
 extern "C" int fs_import(int dev,

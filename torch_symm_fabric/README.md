@@ -234,6 +234,49 @@ One more, in the code rather than the environment: a HIP call that fails leaves
 here deliberately provoke failures, so they clear the error before returning -- otherwise
 an unrelated `torch.arange` a few lines later dies with "CUDA error: invalid argument".
 
+## The flat symmetric heap
+
+Peer pointers are laid out as one contiguous span, so `peer(r) = flat_base + r*stride`:
+
+```
+[flat] heap 0x6fe733600000 .. 0x6fe773e00000 (1.01GB), stride 258MB, slot offset 0
+[flat] peers ['0x6fe733600000', '0x6fe743800000', '0x6fe753a00000', '0x6fe763c00000']
+[flat] stride uniform across all 4 ranks: True -> peer(r) = base + r*stride
+[flat] self slot 0x6fe733600000 aliases torch buf 0x6fe782c00000 (distinct VA, same memory) OK
+```
+
+**This has nothing to do with fabric.** It is local address-space bookkeeping --
+`hipMemAddressReserve` one span, `hipMemMap` each allocation at a computed offset -- and
+works identically with POSIX fds, or with no shareable handle at all. It is listed here
+because you have to build it deliberately: neither a per-peer `hipMemAddressReserve` nor
+torch's own rendezvous gives you a uniform stride. Torch's, measured on 4 ranks with a
+32 MiB buffer, puts peers 36 MiB apart but your own buffer 262 GB away from them:
+
+```
+rank 0: 0x71839dc00000   rank 1: 0x714375c00000   rank 2: 0x714373800000   rank 3: 0x714371400000
+strides: ['-0x4028000000', '-0x2400000', '-0x2400000']   -> NOT uniform
+```
+
+Every rank is mapped into the span, including this one: our own allocation gets a **second
+alias** inside the heap, so `peer(my_rank)` is an ordinary slot and the stride holds across
+all ranks. The tensor's original pointer keeps working -- same physical memory, two VAs,
+verified by writing through one and reading through the other.
+
+The payoff is device-side. `fs_gather_flat` reads every rank with one base pointer and a
+stride, no N-entry pointer array in kernarg, and can address a rank computed at run time:
+
+```cpp
+const uint4* src = (const uint4*)(flat_base + (size_t)r * stride + offset);
+```
+
+```
+[rank 0] gather_flat: all 4 ranks via base+r*stride, 64MB OK
+```
+
+Constraints are mild: `stride` is `max(alloc_size)` rounded to the 2 MiB granularity, and
+every rank must place its tensor at the same offset within its allocation (checked at
+import; it is 0 in every case measured).
+
 ## Cross-process, and the road to cross-node
 
 `main.py` runs under torchrun, so its ranks share a parent and a rendezvous. `xproc.py`

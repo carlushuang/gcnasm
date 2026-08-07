@@ -59,6 +59,21 @@ def load(path=None):
         ctypes.POINTER(ctypes.c_uint64),
     ]
     lib.fs_release_import.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64]
+    lib.fs_granularity.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_size_t)]
+    lib.fs_flat_reserve.argtypes = [ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p)]
+    lib.fs_flat_free.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.fs_flat_map_peer.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)
+    ]
+    lib.fs_flat_map_self.argtypes = [
+        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_uint64),
+    ]
+    lib.fs_flat_unmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64]
+    lib.fs_gather_flat.argtypes = [
+        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+        ctypes.c_size_t, ctypes.c_int, ctypes.c_size_t, ctypes.c_int,
+    ]
     lib.fs_probe_ptr.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(ctypes.c_int)] * 3
     lib.fs_copy.argtypes = [
         ctypes.c_int,
@@ -173,6 +188,23 @@ def rebind_to_fabric(tensor):
     return base.value, size.value
 
 
+def granularity(dev):
+    g = ctypes.c_size_t()
+    _check(load().fs_granularity(dev, ctypes.byref(g)), "fs_granularity")
+    return g.value
+
+
+def gather_flat(dev, dst, flat_base, stride, offset, nranks, bytes_per_rank, num_cu):
+    """One kernel reading every rank's slot from base + r*stride -- no pointer array."""
+    _check(
+        load().fs_gather_flat(
+            dev, ctypes.c_void_p(dst), ctypes.c_void_p(flat_base), stride, offset,
+            nranks, bytes_per_rank, num_cu,
+        ),
+        "fs_gather_flat",
+    )
+
+
 def copy(dev, dst, src, nbytes, num_cu):
     _check(load().fs_copy(dev, ctypes.c_void_p(dst), ctypes.c_void_p(src), nbytes, num_cu), "fs_copy")
 
@@ -232,7 +264,8 @@ class SymmFabricWindow:
 
     Only borrows the allocation handle. Mirrors torch's own rendezvous handle --
     ``get_buffer(peer, sizes, dtype)`` returns a tensor on the peer's memory -- but
-    reaches peers over fabric instead of POSIX fds.
+    reaches peers over fabric instead of POSIX fds, and lays every rank out in one flat
+    symmetric heap so ``peer_ptr[r] == flat_base + r*stride + slot_offset``.
 
         win = SymmFabricWindow(t, dev)
         win.import_peers(all_gathered_descriptors, my_rank)
@@ -268,28 +301,64 @@ class SymmFabricWindow:
         self.offset = tensor.data_ptr() - self.base
         self.handle = fh.raw[:FABRIC_HANDLE_BYTES]
         self.peer_ptr = []
-        self._imported = []
+        self._slots = []
+        self.flat_base = None
+        self.stride = 0
+        self.span = 0
+        self.slot_offset = 0
 
     def descriptor(self):
         """What a peer needs in order to map this rank's buffer: (handle, size, offset)."""
         return (self.handle, self.size, self.offset)
 
     def import_peers(self, descriptors, my_rank):
-        """Map every peer's buffer. `descriptors` is all-gathered, indexed by rank."""
+        """Build the flat symmetric heap: one reservation, rank r at base + r*stride.
+
+        Every rank is mapped into it, including this one -- our own allocation gets a
+        second alias inside the span, so peer_ptr[my_rank] is just another slot and the
+        stride is uniform across all ranks. The tensor's original pointer keeps working.
+
+        `descriptors` is all-gathered, indexed by rank: (handle, alloc_size, offset).
+        """
         lib = load()
-        self.peer_ptr = []
-        for rank, (fh, size, offset) in enumerate(descriptors):
+        world = len(descriptors)
+        sizes = [d[1] for d in descriptors]
+        offsets = [d[2] for d in descriptors]
+        if len(set(offsets)) != 1:
+            raise RuntimeError(f"ranks disagree on the tensor offset within its allocation: {offsets}")
+        self.slot_offset = offsets[0]
+
+        gran = granularity(self.dev)
+        self.stride = ((max(sizes) + gran - 1) // gran) * gran
+        span = world * self.stride
+
+        base = ctypes.c_void_p()
+        _check(lib.fs_flat_reserve(span, gran, ctypes.byref(base)), "fs_flat_reserve")
+        self.flat_base = base.value
+        self.span = span
+
+        for rank, (fh, size, _) in enumerate(descriptors):
+            va = self.flat_base + rank * self.stride
             if rank == my_rank:
-                self.peer_ptr.append(self.tensor.data_ptr())
-                continue
-            ptr, h = ctypes.c_void_p(), ctypes.c_uint64()
-            _check(
-                lib.fs_import(self.dev, fh, size, ctypes.byref(ptr), ctypes.byref(h)),
-                f"fs_import(rank={rank})",
-            )
-            self._imported.append((ptr.value, size, h.value))
-            # the peer's tensor sits at the same offset inside its own allocation
-            self.peer_ptr.append(ptr.value + offset)
+                mapped, h = ctypes.c_size_t(), ctypes.c_uint64()
+                _check(
+                    lib.fs_flat_map_self(
+                        self.dev, ctypes.c_void_p(self.tensor.data_ptr()), ctypes.c_void_p(va),
+                        ctypes.byref(mapped), ctypes.byref(h),
+                    ),
+                    "fs_flat_map_self",
+                )
+                self._slots.append((va, mapped.value, h.value))
+            else:
+                h = ctypes.c_uint64()
+                _check(
+                    lib.fs_flat_map_peer(self.dev, fh, size, ctypes.c_void_p(va), ctypes.byref(h)),
+                    f"fs_flat_map_peer(rank={rank})",
+                )
+                self._slots.append((va, size, h.value))
+
+        # uniformly strided by construction; peer(r) = flat_base + r*stride + offset
+        self.peer_ptr = [self.flat_base + r * self.stride + self.slot_offset for r in range(world)]
         return self.peer_ptr
 
     def get_buffer(self, peer, sizes, dtype, storage_offset=0):
@@ -303,9 +372,12 @@ class SymmFabricWindow:
 
     def close(self):
         lib = load()
-        for ptr, size, h in self._imported:
-            lib.fs_release_import(ctypes.c_void_p(ptr), size, h)
-        self._imported = []
+        for va, size, h in self._slots:
+            lib.fs_flat_unmap(ctypes.c_void_p(va), size, h)
+        self._slots = []
+        if self.flat_base is not None:
+            lib.fs_flat_free(ctypes.c_void_p(self.flat_base), self.span)
+            self.flat_base = None
         if self._handle is not None:
             lib.fs_release_handle(self._handle)
             self._handle = None
