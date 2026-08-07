@@ -1,10 +1,8 @@
 """ctypes bindings for fabric_symm.hip.
 
-Three ways to get a fabric-capable buffer -- ``OwnFabricBuffer`` (we allocate),
-the ``fabric_shim.cpp`` LD_PRELOAD (torch allocates it fabric-capable), and
-``rebind_to_fabric`` (torch allocates, we swap the backing) -- then one shared path:
-``SymmFabricWindow`` exports, imports peers, and hands back peer pointers and torch
-views onto them.
+``OwnFabricBuffer`` / the ``fabric_shim.cpp`` preload / ``rebind_to_fabric`` are the three
+ways to get a fabric-capable buffer; ``SymmFabricWindow`` is the shared path that exports
+it, imports peers, and returns peer pointers and torch views. See README.md.
 """
 
 import ctypes
@@ -132,11 +130,10 @@ def mem_info():
 
 
 class OwnFabricBuffer:
-    """A fabric window we allocate ourselves, exposed as a torch tensor (method "own").
+    """Method "own": a fabric window we allocate, exposed as a torch tensor.
 
-    torch never sees the allocation, so this is not a symm_mem tensor and none of torch's
-    symmetric-memory machinery applies to it. In exchange there is exactly one allocation
-    and no interposition.
+    Not a symm_mem tensor, so torch's symmetric-memory machinery does not apply -- in
+    exchange, one allocation and no interposition.
     """
 
     def __init__(self, dev, nbytes, dtype, device):
@@ -158,16 +155,11 @@ class OwnFabricBuffer:
 
 
 def rebind_to_fabric(tensor):
-    """Make a torch-allocated buffer fabric-capable, in place, without moving it.
+    """Method "rebind": remap a torch buffer's VA onto fabric backing, in place.
 
-    The handle types of a VMM allocation are fixed at hipMemCreate and torch asks for
-    POSIX fds on ROCm, so the buffer cannot be exported over fabric as allocated. Rather
-    than intercept torch's allocator, this rebinds the tensor's virtual address range to
-    fabric-capable physical memory: same pointer, same tensor, exportable backing.
-
-    Call it immediately after allocation -- the previous contents are discarded. While the
-    tensor lives it costs twice its size in physical memory, because torch still holds a
-    reference to the original (now unmapped) allocation.
+    Same pointer, same tensor, exportable backing. Call immediately after allocation --
+    contents are discarded -- and note it costs 2x physical memory for the tensor's
+    lifetime, since torch still references the orphaned original.
 
     Returns (base, size) of the rebound allocation.
     """
@@ -210,9 +202,8 @@ _TYPESTR = {
 def tensor_from_ptr(ptr, numel, dtype, device):
     """Wrap a raw device pointer as a torch tensor with no copy.
 
-    Uses __cuda_array_interface__, which torch.as_tensor consumes directly. Applied to a
-    fabric-imported peer pointer this yields a tensor that torch ops read and write
-    straight across the fabric.
+    Via __cuda_array_interface__, which torch.as_tensor consumes directly. On a
+    fabric-imported peer pointer, torch ops then read and write straight across the fabric.
     """
     import torch
 
@@ -237,11 +228,11 @@ def tensor_from_ptr(ptr, numel, dtype, device):
 
 
 class SymmFabricWindow:
-    """Fabric export/import for a torch symmetric-memory tensor.
+    """Fabric export/import for a buffer, whoever allocated it.
 
-    torch owns the buffer; this only borrows its allocation handle. Mirrors the shape of
-    torch's own rendezvous handle -- ``get_buffer(peer, sizes, dtype)`` returns a tensor
-    on the peer's memory -- but reaches peers over fabric instead of POSIX fds.
+    Only borrows the allocation handle. Mirrors torch's own rendezvous handle --
+    ``get_buffer(peer, sizes, dtype)`` returns a tensor on the peer's memory -- but
+    reaches peers over fabric instead of POSIX fds.
 
         win = SymmFabricWindow(t, dev)
         win.import_peers(all_gathered_descriptors, my_rank)

@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """Cross-GPU transfer over HIP fabric handles, three ways to get a fabric-capable buffer.
 
-torch.distributed._symmetric_memory allocates through hipMemCreate and on ROCm always
-asks for the POSIX-fd handle type, because c10::cuda::get_fabric_access() is inside
-`#if !defined(USE_ROCM)`. The handle types are frozen at creation, so a symm_mem buffer
-can never be exported over fabric as allocated. There are three ways around that:
+torch's symm_mem allocates via hipMemCreate and on ROCm always asks for POSIX fds
+(get_fabric_access() is inside `#if !defined(USE_ROCM)`), and handle types are frozen at
+creation -- so a symm_mem buffer can never be exported over fabric as allocated:
 
-  own     we allocate the fabric window ourselves; torch only gets a tensor view.
-          Not a symm_mem tensor. One allocation, no interposition.
-  shim    LD_PRELOAD fabric_shim.cpp so torch's own hipMemCreate asks for fabric.
-          A real symm_mem tensor, fabric from birth -- but hipMemCreate is overridden
-          process-wide. This is what an upstream get_fabric_access() would do.
-  rebind  torch allocates, then we remap that VA range onto fabric backing in place.
-          A real symm_mem tensor, no interposition -- but it costs 2x physical memory.
+  own     we allocate the window; torch only gets a tensor view. Not a symm_mem
+          tensor, but 1x memory and no interposition.
+  shim    LD_PRELOAD fabric_shim.cpp so torch asks for fabric. A real symm_mem tensor,
+          fabric from birth, but hipMemCreate is overridden process-wide.
+  rebind  torch allocates, we remap that VA onto fabric backing. A real symm_mem tensor,
+          no interposition, but 2x physical memory.
 
-Everything after that is shared: export a 64-byte fabric handle, all-gather it, import
-every peer, and read/write peer memory. --method selects which one to measure.
+Everything after that is shared. See README.md for the full comparison.
 
     ./run.sh --method rebind
     ./bench_methods.sh              # all three, side by side

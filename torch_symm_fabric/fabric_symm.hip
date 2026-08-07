@@ -1,19 +1,12 @@
-// fabric_symm.hip -- HIP VMM fabric-handle symmetric window + cross-GPU copy kernels.
+// fabric_symm.hip -- HIP VMM fabric handles for cross-GPU transfer. See README.md.
 //
-// Three ways to obtain a fabric-capable buffer, and one shared path for using it.
+// Three ways to get a fabric-capable buffer:
+//   fs_alloc          we allocate it                            (method "own")
+//   -- none --        fabric_shim.cpp rewrote the handle type   (method "shim")
+//   fs_rebind_fabric  remap a torch buffer's VA onto fabric     (method "rebind")
 //
-//   fs_alloc          allocate a fabric window ourselves          (method "own")
-//   -- none --        torch allocates it fabric-capable, because
-//                     fabric_shim.cpp rewrote the handle type      (method "shim")
-//   fs_rebind_fabric  rebind a torch buffer's VA onto fabric
-//                     backing, in place                            (method "rebind")
-//
-// After that the path is identical for all three: fs_export_ptr turns the buffer into a
-// 64-byte POD fabric handle, fs_import maps a peer's handle, and the copy kernel moves
-// data across. Ranks exchange handles however they like -- main.py uses torch.distributed.
-//
-// This file is the raw HIP half; hip_fabric.py binds it with ctypes and main.py drives it.
-// Everything is a plain C ABI so ctypes can call it without pybind11.
+// Then one shared path: fs_export_ptr -> 64-byte handle, fs_import maps a peer, the copy
+// kernel moves data. Plain C ABI so ctypes can bind it without pybind11.
 
 #include <hip/hip_runtime.h>
 #include <chrono>
@@ -39,10 +32,9 @@ static hipError_t g_last = hipSuccess;
 
 extern "C" const char* fs_last_error() { return hipGetErrorString(g_last); }
 
-// Both probes below deliberately make HIP calls that are expected to fail. A failed
-// API call leaves hipGetLastError() armed, and the next torch kernel launch checks it
-// and reports our probe failure as a spurious "CUDA error" from unrelated code. So
-// swallow the error we caused before handing control back.
+// The probes below provoke failures on purpose. A failed HIP call leaves
+// hipGetLastError() armed and torch reports it on its next kernel launch, as a bogus
+// "CUDA error" from unrelated code -- so swallow the one we caused.
 static inline void clear_sticky_error() {
     hipError_t ignored = hipGetLastError();
     (void)ignored;
@@ -53,17 +45,13 @@ extern "C" int fs_device_count(int* n) {
     return 0;
 }
 
-// Is fabric usable on this device? Probed functionally -- one granularity-sized
-// alloc/export/import round trip -- rather than via hipDeviceGetAttribute.
+// Is fabric usable here? Probed functionally rather than via hipDeviceGetAttribute:
+// hipDeviceAttribute_t values shift between HIP releases (fabric is 95 in 7.15, absent
+// in 7.12) and torch often loads a different libamdhip64 than we compiled against, so
+// the attribute route can silently ask the wrong question. The enums used below carry
+// explicit values and are stable.
 //
-// The attribute route is deliberately avoided: hipDeviceAttribute_t is a long
-// sequential enum whose values shift between HIP releases, and a torch wheel often
-// loads a different libamdhip64 than the one this file was compiled against (e.g. a
-// pip _rocm_sdk_core runtime vs /opt/rocm). The VMM structs and the enums used below
-// carry explicit values and are stable, so this probe is version-proof.
-//
-// failed_step: 0 ok, 1 granularity, 2 create, 3 export, 4 import. On failure the
-// matching HIP error is left in fs_last_error().
+// failed_step: 0 ok, 1 granularity, 2 create, 3 export, 4 import; error in fs_last_error().
 extern "C" int fs_fabric_supported(int dev, int* supported, int* failed_step) {
     *supported = 0;
     *failed_step = 0;
@@ -119,9 +107,8 @@ extern "C" int fs_mem_info(size_t* free_bytes, size_t* total_bytes) {
     return 0;
 }
 
-// Allocate a fabric-capable window ourselves (method "own"). torch is not involved, so
-// the result is not a symm_mem tensor -- main.py wraps it as a tensor via
-// __cuda_array_interface__. Exactly one allocation, so no memory is wasted.
+// Method "own": we allocate. torch is not involved, so this is not a symm_mem tensor --
+// main.py wraps it via __cuda_array_interface__. One allocation, so 1x memory.
 extern "C" int fs_alloc(int dev,
                         size_t bytes,
                         void** out_ptr,
@@ -166,22 +153,15 @@ extern "C" int fs_free_own(void* ptr, size_t total, uint64_t handle) {
     return 0;
 }
 
-// Make a buffer that torch already allocated fabric-capable, in place.
+// Method "rebind": make a torch buffer fabric-capable in place.
 //
-// The set of shareable handle types is frozen at hipMemCreate and there is no API to
-// change it afterwards -- hipMemGetAllocationPropertiesFromHandle only reads it back. But
-// VMM separates the virtual address from its physical backing, so instead of changing the
-// flag we swap the backing: allocate fabric-capable memory, unmap torch's range, and map
-// ours at the exact same address. torch's pointer is unchanged and its tensor keeps
-// working; the allocation simply became exportable.
+// Handle types are frozen at hipMemCreate and there is no API to change them, but VMM
+// separates the VA from its backing -- so swap the backing instead. torch's pointer is
+// unchanged and its tensor keeps working.
 //
-// Two consequences the caller must respect:
-//   * the previous contents are gone, so call this before the buffer is filled;
-//   * torch still references the original allocation, which is now unmapped but not
-//     freed, so the buffer costs twice its size in physical memory until torch frees it.
-//
-// We release our own handle immediately: the mapping holds its own reference, so the
-// memory lives exactly as long as the mapping does and torch's free path stays correct.
+// Caller must respect: contents are discarded (call before filling), and torch still
+// references the orphaned original, so the buffer costs 2x physical until torch frees it.
+// Our handle is released at once; the mapping holds its own reference.
 extern "C" int fs_rebind_fabric(void* ptr, void** out_base, size_t* out_size) {
     void* base = nullptr;
     size_t size = 0;
@@ -217,17 +197,12 @@ extern "C" int fs_rebind_fabric(void* ptr, void** out_base, size_t* out_size) {
     return 0;
 }
 
-// Export a buffer that somebody else allocated -- specifically a torch
-// symmetric-memory tensor -- as a fabric handle.
+// Export any fabric-capable buffer as a 64-byte handle, whoever allocated it.
 //
-// hipMemGetAddressRange recovers the base and length of the VMM allocation backing the
-// pointer (torch gives each symm_mem.empty its own granularity-rounded allocation), and
-// hipMemRetainAllocationHandle takes a reference on its physical handle. torch keeps
-// ownership of the mapping; we only borrow the handle, so release it with
+// hipMemGetAddressRange recovers the allocation behind the pointer (torch gives each
+// symm_mem.empty its own granularity-rounded one) and hipMemRetainAllocationHandle
+// borrows its physical handle -- the owner keeps the mapping, so release via
 // fs_release_handle and never unmap.
-//
-// This only succeeds on a fabric-capable allocation, which for a torch buffer means
-// fs_rebind_fabric has been called on it first.
 extern "C" int fs_export_ptr(void* ptr,
                              unsigned char* out_fh,
                              uint64_t* out_handle,

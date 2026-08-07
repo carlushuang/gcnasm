@@ -1,19 +1,16 @@
-// fabric_shim.cpp -- LD_PRELOAD shim that makes torch's symmetric memory fabric-exportable.
+// fabric_shim.cpp -- LD_PRELOAD interposer making torch's symm_mem fabric-exportable.
 //
-// torch.distributed._symmetric_memory allocates through hipMemCreate. On ROCm it always
-// asks for the POSIX-fd handle type, because c10::cuda::get_fabric_access() is compiled
-// out (`#if !defined(USE_ROCM)`), and the handle types a VMM allocation supports are
-// frozen at creation. So a torch symm_mem buffer can never be exported over fabric.
+// Method "shim". torch allocates symmetric memory through hipMemCreate and on ROCm always
+// asks for POSIX fds (get_fabric_access() is compiled out), and handle types are frozen
+// at creation -- so intercept the call and ask for fabric instead. torch still allocates
+// and still owns the mapping; only the handle type changes.
 //
-// requestedHandleTypes is a bitmask, so the fix is one bit: intercept hipMemCreate and
-// OR in hipMemHandleTypeFabric. torch still gets the fd handle it asked for and its own
-// rendezvous is untouched; the allocation just gains a second, fabric-shaped door that
-// hip_fabric.py can open later via hipMemRetainAllocationHandle.
+// ROCm rejects the combined fd|fabric mask, so this is a swap, not an addition: torch's
+// own fd-based rendezvous stops working on these buffers. Allocations that request no
+// shareable handle (expandable_segments, the caching allocator) pass through untouched,
+// and the original request is retried if the driver refuses the change.
 //
-// If the driver rejects the combined mask the original request is retried unchanged, so
-// preloading this is safe even where fabric is unavailable.
-//
-//   LD_PRELOAD=./libfabric_shim.so python3 your_pure_torch_script.py
+//   LD_PRELOAD=./libfabric_shim.so python3 your_script.py     (./run.sh --method shim)
 
 #include <dlfcn.h>
 #include <hip/hip_runtime_api.h>
@@ -36,7 +33,7 @@ hip_mem_create_fn real_hip_mem_create() {
     return real;
 }
 
-// FABRIC_SHIM_VERBOSE=1 to see every allocation the shim upgrades
+// FABRIC_SHIM_VERBOSE=1 logs every allocation upgraded
 bool verbose() {
     static int v = -1;
     if (v < 0) {
@@ -57,9 +54,7 @@ extern "C" hipError_t hipMemCreate(hipMemGenericAllocationHandle_t* handle,
         return hipErrorNotSupported;
     }
 
-    // Only touch pinned device allocations that asked for some shareable handle and did
-    // not already ask for fabric. Everything else -- including expandable_segments, which
-    // requests no shareable handle at all -- passes through untouched.
+    // Only pinned allocations that asked for some shareable handle and not already fabric.
     const bool upgradable = prop != nullptr && prop->type == hipMemAllocationTypePinned &&
                             prop->requestedHandleTypes != 0 &&
                             (prop->requestedHandleTypes & hipMemHandleTypeFabric) == 0;
