@@ -234,10 +234,24 @@ One more, in the code rather than the environment: a HIP call that fails leaves
 here deliberately provoke failures, so they clear the error before returning -- otherwise
 an unrelated `torch.arange` a few lines later dies with "CUDA error: invalid argument".
 
+## The CUDA control case
+
+[`nvidia/`](nvidia/) runs the same experiment on CUDA in **pure python** -- no C++ at all.
+It is worth reading next to this one, because the conclusion is not "NVIDIA has fabric and
+AMD does not". On an 8x H20 node torch also falls back to POSIX fds, but for a structural
+reason that matters: `get_fabric_access()` is *real code* there, so it probes and decides
+at run time, and on a fabric-capable node (IMEX configured) the identical script gets
+fabric with no changes. On ROCm the function is compiled out, so no node can.
+
+The other difference is what the fallback still buys you: on CUDA `symm_mem.rendezvous()`
+plus `hdl.get_buffer(peer)` gives peer tensors in pure python, which is exactly what all
+three methods here have to give up.
+
 ## Files
 
 | file | role |
 |------|------|
+| `nvidia/` | the CUDA control case, pure python -- see [nvidia/README.md](nvidia/README.md) |
 | `fabric_symm.hip` | all three buffer paths, export/import, capability probe, `uint4` copy kernel, timing loop; plain C ABI |
 | `fabric_shim.cpp` | `LD_PRELOAD` interposer on `hipMemCreate` (method `shim` only) |
 | `hip_fabric.py` | ctypes bindings, `OwnFabricBuffer`, `rebind_to_fabric`, `SymmFabricWindow` |
