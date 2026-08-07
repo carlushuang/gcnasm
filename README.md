@@ -75,6 +75,12 @@ See the [detailed README](vector_add_asm/README.md).
 | `[+]` | [`triton_memread`](triton_memread/) | Triton memory read kernel |
 | `[H]` | [`smid`](smid/) | Memcpy throughput benchmark (buffer load, swizzled) |
 
+### Multi-GPU / Interconnect
+
+| Tag | Folder | Description |
+|-----|--------|-------------|
+| `[H+]` | [`torch_symm_fabric`](torch_symm_fabric/) | **Cross-GPU transfer over HIP fabric handles** -- symmetric window via HIP VMM (`hipMemHandleTypeFabric`), aliased zero-copy as torch tensors, handles all-gathered over `torch.distributed`; correctness + read/write bandwidth sweep. Explains why `torch.distributed._symmetric_memory` cannot do this on ROCm. See the [detailed README](torch_symm_fabric/README.md). |
+
 ### Warp / Wave Primitives
 
 | Tag | Folder | Description |
