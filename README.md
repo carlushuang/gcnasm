@@ -79,7 +79,7 @@ See the [detailed README](vector_add_asm/README.md).
 
 | Tag | Folder | Description |
 |-----|--------|-------------|
-| `[H+]` | [`torch_symm_fabric`](torch_symm_fabric/) | **Fabric export for pure-torch symmetric memory** -- the buffer is a plain `symm_mem.empty()` tensor; an `LD_PRELOAD` shim makes torch's `hipMemCreate` ask for `hipMemHandleTypeFabric`, then peers are reached over 64-byte fabric handles instead of POSIX fds. Correctness + cross-GPU read/write bandwidth sweep. See the [detailed README](torch_symm_fabric/README.md). |
+| `[H+]` | [`torch_symm_fabric`](torch_symm_fabric/) | **Fabric export for pure-torch symmetric memory** -- the buffer is a plain `symm_mem.empty()` tensor; since HIP handle types are frozen at `hipMemCreate`, its VA range is rebound onto fabric-capable backing in place, and peers are then reached over 64-byte fabric handles instead of POSIX fds. Correctness + cross-GPU read/write bandwidth sweep. See the [detailed README](torch_symm_fabric/README.md). |
 
 ### Warp / Wave Primitives
 

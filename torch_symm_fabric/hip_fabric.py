@@ -1,7 +1,8 @@
 """ctypes bindings for fabric_symm.hip.
 
-The buffer is always allocated by torch. This module only exports it over fabric,
-imports peers, and hands back peer pointers (and torch views onto them).
+The buffer is always allocated by torch. This module only makes it fabric-capable
+(``rebind_to_fabric``), exports it, imports peers, and hands back peer pointers
+(and torch views onto them). Nothing here intercepts or replaces a HIP entry point.
 """
 
 import ctypes
@@ -32,6 +33,11 @@ def load(path=None):
         ctypes.c_void_p,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    lib.fs_rebind_fabric.argtypes = [
+        ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p),
         ctypes.POINTER(ctypes.c_size_t),
     ]
@@ -105,6 +111,30 @@ def probe_ptr(ptr):
         "fs_probe_ptr",
     )
     return a.value, b.value, c.value
+
+
+def rebind_to_fabric(tensor):
+    """Make a torch-allocated buffer fabric-capable, in place, without moving it.
+
+    The handle types of a VMM allocation are fixed at hipMemCreate and torch asks for
+    POSIX fds on ROCm, so the buffer cannot be exported over fabric as allocated. Rather
+    than intercept torch's allocator, this rebinds the tensor's virtual address range to
+    fabric-capable physical memory: same pointer, same tensor, exportable backing.
+
+    Call it immediately after allocation -- the previous contents are discarded. While the
+    tensor lives it costs twice its size in physical memory, because torch still holds a
+    reference to the original (now unmapped) allocation.
+
+    Returns (base, size) of the rebound allocation.
+    """
+    base, size = ctypes.c_void_p(), ctypes.c_size_t()
+    _check(
+        load().fs_rebind_fabric(
+            ctypes.c_void_p(tensor.data_ptr()), ctypes.byref(base), ctypes.byref(size)
+        ),
+        "fs_rebind_fabric",
+    )
+    return base.value, size.value
 
 
 def copy(dev, dst, src, nbytes, num_cu):
@@ -193,7 +223,7 @@ class SymmFabricWindow:
             raise RuntimeError(
                 f"fabric export of the torch buffer failed: hip error {rc} "
                 f"({lib.fs_last_error().decode()}). The allocation is not fabric-capable -- "
-                f"preload libfabric_shim.so (use ./run.sh)."
+                f"call hf.rebind_to_fabric(tensor) right after allocating it."
             )
 
         self._handle = handle.value

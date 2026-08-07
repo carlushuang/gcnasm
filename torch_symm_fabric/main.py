@@ -3,14 +3,16 @@
 
 The buffer is a plain `torch.distributed._symmetric_memory` tensor -- allocated,
 filled and compared with ordinary torch code. The only thing this example adds is the
-piece torch lacks on ROCm: exporting that buffer as a fabric handle so peers can map it.
+piece torch lacks on ROCm: making that buffer fabric-capable and exporting it, so peers
+can map it. Nothing intercepts or replaces a HIP entry point.
 
-    Phase 0  probe the handle types torch's allocation actually supports
+    Phase 0  rebind the torch buffer to fabric-capable backing, and show the handle
+             types before and after
     Phase 1  correctness -- read every peer's buffer with pure torch ops
     Phase 2  bandwidth   -- ring read / write sweep across the fabric mapping
 
-Run through ./run.sh, which preloads libfabric_shim.so; without it torch allocates
-POSIX-fd-only memory and the export in phase 0 fails with a pointer to the fix.
+    ./run.sh
+    ./run.sh --buffer-mib 512 --sizes 1,16,64,256,512
 """
 
 import argparse
@@ -39,24 +41,14 @@ def sentinel(n, rank, device):
     return torch.arange(n, device=device, dtype=torch.int32) + rank * 100000
 
 
-def report_handle_types(t, rank):
-    """Print which shareable handle types torch's own allocation supports."""
+def handle_types(t):
+    """Which shareable handle types does the allocation behind `t` support?"""
     retain, fabric, fd = hf.probe_ptr(t.data_ptr())
     ok = lambda rc: "ok" if rc == 0 else f"FAIL(hip {rc})"  # noqa: E731
-    print(
-        f"[probe] torch symm_mem buffer @ {t.data_ptr():#x}: "
-        f"vmm-backed={ok(retain)}  export-fabric={ok(fabric)}  export-posix-fd={ok(fd)}"
+    return (
+        f"vmm-backed={ok(retain)}  export-fabric={ok(fabric)}  export-posix-fd={ok(fd)}",
+        fabric == 0,
     )
-    if fabric != 0:
-        print(
-            "[probe] torch allocated this POSIX-fd-only, so it cannot cross a fabric.\n"
-            "[probe] c10::cuda::get_fabric_access() is inside `#if !defined(USE_ROCM)`, and the\n"
-            "[probe] handle types of a VMM allocation are frozen at hipMemCreate time.\n"
-            "[probe] Preload libfabric_shim.so to flip that one bit -- use ./run.sh."
-        )
-    else:
-        print("[probe] fabric-exportable (libfabric_shim.so is active)")
-    return fabric == 0
 
 
 def parse_args():
@@ -104,26 +96,43 @@ def main():
         print(f"torch {torch.__version__}, hip {torch.version.hip}")
         print(f"{world} rank(s), {num_cu} CUs/GPU, symm_mem buffer {human(buffer_bytes)}/rank\n")
 
-    # ---- pure torch: allocate the symmetric buffer and fill it with torch ops ----
+    # ---- pure torch: allocate the symmetric buffer ----
     numel = buffer_bytes // 4
     buf = symm_mem.empty(numel, dtype=torch.int32, device=device)
-    n_ver = verify_bytes // 4
-    buf[:n_ver] = sentinel(n_ver, rank, device)
-    torch.cuda.synchronize()
+    before, _ = handle_types(buf)
+
+    # ---- our part: give that same buffer fabric-capable backing, in place ----
+    # As allocated it is POSIX-fd only, because c10::cuda::get_fabric_access() is inside
+    # `#if !defined(USE_ROCM)`. The handle types are frozen at hipMemCreate, so rather
+    # than intercept torch's allocator we rebind this one VA range onto fabric memory.
+    # It discards the contents, hence before the fill below.
+    base, size = hf.rebind_to_fabric(buf)
+    after, exportable = handle_types(buf)
 
     if rank == 0:
-        exportable = report_handle_types(buf, rank)
+        print(f"[probe] torch symm_mem buffer @ {buf.data_ptr():#x}")
+        print(f"[probe]   as allocated : {before}")
+        print(f"[probe]   after rebind : {after}")
+        print(
+            f"[probe]   same pointer, alloc {human(size)} @ {base:#x}; "
+            f"costs 2x physical until torch frees it"
+        )
         print()
-    else:
-        exportable = hf.probe_ptr(buf.data_ptr())[1] == 0
 
     flag = torch.tensor([0 if exportable else 1], dtype=torch.int64)
     dist.all_reduce(flag, op=dist.ReduceOp.SUM)
     if flag.item() != 0:
+        if rank == 0:
+            print("[fatal] buffer is still not fabric-exportable after rebind")
         dist.destroy_process_group()
         return 2
 
-    # ---- our part: export over fabric, exchange, import every peer ----
+    # ---- pure torch again: fill the (now fabric-backed) buffer with torch ops ----
+    n_ver = verify_bytes // 4
+    buf[:n_ver] = sentinel(n_ver, rank, device)
+    torch.cuda.synchronize()
+
+    # ---- export over fabric, exchange, import every peer ----
     win = hf.SymmFabricWindow(buf, dev)
 
     descriptors = [None] * world

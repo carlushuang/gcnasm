@@ -1,10 +1,11 @@
 // fabric_symm.hip -- HIP VMM fabric-handle symmetric window + cross-GPU copy kernels.
 //
 // The buffer itself is allocated by torch.distributed._symmetric_memory in pure torch.
-// This file supplies only the piece torch lacks on ROCm: exporting that buffer as a
-// 64-byte POD fabric handle, importing every peer's handle, and moving data across the
-// resulting mapping. Ranks exchange handles however they like -- main.py uses
-// torch.distributed -- and each ends up with a peer pointer per rank.
+// This file supplies only the piece torch lacks on ROCm: making that buffer
+// fabric-capable (fs_rebind_fabric), exporting it as a 64-byte POD fabric handle,
+// importing every peer's handle, and moving data across the resulting mapping. Ranks
+// exchange handles however they like -- main.py uses torch.distributed -- and each ends
+// up with a peer pointer per rank.
 //
 // This file is the raw HIP half; hip_fabric.py binds it with ctypes and main.py drives it.
 // Everything is a plain C ABI so ctypes can call it without pybind11.
@@ -107,6 +108,57 @@ extern "C" int fs_fabric_supported(int dev, int* supported, int* failed_step) {
     return 0;
 }
 
+// Make a buffer that torch already allocated fabric-capable, in place.
+//
+// The set of shareable handle types is frozen at hipMemCreate and there is no API to
+// change it afterwards -- hipMemGetAllocationPropertiesFromHandle only reads it back. But
+// VMM separates the virtual address from its physical backing, so instead of changing the
+// flag we swap the backing: allocate fabric-capable memory, unmap torch's range, and map
+// ours at the exact same address. torch's pointer is unchanged and its tensor keeps
+// working; the allocation simply became exportable.
+//
+// Two consequences the caller must respect:
+//   * the previous contents are gone, so call this before the buffer is filled;
+//   * torch still references the original allocation, which is now unmapped but not
+//     freed, so the buffer costs twice its size in physical memory until torch frees it.
+//
+// We release our own handle immediately: the mapping holds its own reference, so the
+// memory lives exactly as long as the mapping does and torch's free path stays correct.
+extern "C" int fs_rebind_fabric(void* ptr, void** out_base, size_t* out_size) {
+    void* base = nullptr;
+    size_t size = 0;
+    TRY(hipMemGetAddressRange(&base, &size, ptr));
+
+    int dev = 0;
+    TRY(hipGetDevice(&dev));
+
+    hipMemAllocationProp prop = {};
+    prop.type = hipMemAllocationTypePinned;
+    prop.requestedHandleTypes = hipMemHandleTypeFabric;
+    prop.location.type = hipMemLocationTypeDevice;
+    prop.location.id = dev;
+
+    hipMemGenericAllocationHandle_t h;
+    TRY(hipMemCreate(&h, size, &prop, 0));
+
+    // From here the range is briefly unbacked; any failure leaves the tensor unusable,
+    // so surface the error rather than trying to limp on.
+    TRY(hipMemUnmap(base, size));
+    TRY(hipMemMap(base, size, 0, h, 0));
+
+    hipMemAccessDesc ad = {};
+    ad.location.type = hipMemLocationTypeDevice;
+    ad.location.id = dev;
+    ad.flags = hipMemAccessFlagsProtReadWrite;
+    TRY(hipMemSetAccess(base, size, &ad, 1));
+
+    TRY(hipMemRelease(h));
+
+    *out_base = base;
+    *out_size = size;
+    return 0;
+}
+
 // Export a buffer that somebody else allocated -- specifically a torch
 // symmetric-memory tensor -- as a fabric handle.
 //
@@ -116,8 +168,8 @@ extern "C" int fs_fabric_supported(int dev, int* supported, int* failed_step) {
 // ownership of the mapping; we only borrow the handle, so release it with
 // fs_release_handle and never unmap.
 //
-// This only succeeds if the allocation was created with hipMemHandleTypeFabric, which
-// torch does not do on its own -- see fabric_shim.cpp.
+// This only succeeds on a fabric-capable allocation, which for a torch buffer means
+// fs_rebind_fabric has been called on it first.
 extern "C" int fs_export_ptr(void* ptr,
                              unsigned char* out_fh,
                              uint64_t* out_handle,
