@@ -1,8 +1,10 @@
 """ctypes bindings for fabric_symm.hip.
 
-The buffer is always allocated by torch. This module only makes it fabric-capable
-(``rebind_to_fabric``), exports it, imports peers, and hands back peer pointers
-(and torch views onto them). Nothing here intercepts or replaces a HIP entry point.
+Three ways to get a fabric-capable buffer -- ``OwnFabricBuffer`` (we allocate),
+the ``fabric_shim.cpp`` LD_PRELOAD (torch allocates it fabric-capable), and
+``rebind_to_fabric`` (torch allocates, we swap the backing) -- then one shared path:
+``SymmFabricWindow`` exports, imports peers, and hands back peer pointers and torch
+views onto them.
 """
 
 import ctypes
@@ -36,6 +38,15 @@ def load(path=None):
         ctypes.POINTER(ctypes.c_void_p),
         ctypes.POINTER(ctypes.c_size_t),
     ]
+    lib.fs_mem_info.argtypes = [ctypes.POINTER(ctypes.c_size_t)] * 2
+    lib.fs_alloc.argtypes = [
+        ctypes.c_int,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    lib.fs_free_own.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64]
     lib.fs_rebind_fabric.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p),
@@ -111,6 +122,39 @@ def probe_ptr(ptr):
         "fs_probe_ptr",
     )
     return a.value, b.value, c.value
+
+
+def mem_info():
+    """(free, total) device memory in bytes, for pricing a method's physical cost."""
+    f, t = ctypes.c_size_t(), ctypes.c_size_t()
+    _check(load().fs_mem_info(ctypes.byref(f), ctypes.byref(t)), "fs_mem_info")
+    return f.value, t.value
+
+
+class OwnFabricBuffer:
+    """A fabric window we allocate ourselves, exposed as a torch tensor (method "own").
+
+    torch never sees the allocation, so this is not a symm_mem tensor and none of torch's
+    symmetric-memory machinery applies to it. In exchange there is exactly one allocation
+    and no interposition.
+    """
+
+    def __init__(self, dev, nbytes, dtype, device):
+        lib = load()
+        ptr, handle, total = ctypes.c_void_p(), ctypes.c_uint64(), ctypes.c_size_t()
+        _check(
+            lib.fs_alloc(dev, nbytes, ctypes.byref(ptr), ctypes.byref(handle), ctypes.byref(total)),
+            "fs_alloc",
+        )
+        self.ptr = ptr.value
+        self.total = total.value
+        self._handle = handle.value
+        self.tensor = tensor_from_ptr(self.ptr, self.total // _itemsize(dtype), dtype, device)
+
+    def close(self):
+        if self._handle is not None:
+            load().fs_free_own(ctypes.c_void_p(self.ptr), self.total, self._handle)
+            self._handle = None
 
 
 def rebind_to_fabric(tensor):

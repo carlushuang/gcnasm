@@ -53,3 +53,10 @@ else
 fi
 
 echo "built $OUT (arch=$ARCH, rocm=$ROCM_REAL)"
+
+# The LD_PRELOAD shim (method "shim") is host-only C++ -- no device code, no hipcc.
+SHIM="$HERE/libfabric_shim.so"
+"${CXX:-g++}" -std=c++17 -O2 -fPIC -shared -D__HIP_PLATFORM_AMD__ \
+    -I"$ROCM_REAL/include" "$HERE/fabric_shim.cpp" -o "$SHIM" -ldl
+
+echo "built $SHIM"

@@ -1,11 +1,16 @@
 // fabric_symm.hip -- HIP VMM fabric-handle symmetric window + cross-GPU copy kernels.
 //
-// The buffer itself is allocated by torch.distributed._symmetric_memory in pure torch.
-// This file supplies only the piece torch lacks on ROCm: making that buffer
-// fabric-capable (fs_rebind_fabric), exporting it as a 64-byte POD fabric handle,
-// importing every peer's handle, and moving data across the resulting mapping. Ranks
-// exchange handles however they like -- main.py uses torch.distributed -- and each ends
-// up with a peer pointer per rank.
+// Three ways to obtain a fabric-capable buffer, and one shared path for using it.
+//
+//   fs_alloc          allocate a fabric window ourselves          (method "own")
+//   -- none --        torch allocates it fabric-capable, because
+//                     fabric_shim.cpp rewrote the handle type      (method "shim")
+//   fs_rebind_fabric  rebind a torch buffer's VA onto fabric
+//                     backing, in place                            (method "rebind")
+//
+// After that the path is identical for all three: fs_export_ptr turns the buffer into a
+// 64-byte POD fabric handle, fs_import maps a peer's handle, and the copy kernel moves
+// data across. Ranks exchange handles however they like -- main.py uses torch.distributed.
 //
 // This file is the raw HIP half; hip_fabric.py binds it with ctypes and main.py drives it.
 // Everything is a plain C ABI so ctypes can call it without pybind11.
@@ -105,6 +110,59 @@ extern "C" int fs_fabric_supported(int dev, int* supported, int* failed_step) {
     hipError_t rel = hipMemRelease(h);
     (void)rel;
     clear_sticky_error();
+    return 0;
+}
+
+// Free/total device memory, so the caller can price each method's physical cost.
+extern "C" int fs_mem_info(size_t* free_bytes, size_t* total_bytes) {
+    TRY(hipMemGetInfo(free_bytes, total_bytes));
+    return 0;
+}
+
+// Allocate a fabric-capable window ourselves (method "own"). torch is not involved, so
+// the result is not a symm_mem tensor -- main.py wraps it as a tensor via
+// __cuda_array_interface__. Exactly one allocation, so no memory is wasted.
+extern "C" int fs_alloc(int dev,
+                        size_t bytes,
+                        void** out_ptr,
+                        uint64_t* out_handle,
+                        size_t* out_total) {
+    TRY(hipSetDevice(dev));
+
+    hipMemAllocationProp prop = {};
+    prop.type = hipMemAllocationTypePinned;
+    prop.requestedHandleTypes = hipMemHandleTypeFabric;
+    prop.location.type = hipMemLocationTypeDevice;
+    prop.location.id = dev;
+
+    size_t gran = 0;
+    TRY(hipMemGetAllocationGranularity(&gran, &prop, hipMemAllocationGranularityRecommended));
+    size_t total = ((bytes + gran - 1) / gran) * gran;
+
+    hipMemGenericAllocationHandle_t h;
+    TRY(hipMemCreate(&h, total, &prop, 0));
+
+    void* p = nullptr;
+    TRY(hipMemAddressReserve(&p, total, 0, 0, 0));
+    TRY(hipMemMap(p, total, 0, h, 0));
+
+    hipMemAccessDesc ad = {};
+    ad.location.type = hipMemLocationTypeDevice;
+    ad.location.id = dev;
+    ad.flags = hipMemAccessFlagsProtReadWrite;
+    TRY(hipMemSetAccess(p, total, &ad, 1));
+
+    *out_ptr = p;
+    *out_handle = (uint64_t)h;
+    *out_total = total;
+    return 0;
+}
+
+// Tear down a window from fs_alloc (we own the reservation, the mapping and the handle).
+extern "C" int fs_free_own(void* ptr, size_t total, uint64_t handle) {
+    TRY(hipMemUnmap(ptr, total));
+    TRY(hipMemAddressFree(ptr, total));
+    TRY(hipMemRelease((hipMemGenericAllocationHandle_t)handle));
     return 0;
 }
 

@@ -1,13 +1,40 @@
-# torch_symm_fabric -- fabric export for pure-torch symmetric memory
+# torch_symm_fabric -- fabric export for torch symmetric memory, three ways
 
-The buffer is a plain `torch.distributed._symmetric_memory` tensor: allocated with
-`symm_mem.empty()`, filled and compared with ordinary torch ops. This example adds only
-the piece torch lacks on ROCm -- making that buffer exportable as a **HIP fabric handle**
-so peers can map it and read it directly.
+Cross-GPU transfer over **HIP fabric handles**, driven from PyTorch. The interesting part
+is not the transfer -- it is getting a fabric-capable buffer in the first place, which
+torch cannot give you on ROCm. This example implements all three ways to do it and
+benchmarks them side by side.
+
+## The problem
+
+`torch.distributed._symmetric_memory` allocates through `hipMemCreate`, and on ROCm it
+always asks for the POSIX-fd handle type: `c10::cuda::get_fabric_access()` in
+`c10/cuda/PeerToPeerAccess.cpp` sits inside `#if !defined(USE_ROCM)` and the ROCm build
+compiles to a bare `return false`.
+
+The set of shareable handle types is frozen at `hipMemCreate` and **there is no API to
+change it afterwards** -- `hipMemGetAllocationPropertiesFromHandle` only reads it back,
+and the export validates against what creation recorded. So a symm_mem buffer cannot be
+exported over fabric as allocated: `hipMemRetainAllocationHandle` on `t.data_ptr()`
+succeeds, the fabric export then fails with `hipErrorInvalidValue`.
+
+ROCm also rejects the combined `fd|fabric` mask with `hipErrorNotSupported`, so the two
+handle types are mutually exclusive. Whatever you do, you get one or the other.
+
+## The three methods
+
+```bash
+./run.sh --method own       # we allocate the fabric window; torch gets a tensor view
+./run.sh --method shim      # LD_PRELOAD makes torch's hipMemCreate ask for fabric
+./run.sh --method rebind    # torch allocates, we remap that VA onto fabric backing
+./bench_methods.sh          # all three, side by side
+```
+
+Everything after the buffer exists is shared by all three: export a 64-byte POD fabric
+handle, all-gather it, import every peer, then read and write peer memory.
 
 ```python
-buf = symm_mem.empty(numel, dtype=torch.int32, device=device)   # pure torch
-hf.rebind_to_fabric(buf)                                        # this buffer, in place
+buf = <one of the three methods>                                # fabric-capable int32 buffer
 buf[:n] = sentinel(n, rank, device)                             # pure torch
 
 win = hf.SymmFabricWindow(buf, dev)                             # export over fabric
@@ -18,106 +45,162 @@ peer = win.get_buffer(1, (n,), torch.int32)                     # torch tensor o
 assert torch.equal(peer, sentinel(n, 1, device))                # the compare *is* the transfer
 ```
 
-`get_buffer(peer, sizes, dtype)` mirrors torch's own rendezvous handle, so the buffer
-reads the same either way -- it just reaches peers over fabric instead of POSIX fds.
+`get_buffer(peer, sizes, dtype)` mirrors torch's own rendezvous handle, so a peer buffer
+reads the same either way -- it just arrives over fabric instead of POSIX fds.
 
-## Why the rebind
+## Measured -- 4x gfx1250, all-to-all XGMI, ROCm 7.15
 
-`symm_mem` allocates through `hipMemCreate`, and on ROCm it always asks for the POSIX-fd
-handle type: `c10::cuda::get_fabric_access()` in `c10/cuda/PeerToPeerAccess.cpp` sits
-inside `#if !defined(USE_ROCM)` and the ROCm build compiles to a bare `return false`.
-
-The set of shareable handle types is frozen at `hipMemCreate` and **there is no API to
-change it afterwards** -- `hipMemGetAllocationPropertiesFromHandle` only reads it back,
-and the export call validates against what creation recorded. So the buffer cannot be
-exported over fabric as allocated: `hipMemRetainAllocationHandle` on `t.data_ptr()`
-succeeds, the fabric export then fails with `hipErrorInvalidValue`.
-
-But VMM separates the virtual address from its physical backing, so instead of changing
-the flag you can swap the backing. `fs_rebind_fabric` allocates fabric-capable memory,
-unmaps torch's range, and maps the new allocation at the exact same address:
+`./bench_methods.sh --buffer-mib 256 --sizes 1,16,64,256`, aggregate over 4 ring pairs:
 
 ```
-hipMemGetAddressRange(ptr)  ->  base, size      # the allocation behind the tensor
-hipMemCreate(fabric, size)  ->  h
-hipMemUnmap(base, size)                          # briefly unbacked
-hipMemMap(base, size, 0, h) ; hipMemSetAccess
-hipMemRelease(h)                                 # the mapping holds its own reference
+method     setup_ms    phys_MiB   local_GB/s    read_GB/s   write_GB/s   status
+-------- ---------- ----------- ------------ ------------ ------------ --------
+own             0.3         256        23301         5076         5571       OK
+shim            0.3         258        23912         5065         5507       OK
+rebind          0.3         516        23627         5064         5524       OK
 ```
 
-torch's pointer never changes and its tensor keeps working; the allocation simply became
-exportable. `main.py` shows both sides of it:
+**Bandwidth is identical within noise.** All three end up with the same kind of fabric
+mapping, so the method costs nothing at run time -- it only differs in what it costs to
+set up and what it constrains. Per ring pair at 256 MB that is ~1.27 TB/s read and
+~1.38 TB/s write, against a ~5.9 TB/s device-local copy with the same kernel.
 
-```
-[probe] torch symm_mem buffer @ 0x74cc9b400000
-[probe]   as allocated : vmm-backed=ok  export-fabric=FAIL(hip 1)  export-posix-fd=ok
-[probe]   after rebind : vmm-backed=ok  export-fabric=ok           export-posix-fd=FAIL(hip 1)
-```
+**Physical memory is where they separate.** `own` is exactly 1x. `shim` is 1x plus
+torch's 2 MiB of signal pad and granularity rounding. `rebind` is **2.02x**, because torch
+still holds a reference to the original allocation, now unmapped but not released.
 
-Nothing here intercepts or replaces a HIP entry point. An earlier version of this example
-used an `LD_PRELOAD` shim on `hipMemCreate` to set the handle type at creation, which
-avoided the memory cost below but overrode `hipMemCreate` for *every* caller in the
-process -- including buffers that have nothing to do with fabric. The rebind is opt-in per
-buffer and visible at the call site, which is worth paying for.
+Setup time does not separate them: VMM allocation is lazy, so even the rebind's extra
+create/unmap/map is under a millisecond at this size.
 
-### What it costs
+## Pros and cons
 
-**Twice the physical memory, until torch frees the tensor.** torch still holds a reference
-to the original allocation, which is now unmapped but not released, so a 256 MB buffer
-occupies 512 MB:
+| | 1. own | 2. shim | 3. rebind |
+|---|---|---|---|
+| Buffer is a real `symm_mem` tensor | no | yes | yes |
+| Physical memory | **1.00x** | **1.01x** | 2.02x |
+| Blast radius | none | **process-wide** | one buffer, opt-in |
+| Needs `LD_PRELOAD` | no | **yes** | no |
+| Opt-in visible at the call site | n/a | no | yes |
+| Ordering constraint | none | none | **must precede first write** |
+| If `rendezvous()` is called anyway | n/a | fails loudly | **silently wrong memory** |
+| Prototypes the upstream fix | no | yes | no |
 
-```
-free before alloc:      442030 MiB
-free after 256MB alloc: 441620 MiB   (used 410)
-free after rebind:      441362 MiB   (extra 258)
-```
+### 1. own -- allocate it ourselves
 
-**The previous contents are discarded**, so rebind immediately after allocating and before
-filling. `main.py` does the sentinel fill after the rebind for exactly this reason.
+Touches no torch internals, so nothing upstream can break it, and it is exactly 1x memory.
+Full control of the allocation: granularity, alignment, and `hipMemSetAccess` for several
+devices at once. Works on any torch version and does not even require `symm_mem` to exist.
 
-**Do not use torch's own rendezvous on a rebound buffer.** `symm_mem.rendezvous()` would
-still export the fd of the original allocation, so it may *succeed* and hand peers the
-stale, orphaned pages rather than the memory the tensor now points at. Use this exchange
-instead -- which is the point, since an fd handle needs `SCM_RIGHTS`/`pidfd_getfd` and
-stops at the host boundary, while a fabric handle is 64 opaque position-independent bytes
-you can put on any wire.
+The buffer is not a symmetric-memory tensor, so everything torch layers on top is gone:
+`rendezvous()`, signal pads, multicast, `torch.ops.symm_mem.*`, async-TP fusion. The
+tensor arrives through `__cuda_array_interface__`, so it lives outside torch's caching
+allocator and you own its lifetime and free ordering. It also duplicates machinery torch
+already has, which is a long-term divergence cost.
+
+### 2. shim -- interpose `hipMemCreate`
+
+1x memory, the allocation is fabric-native from birth, and the buffer is a genuine torch
+symm_mem tensor with torch's bookkeeping intact. Best failure mode of the three: there is
+only ever one allocation, so `rendezvous()` fails loudly rather than returning wrong data.
+And it is precisely what an upstream `get_fabric_access()` would do, which makes it the
+honest way to measure what the upstream fix would buy.
+
+But it overrides `hipMemCreate` for every caller in the process. The
+`requestedHandleTypes != 0` guard spares the caching allocator and `expandable_segments`
+-- in a real run only the two symm_mem buffers are touched, which
+`FABRIC_SHIM_VERBOSE=1` will show you -- yet any other component that legitimately wants
+an fd handle would silently lose it. `LD_PRELOAD` is deployment friction, it is sensitive
+to link details (static linking, `-Bsymbolic`, a `dlopen`'d HIP would bypass it), and
+nothing at the call site reveals that allocation semantics changed.
+
+### 3. rebind -- swap the physical backing
+
+No interposition, nothing global, opt-in per buffer and explicit at the call site. The
+tensor stays a real symm_mem tensor at an unchanged pointer. Plain library call, so it
+composes with any launcher or notebook, and it only uses public HIP APIs.
+
+The cost is 2x physical memory for the buffer's lifetime. The previous contents are also
+discarded, so it must run immediately after allocation -- `main.py` fills the sentinel
+after the rebind for exactly this reason. And it has the worst failure mode:
+`symm_mem.rendezvous()` would still export the fd of the *orphaned* allocation, so it can
+succeed while handing peers stale pages. There is a brief window where the VA is unbacked,
+so it is not safe against concurrent access, and it leans on an internal assumption -- one
+VMM allocation per symm tensor, remappable -- that holds today but is not contractual.
+
+### What none of them fix
+
+All three lose torch's `rendezvous()`, and with it the collectives built on it
+(`torch.ops.symm_mem.*`, async-TP). That is not an implementation accident: as long as
+torch's rendezvous is fd-based and ROCm refuses `fd|fabric`, fabric and torch's collectives
+are mutually exclusive. Getting both requires torch to negotiate fabric *and* run its
+rendezvous over fabric handles -- the upstream change. Worth knowing before building on
+symm_mem collectives over a fabric.
+
+## HIP APIs used
+
+Only the step that produces a fabric-capable local buffer differs:
+
+| 1. own | 2. shim | 3. rebind |
+|---|---|---|
+| `hipMemGetAllocationGranularity` | *(torch allocates)* | `hipMemGetAddressRange` |
+| `hipMemCreate` (fabric) | `hipMemCreate` **interposed**, rewrites `prop.requestedHandleTypes` | `hipGetDevice` |
+| `hipMemAddressReserve` | `hipMemGetAddressRange` | `hipMemCreate` (fabric) |
+| `hipMemMap` | `hipMemRetainAllocationHandle` | `hipMemUnmap` (torch's range) |
+| `hipMemSetAccess` | | `hipMemMap` (same VA) |
+| `hipMemUnmap` (teardown) | | `hipMemSetAccess` |
+| `hipMemAddressFree` (teardown) | | `hipMemRelease` (ours, at once) |
+| `hipMemRelease` (teardown) | | `hipMemRetainAllocationHandle` |
+
+Shared by all three -- export, import a peer, tear a peer down:
+
+| Export | Import | Teardown |
+|---|---|---|
+| `hipMemExportToShareableHandle` (`hipMemHandleTypeFabric`) | `hipMemImportFromShareableHandle` | `hipMemUnmap` |
+| | `hipMemAddressReserve` | `hipMemAddressFree` |
+| | `hipMemMap` | `hipMemRelease` |
+| | `hipMemSetAccess` | |
+
+Plus `hipSetDevice`, `hipGetDeviceCount`, `hipMemGetInfo`, `hipGetLastError`,
+`hipGetErrorString`, `hipDeviceSynchronize`, and the functional capability probe
+(`granularity -> create -> export -> import -> release`).
+
+Notes: method 2 is the only one needing a non-HIP dependency (`dlsym(RTLD_NEXT, ...)`
+from `libdl`) and the only one that writes a field in a `hipMemAllocationProp` it did not
+construct -- but it is also the smallest HIP surface, a single entry point. Method 3 is
+the only one that calls `hipMemUnmap` on memory it does not own; that is both its trick
+and its risk. `hipMemGetAddressRange` is required by methods 2 and 3 and is the one call
+here outside the documented allocate/map/export flow -- it is how you recover
+`(base, size)` from a pointer torch handed you.
+
+Types used throughout -- `hipMemGenericAllocationHandle_t`, `hipMemFabricHandle_t` (64 B),
+`hipMemAllocationProp`, `hipMemAccessDesc`, `hipMemLocation` -- are ABI-stable across the
+7.12/7.15 skew checked here, unlike `hipDeviceAttribute_t`.
 
 ## Build and run
 
 ```bash
 ./build.sh                 # arch autodetected; GPU_ARCH=gfx950 ./build.sh to override
-./run.sh                   # one rank per visible GPU
-./run.sh --buffer-mib 512 --sizes 1,16,64,256,512
-NPROC=2 ./run.sh
+./run.sh --method rebind
+./bench_methods.sh --buffer-mib 512 --sizes 64,512
+NPROC=2 ./run.sh --method own
+FABRIC_SHIM_VERBOSE=1 ./run.sh --method shim   # log every allocation the shim upgrades
 ```
 
 | flag | meaning |
 |------|---------|
-| `--buffer-mib N` | `symm_mem.empty` tensor per rank (default 256) |
+| `--method own\|shim\|rebind` | how to obtain the fabric buffer (default `rebind`) |
+| `--buffer-mib N` | buffer per rank (default 256) |
 | `--verify-mib N` | bytes checked in the correctness phase (default 16) |
 | `--sizes a,b,c` | bandwidth sweep sizes in MiB |
 | `--warmup` / `--loop` | timing iterations (default 5 / 20) |
 | `--verbose` | correctness lines from every rank, not just rank 0 |
 
-## Results -- 4x gfx1250, all-to-all XGMI, ROCm 7.15
+`run.sh` sets `LD_PRELOAD` itself when you ask for `--method shim`, and leaves the
+environment clean otherwise.
 
-Correctness: every rank reads every rank's buffer through torch and checks a per-rank
-sentinel, so a wrong mapping surfaces as "peer 2 gave rank 3's pattern" rather than as
-garbage.
-
-```
-      size    local GB/s     read GB/s    write GB/s   (aggregate)
-      ----    ----------     ---------    ----------
-       1MB        1109.4         738.9         744.9
-      16MB       11749.6        3474.8        3406.9
-      64MB       22097.5        4460.3        4677.1
-     256MB       25118.6        5064.3        5506.8
-```
-
-Aggregate over 4 ring pairs, all concurrent. `local` is the same `uint4` copy kernel
-staying inside one GPU, as a reference ceiling -- so per pair at 256 MB the fabric mapping
-sustains ~1.27 TB/s read and ~1.38 TB/s write against a ~6.3 TB/s local copy. Small sizes
-are launch-latency bound, not link bound.
+Correctness runs before the sweep in every method: each rank reads every rank's buffer
+through torch and checks a per-rank sentinel, so a wrong mapping surfaces as "peer 2 gave
+rank 3's pattern" rather than as garbage.
 
 ## Environment gotchas
 
@@ -138,8 +221,7 @@ python3 -c "import torch,re;torch.cuda.init();print(sorted(set(re.findall(r'\S*l
 Build against whatever that prints. This is also why `fabric_symm.hip` never calls
 `hipDeviceGetAttribute` for capability checks: `hipDeviceAttribute_t` is a long sequential
 enum whose values shift between releases (the fabric attribute is 95 in 7.15 and does not
-exist in 7.12), so querying it across a version skew silently asks the wrong question. The
-VMM structs and the enums this example does use carry explicit values and are ABI-stable.
+exist in 7.12), so querying it across a version skew silently asks the wrong question.
 Fabric support is probed functionally instead: allocate, export, import, release.
 
 **The rocm-sdk wheels omit the `libamdhip64.so` dev symlink**, shipping only
@@ -156,18 +238,28 @@ an unrelated `torch.arange` a few lines later dies with "CUDA error: invalid arg
 
 | file | role |
 |------|------|
-| `fabric_symm.hip` | rebind, export/import of a torch-owned buffer, capability probe, `uint4` copy kernel, timing loop; plain C ABI |
-| `hip_fabric.py` | ctypes bindings, `rebind_to_fabric`, `SymmFabricWindow`, and the zero-copy torch view onto peer memory |
-| `main.py` | rank driver: allocate in torch, rebind, probe, exchange, verify, benchmark |
-| `build.sh` | builds `libfabric_symm.so` |
-| `run.sh` | builds if needed, launches one rank per GPU under `torchrun` |
+| `fabric_symm.hip` | all three buffer paths, export/import, capability probe, `uint4` copy kernel, timing loop; plain C ABI |
+| `fabric_shim.cpp` | `LD_PRELOAD` interposer on `hipMemCreate` (method `shim` only) |
+| `hip_fabric.py` | ctypes bindings, `OwnFabricBuffer`, `rebind_to_fabric`, `SymmFabricWindow` |
+| `main.py` | rank driver: build the buffer by `--method`, probe, exchange, verify, benchmark |
+| `build.sh` | builds `libfabric_symm.so` and `libfabric_shim.so` |
+| `run.sh` | builds if needed, preloads the shim when asked, launches under `torchrun` |
+| `bench_methods.sh` | runs all three methods and collates the comparison table |
+
+## Which to use
+
+For a benchmark or an experiment, `rebind` -- smallest blast radius, and 2x memory is
+irrelevant at these sizes. To argue for the upstream fix, `shim`, because it is the
+faithful prototype and shows the numbers a real `get_fabric_access()` would deliver. In
+production, if you do not actually need symm_mem semantics, `own` is cheapest and has no
+caveats attached, since you are not fighting an allocator that wants a different handle
+type.
+
+Once `get_fabric_access()` has a ROCm implementation, torch negotiates fabric itself, both
+`shim` and `rebind` become unnecessary, and the shared export/import path keeps working
+unchanged.
 
 ## Notes
-
-The rebind exists because torch picks the handle type at allocation. The upstream fix is
-for `get_fabric_access()` to have a ROCm implementation, at which point torch would
-negotiate fabric itself, the rebind and its 2x memory cost would go away, and everything
-else here would keep working unchanged.
 
 The transfer kernels are a plain `uint4` copy. A pipelined `tensor_load_to_lds` read path
 would likely raise the read column on gfx1250 and is left as a follow-up.
