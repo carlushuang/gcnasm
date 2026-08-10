@@ -235,6 +235,34 @@ One more, in the code rather than the environment: a HIP call that fails leaves
 here deliberately provoke failures, so they clear the error before returning -- otherwise
 an unrelated `torch.arange` a few lines later dies with "CUDA error: invalid argument".
 
+## torch_backend -- plug into torch instead of working around it
+
+[`torch_backend/`](torch_backend/) takes the opposite approach to everything else here:
+`c10d::symmetric_memory::register_allocator()` is a documented extension point, so a
+backend implementing `SymmetricMemoryAllocator` + `SymmetricMemory` gets driven by torch's
+own entry points.
+
+```python
+import fabric_backend                    # the import registers "FABRIC"
+symm_mem.set_backend("FABRIC")
+buf = symm_mem.empty(N, dtype=torch.float32, device="cuda")
+hdl = symm_mem.rendezvous(buf, group_name)
+torch.ops.symm_mem.one_shot_all_reduce(buf, "sum", group_name)   # works
+```
+
+The payoff is the thing the other three methods cannot do -- **torch's collectives run on
+fabric memory**, with no upstream fix required, because this bypasses
+`CUDASymmetricMemoryAllocator` rather than repairing it:
+
+```
+RESULT one_shot_all_reduce:  OK got=10.0 expect=10.0
+RESULT two_shot_all_reduce_: OK got=10.0 expect=10.0
+```
+
+The cost is 7 + 14 pure virtuals against torch's internal headers, no device-side
+signalling yet, and an ABI that can move under you on a torch upgrade. See
+[torch_backend/README.md](torch_backend/README.md).
+
 ## fabric_mem -- the module you would actually import
 
 The rest of this directory is a study of *how* to get a fabric-capable buffer on ROCm.
@@ -395,6 +423,7 @@ three methods here have to give up.
 
 | file | role |
 |------|------|
+| `torch_backend/` | a registered torch SymmetricMemory backend -- see [torch_backend/README.md](torch_backend/README.md) |
 | `nvidia/` | the CUDA control case, pure python -- see [nvidia/README.md](nvidia/README.md) |
 | `fabric_symm.hip` | all three buffer paths, export/import, capability probe, `uint4` copy kernel, timing loop; plain C ABI |
 | `fabric_shim.cpp` | `LD_PRELOAD` interposer on `hipMemCreate` (method `shim` only) |
