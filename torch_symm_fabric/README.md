@@ -102,8 +102,9 @@ already has, which is a long-term divergence cost.
 1x memory, the allocation is fabric-native from birth, and the buffer is a genuine torch
 symm_mem tensor with torch's bookkeeping intact. Best failure mode of the three: there is
 only ever one allocation, so `rendezvous()` fails loudly rather than returning wrong data.
-And it is precisely what an upstream `get_fabric_access()` would do, which makes it the
-honest way to measure what the upstream fix would buy.
+And it is the closest prototype of what upstream would do, which makes it the honest way
+to measure what the upstream fix would buy -- see the section below for why that fix is
+three changes rather than one.
 
 But it overrides `hipMemCreate` for every caller in the process. The
 `requestedHandleTypes != 0` guard spares the caching allocator and `expandable_segments`
@@ -349,9 +350,91 @@ production, if you do not actually need symm_mem semantics, `own` is cheapest an
 caveats attached, since you are not fighting an allocator that wants a different handle
 type.
 
-Once `get_fabric_access()` has a ROCm implementation, torch negotiates fabric itself, both
-`shim` and `rebind` become unnecessary, and the shared export/import path keeps working
-unchanged.
+## What the upstream fix actually is
+
+Not one change but three, all in `CUDASymmetricMemory.cu`. It is worth being precise,
+because `get_fabric_access()` alone is *not* sufficient -- the ROCm branches hardcode the
+handle type independently of it:
+
+```cpp
+// alloc(), CUDA branch: chooses, then honours the choice
+bool has_fabric_support = at::cuda::get_fabric_access(device_idx);
+handle_type_ = has_fabric_support ? FABRIC_HANDLE : POSIX_FD;
+
+// alloc(), ROCm branch: hardcoded, get_fabric_access() never consulted
+#elif defined(USE_ROCM)
+  handle_type_ = Expandable_Segments_Handle_Type::POSIX_FD;
+
+// rendezvous export, ROCm branch: hardcoded, ignores the use_fabric_handle template arg
+#elif defined(USE_ROCM)
+  C10_CUDA_CHECK(hipMemExportToShareableHandle(
+      &block_handle, block->alloc_ref->handle,
+      hipMemHandleTypePosixFileDescriptor, 0));
+```
+
+So: (1) give `c10::cuda::get_fabric_access()` a ROCm implementation, (2) make the ROCm
+alloc branch honour it instead of force-assigning `POSIX_FD`, and (3) make the ROCm export
+honour `use_fabric_handle`.
+
+The hard part is already written and platform-generic. `make_peer_alloc_info` is templated
+on `use_fabric_handle`, and in the fabric instantiation the `IpcChannel` type collapses to
+a dummy `int` -- the 64-byte handle rides the ordinary metadata path instead:
+
+```cpp
+using IpcChannelType = std::conditional_t<use_fabric_handle, int, IpcChannel>;
+
+if constexpr (!use_fabric_handle) {
+    recv_handle = ipc_channel.broadcast_fds(rank, 0, pids, exported);   // SCM_RIGHTS
+} else if (use_pg) {
+    recv_handle = pg_broadcast(group, dev, 0, exported);                // PG allgather
+} else {
+    gathered = storeExchange.all_gather(store, rank, world_size, exported);  // TCPStore
+}
+```
+
+`RendezvousRequest` already carries `clique_id` and `hostname`, `validate_nvlink_fabric_support()`
+already rejects groups spanning different NVLink domains, and -- importantly --
+`validate_rendezvous_requests()` is already written for multi-host groups:
+
+```cpp
+// For NVL72 systems, multiple hosts can be within a single nvlink domain.
+// Use (hostname, device_idx) pair to uniquely identify each allocation.
+```
+
+Hostname disambiguates (host, device) pairs rather than rejecting cross-host ranks. (The
+"participants are not on the same host" abort belongs to `IntraNodeComm`, a different and
+older component.)
+
+## What using it would look like
+
+Nothing in user code changes. There is no fabric-specific API, and that is the point -- the
+handle type is chosen inside the allocator, so the same script runs on one node or eight:
+
+```python
+import torch, torch.distributed as dist
+import torch.distributed._symmetric_memory as symm_mem
+
+dist.init_process_group("nccl")            # ranks may span hosts
+torch.cuda.set_device(local_rank)
+
+buf = symm_mem.empty(N, dtype=torch.bfloat16, device="cuda")
+hdl = symm_mem.rendezvous(buf, dist.group.WORLD.group_name)
+
+peer = hdl.get_buffer(r, (N,), torch.bfloat16)   # peer memory, whichever host it is on
+hdl.barrier()                                     # device-side sync via the signal pad
+
+out = torch.ops.symm_mem.one_shot_all_reduce(buf, "sum", group_name)
+```
+
+Under the hood the only differences are `handle_type_ == FABRIC_HANDLE`, the templated
+rendezvous taking the `true` branch, 64-byte handles travelling through the Store or the
+PG allgather rather than a Unix socket, and the clique check replacing the implicit
+same-host assumption. Every one of the 34 `torch.ops.symm_mem::*` ops then works across
+nodes with no call-site change.
+
+That is the target this example is a stand-in for: `shim` and `rebind` become unnecessary,
+`own` remains useful only if you do not want symm_mem semantics at all, and the flat
+symmetric heap stays worth building because torch still does not give you a uniform stride.
 
 ## Notes
 
