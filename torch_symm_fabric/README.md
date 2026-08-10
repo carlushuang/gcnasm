@@ -414,6 +414,10 @@ handle type is chosen inside the allocator, so the same script runs on one node 
 import torch, torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
+# the PG backend does not decide the handle type -- the allocator does, via
+# get_fabric_access(). gloo rendezvouses fine; a device backend only lets torch
+# route the metadata exchange through the PG allgather instead of TCPStore,
+# which matters at large rank counts. nccl/rccl is what a real job wants anyway.
 dist.init_process_group("nccl")            # ranks may span hosts
 torch.cuda.set_device(local_rank)
 
