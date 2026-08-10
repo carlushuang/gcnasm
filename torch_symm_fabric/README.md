@@ -235,6 +235,70 @@ One more, in the code rather than the environment: a HIP call that fails leaves
 here deliberately provoke failures, so they clear the error before returning -- otherwise
 an unrelated `torch.arange` a few lines later dies with "CUDA error: invalid argument".
 
+## fabric_mem -- the module you would actually import
+
+The rest of this directory is a study of *how* to get a fabric-capable buffer on ROCm.
+`fabric_mem.py` is the result: the narrow thing you want if you are writing your own
+kernels and do not need torch's collectives.
+
+```python
+import fabric_mem as fsm
+
+buf  = fsm.empty(N, dtype=torch.int32, device="cuda")   # fabric-capable, ordinary tensor
+buf[:] = ...                                             # fill with torch ops
+hdl  = fsm.rendezvous(buf, group_name)                   # export, exchange, import, map
+peer = hdl.get_buffer(3, (N,), torch.int32)              # rank 3's memory as a tensor
+d    = hdl.device_desc()                                 # base/stride/rank/world
+```
+
+Names follow `torch.distributed._symmetric_memory` wherever the concept is the same --
+`empty`, `rendezvous`, `get_buffer(rank, sizes, dtype, storage_offset)`, `rank`,
+`world_size`, `buffer_size` -- so the code reads the same and would port mechanically if
+torch ever gains fabric on ROCm. Dropped, because they serve collectives rather than
+in-kernel access: multicast, `memset32`, `stream_write_value32`, signal pads and the
+`barrier`/`put_signal`/`wait_signal` trio. Added, because torch has no equivalent:
+`flat_base`, `stride`, and `device_desc()`.
+
+Since the buffer does not need to be a torch symm_mem tensor, the module allocates it
+itself -- the `own` method. That drops every caveat the other two carry: 1x memory, no
+`LD_PRELOAD`, no contents-discarded ordering rule, no stale-page hazard. `shim` and
+`rebind` remain in `main.py` as the comparison study that justifies the choice.
+
+### The device side
+
+`device_desc()` returns the POD in `fabric_mem.h`, passed to a kernel by value:
+
+```c
+struct FabricWin { char* base; uint64_t stride; int rank; int world; };
+#define FABRIC_PEER(w, r) ((w).base + (uint64_t)(r) * (w).stride)
+```
+
+Two pointers and two ints, versus torch's `buffer_ptrs_dev` N-entry pointer array -- and
+`r` can be computed at run time rather than indexed from a fixed table.
+
+### The exchange is pluggable, which is the point
+
+A fabric handle is ~80 opaque bytes. Moving it is the caller's business:
+
+```python
+hdl = fsm.rendezvous(buf, group_name)                            # torch.distributed
+hdl = fsm.rendezvous(buf, exchange=fsm.tcp(rank, world, host))   # cross-node, no launcher
+hdl = fsm.rendezvous(buf, exchange=my_allgather)                 # MPI, KV store, anything
+```
+
+Verified on 4x gfx1250 both ways -- under torchrun, and as two independently started
+processes meeting over TCP:
+
+```
+world=4 buffer=64MB/rank
+flat span base=0x779963e00000 stride=64MB
+  torch read rank 0..3: OK
+  kernel gather via base+r*stride: OK
+SUCCESS
+```
+
+For cross-node, only `--host` changes.
+
 ## The flat symmetric heap
 
 Peer pointers are laid out as one contiguous span, so `peer(r) = flat_base + r*stride`:
@@ -335,6 +399,9 @@ three methods here have to give up.
 | `fabric_symm.hip` | all three buffer paths, export/import, capability probe, `uint4` copy kernel, timing loop; plain C ABI |
 | `fabric_shim.cpp` | `LD_PRELOAD` interposer on `hipMemCreate` (method `shim` only) |
 | `hip_fabric.py` | ctypes bindings, `OwnFabricBuffer`, `rebind_to_fabric`, `SymmFabricWindow` |
+| `fabric_mem.py` | **the importable module** -- `empty` / `rendezvous` / `get_buffer` / `device_desc` |
+| `fabric_mem.h` | the `FabricWin` POD a kernel takes by value |
+| `demo_fabric_mem.py` | minimal usage, torch.distributed or TCP exchange |
 | `main.py` | rank driver: build the buffer by `--method`, probe, exchange, verify, benchmark |
 | `xproc.py` | two independently-started processes swapping handles over TCP -- the cross-node shape |
 | `build.sh` | builds `libfabric_symm.so` and `libfabric_shim.so` |
