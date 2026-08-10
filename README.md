@@ -75,6 +75,12 @@ See the [detailed README](vector_add_asm/README.md).
 | `[+]` | [`triton_memread`](triton_memread/) | Triton memory read kernel |
 | `[H]` | [`smid`](smid/) | Memcpy throughput benchmark (buffer load, swizzled) |
 
+### Multi-GPU / Interconnect
+
+| Tag | Folder | Description |
+|-----|--------|-------------|
+| `[H+]` | [`torch_symm_fabric`](torch_symm_fabric/) | **Fabric export for torch symmetric memory, three ways** -- torch cannot export a `symm_mem` buffer over HIP fabric on ROCm, so this implements and benchmarks all three workarounds (allocate our own window / `LD_PRELOAD` the handle type / rebind the VA onto fabric backing), then reaches peers over 64-byte fabric handles. Same bandwidth, 1.00x vs 1.01x vs 2.02x memory. See the [detailed README](torch_symm_fabric/README.md). |
+
 ### Warp / Wave Primitives
 
 | Tag | Folder | Description |
