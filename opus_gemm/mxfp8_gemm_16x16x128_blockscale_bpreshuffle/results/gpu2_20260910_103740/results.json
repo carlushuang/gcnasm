@@ -1,0 +1,102 @@
+{
+  "utc": "2026-09-10T10:37:40.246901+00:00",
+  "pci": "0000:65:00.0",
+  "hip_visible_devices": "2",
+  "omp_num_threads": 16,
+  "shape": [
+    8192,
+    8192,
+    8192
+  ],
+  "batch": 1,
+  "warmup": 200,
+  "iterations": 100,
+  "results": [
+    {
+      "name": "rowmajor_fp32",
+      "command": [
+        "/root/workspace/gcnasm_new/gcnasm/opus_gemm/mxfp8_gemm_16x16x128_scale_rowmajor/build/gemm_a8w8_mxfp8_scale.exe",
+        "-m",
+        "8192",
+        "-n",
+        "8192",
+        "-k",
+        "8192",
+        "-b",
+        "1",
+        "-v",
+        "0",
+        "-w",
+        "200",
+        "-i",
+        "100"
+      ],
+      "returncode": 0,
+      "wall_seconds": 0.5994669200154021,
+      "exe_sha256": "6a51259e607d10a31d7f1e4e7502b1cc01b40be613d620a333c053ab8ff7aa9e",
+      "kernel_sha256": "2abb03b17e91e72d77afdef0df144c6d225bb464ac5c781ce3e9c28bca2b012d",
+      "ms": 0.3826,
+      "peta_flops": 2.87361,
+      "published_kernel_sha256": "5efc6855d38ce28c54a15e9419beb1a2e098f3ce4f685e8963220e67d8d9dcea"
+    },
+    {
+      "name": "bpreshuffle_fp32",
+      "command": [
+        "/root/workspace/gcnasm_new/gcnasm/opus_gemm/mxfp8_gemm_16x16x128_blockscale_bpreshuffle/build/gemm_a8w8_blockscale_bpreshuffle.exe",
+        "-m",
+        "8192",
+        "-n",
+        "8192",
+        "-k",
+        "8192",
+        "-b",
+        "1",
+        "-v",
+        "0",
+        "-w",
+        "200",
+        "-i",
+        "100",
+        "--dtype",
+        "fp32"
+      ],
+      "returncode": 0,
+      "wall_seconds": 0.5679426600690931,
+      "exe_sha256": "93171efcf1843b934ff3607d36e48a15f5d170930b3059eb9c8373e126611174",
+      "kernel_sha256": "0fe6a06df9e1686b01a49997f830b9e85c4e39ebf2c674c6ae8dc49071f61b12",
+      "ms": 0.3774,
+      "peta_flops": 2.91313,
+      "published_kernel_sha256": "0fe6a06df9e1686b01a49997f830b9e85c4e39ebf2c674c6ae8dc49071f61b12"
+    },
+    {
+      "name": "bpreshuffle_bf16",
+      "command": [
+        "/root/workspace/gcnasm_new/gcnasm/opus_gemm/mxfp8_gemm_16x16x128_blockscale_bpreshuffle/build/gemm_a8w8_blockscale_bpreshuffle.exe",
+        "-m",
+        "8192",
+        "-n",
+        "8192",
+        "-k",
+        "8192",
+        "-b",
+        "1",
+        "-v",
+        "0",
+        "-w",
+        "200",
+        "-i",
+        "100",
+        "--dtype",
+        "bf16"
+      ],
+      "returncode": 0,
+      "wall_seconds": 0.5629635569639504,
+      "exe_sha256": "93171efcf1843b934ff3607d36e48a15f5d170930b3059eb9c8373e126611174",
+      "kernel_sha256": "0fe6a06df9e1686b01a49997f830b9e85c4e39ebf2c674c6ae8dc49071f61b12",
+      "ms": 0.3704,
+      "peta_flops": 2.96827,
+      "published_kernel_sha256": "0fe6a06df9e1686b01a49997f830b9e85c4e39ebf2c674c6ae8dc49071f61b12"
+    }
+  ],
+  "publication_note": "Original kernel_sha256 values identify the benchmarked sources. Before committing, only seven lines of trailing whitespace were removed from the rowmajor template; published_kernel_sha256 identifies the committed source. The rowmajor stdout log omits its final empty line."
+}
