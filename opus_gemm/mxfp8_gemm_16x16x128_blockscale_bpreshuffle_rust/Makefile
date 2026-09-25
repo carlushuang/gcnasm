@@ -23,9 +23,10 @@ OPUS_FLAGS = -x hip -std=c++17 -O3 -ffast-math --offload-arch=$(ARCH) -nogpuinc 
 
 all: kernel host
 
-# rustc (with -Csave-temps) then tools/relink.py: launch bounds + IR shims, rustc's own opt/llc/lld
+# rustc emits optimized crate bitcode only (-Clinker-plugin-lto: no machine codegen), then
+# tools/relink.py adds launch bounds + IR shims and compiles it with rustc's own opt/llc/lld.
 kernel:
-	cd kernel && $(CARGO) +nightly build --release --config 'build.rustflags=["-Ctarget-cpu=$(ARCH)","-Csave-temps"]'
+	cd kernel && RUSTFLAGS="-Ctarget-cpu=$(ARCH) -Clinker-plugin-lto" $(CARGO) +nightly rustc --release --crate-type lib -- --emit=llvm-bc
 	mkdir -p $(BUILD)
 	cd kernel && python3 ../tools/relink.py --target-dir target --crate mxfp8_gemm --mcpu $(ARCH) --out ../$(CO) $(KATTRS)
 

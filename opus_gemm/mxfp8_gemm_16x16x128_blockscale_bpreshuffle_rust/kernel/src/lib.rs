@@ -225,8 +225,11 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
     let num_tiles_n = (kargs.n + B_N - 1) / B_N;
     let num_tiles_k = (kargs.k + B_K - 1) / B_K;
     let bid = workgroup_id_x() as i32;
-    let block_n = bid % num_tiles_n;
-    let first_block_m = (bid / num_tiles_n) * OUTPUT_TILES;
+    // Plain C++ `%` / `/`: no divide-by-zero panic path (num_tiles_n >= 1 by construction),
+    // which also keeps the crate free of calls into core.
+    let (block_n, first_block_m) = unsafe {
+        (core::intrinsics::unchecked_rem(bid, num_tiles_n), core::intrinsics::unchecked_div(bid, num_tiles_n) * OUTPUT_TILES)
+    };
     let col = block_n * B_N;
 
     let batch_id = workgroup_id_z() as i32;

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Finish rustc's amdgpu LTO + codegen with the two things Rust cannot express.
 
-Input is rustc's post-LTO-link bitcode (build with -Csave-temps). Then:
+Input is the kernel crate's optimized bitcode, from
+`cargo rustc --crate-type lib -- --emit=llvm-bc` with -Clinker-plugin-lto, so rustc never
+runs machine codegen (its own output would lack the launch bounds and be thrown away).
+The crate must not call into core (no panics); this is checked. Then:
 
 1. Kernel attributes. rustc has no __launch_bounds__, so every extern "gpu-kernel"
    fn defaults to amdgpu-flat-work-group-size=1,1024, which caps a 512-thread
@@ -121,8 +124,9 @@ def add_kernel_attrs(ll, attrs):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--target-dir", required=True)
-    p.add_argument("--crate", required=True)
+    p.add_argument("--bitcode", help="crate bitcode (default: newest <crate>-*.bc under --target-dir)")
+    p.add_argument("--target-dir")
+    p.add_argument("--crate")
     p.add_argument("--mcpu", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--attr", action="append", default=[],
@@ -130,14 +134,20 @@ def main():
     p.add_argument("--llc-arg", action="append", default=[])
     a = p.parse_args()
 
-    bcs = glob.glob(f"{a.target_dir}/**/{a.crate}.{a.crate}.*.lto.after-restriction.bc", recursive=True)
-    if not bcs:
-        sys.exit(f"no post-LTO-link bitcode under {a.target_dir}; build with -Csave-temps")
-    bc = max(bcs, key=os.path.getmtime)  # different RUSTFLAGS land in different hash dirs
+    if a.bitcode:
+        bc = a.bitcode
+    else:
+        bcs = glob.glob(f"{a.target_dir}/**/{a.crate}-*.bc", recursive=True)
+        if not bcs:
+            sys.exit(f"no {a.crate}-*.bc under {a.target_dir}; build with --emit=llvm-bc")
+        bc = max(bcs, key=os.path.getmtime)  # different RUSTFLAGS land in different hash dirs
     stem = os.path.splitext(a.out)[0]
     run(f"{TOOLS}/llvm-dis", bc, "-o", f"{stem}.linked.ll")
     ll = open(f"{stem}.linked.ll").read()
     ll, shims = link_shims(ll)
+    undef = sorted(set(re.findall(r"^declare [^\n]*@([\w.$]+)\(", ll, re.M)) - {n for n in re.findall(r"@(llvm\.[\w.]+)", ll)})
+    if undef:
+        sys.exit(f"kernel crate calls functions nobody defines (panic paths into core?): {undef}")
     ll, kernels = add_kernel_attrs(ll, [(kv.split("=", 1) + [""])[:2] for kv in a.attr])
     open(f"{stem}.patched.ll", "w").write(ll)
     run(f"{TOOLS}/opt", "-passes=lto<O3>", f"{stem}.patched.ll", "-o", f"{stem}.opt.bc")

@@ -65,7 +65,7 @@ make check-layouts CLANG23_ROOT=... OPUS_INCLUDE_DIR=...
 
 ## What Rust cannot express, and how it is bridged
 
-rustc (nightly) has a working `amdgcn-amd-amdhsa` target, `extern "gpu-kernel"`, `core::arch::amdgpu`, and accepts `extern "llvm-intrinsic"` declarations. Four things are missing for a kernel like this one; `tools/relink.py` covers them by taking rustc's post-LTO-link bitcode (`-Csave-temps`), patching the IR, and finishing with rustc's own `opt`/`llc`/`ld.lld` (the `llvm-tools` component, so the whole pipeline is one LLVM):
+rustc (nightly) has a working `amdgcn-amd-amdhsa` target, `extern "gpu-kernel"`, `core::arch::amdgpu`, and accepts `extern "llvm-intrinsic"` declarations. Four things are missing for a kernel like this one; `tools/relink.py` covers them by taking the kernel crate's optimized bitcode (rustc runs with `-Clinker-plugin-lto --emit=llvm-bc`, so it never does machine codegen), patching the IR, and compiling it with rustc's own `opt`/`llc`/`ld.lld` (the `llvm-tools` component, so the whole pipeline is one LLVM):
 
 1. **No launch bounds.** Every gpu-kernel gets `amdgpu-flat-work-group-size=1,1024`, which caps a 512-thread kernel at 128 VGPRs (this one needs 256). relink.py adds the attributes clang emits for `__launch_bounds__(512, 1)`.
 2. **No address spaces.** Rust pointers are always flat; intrinsics that take `ptr addrspace(3)` (buffer->LDS loads, TR8 reads) cannot be declared, and rustc now rejects mismatched intrinsic signatures. The kernel calls `rk.*` placeholders; relink.py defines them in IR with an `addrspacecast`, and opt inlines them. (Overloaded intrinsics like `ds.read.tr8` did slip through with a generic pointer, but only because release rustc skips the IR verifier.)
@@ -89,8 +89,26 @@ First faithful port (all layouts verified, correct results): **72%** of the C++ 
 
 The whole gap was register pressure: the C++ kernel sits at exactly 256 VGPRs and relies on its `asm volatile("" : "+v"(acc))` pins to keep each 16-float accumulator group in one fixed register tuple. Without them the Rust build spilled; every spill reload is a `scratch_load` whose `s_waitcnt vmcnt(0)` also drains the in-flight global->LDS prefetches, which is what cost 28%. Once the same pins were expressible (IR shims), the Rust kernel compiled to the same schedule with zero spills.
 
+## Compile time
+
+Kernel build for the 4 specializations, median of 5 (256-core host, single-TU compiles are single-threaded):
+
+| step | C++/opus (clang 23.1.1) | Rust |
+|---|---|---|
+| kernel TU -> `.co` (device only) | 2.20 s (frontend 0.67 s, of which opus template instantiation 0.54 s; backend 1.62 s) | |
+| kernel TU -> host+device object (C++ Makefile) | 2.76 s | |
+| rustc, kernel crate -> optimized bitcode (warm) | | 0.33 s |
+| tools/relink.py: shims + `opt lto<O3>` + `llc` + `ld.lld` | | 0.87 s |
+| **edit-and-rebuild the kernel** | **2.20 s** | **1.20 s** (`make kernel`) |
+| cold build (Rust: `-Zbuild-std` compiles core first) | 2.20 s | 8.6 s |
+
+The Rust frontend is cheap (~0.1 s; the offsets are plain functions, not template metaprogramming), and the backend is the same LLVM, so an incremental kernel rebuild is ~1.8x faster than the C++ one. The one-time cost is building `core` for the GPU target (~8 s, cached afterwards). The host is 0.40 s incremental in Rust (the C++ host was not built here).
+
+The first version of this pipeline let rustc run its own fat-LTO codegen and threw it away: without launch bounds that codegen spills thousands of VGPRs and took 4.8 s, plus 1.9 s for relink.py re-parsing all of core as IR text (6.7 s total, 3x the C++ build). `-Clinker-plugin-lto` + `--emit=llvm-bc` skips rustc's codegen entirely; `unchecked_div`/`unchecked_rem` (C++ `/`, `%` semantics) keep the crate free of panic calls into core so its bitcode is self-contained. The generated kernel is spill-free with 1280 MFMA and benchmarks the same.
+
 ## Feasibility summary
 
 - **Expressiveness:** everything opus provides here (layouts, buffer/LDS/TR8 ops, scaled MFMA, scheduling barriers, waitcnts) maps onto Rust plus LLVM intrinsics. The opus layout algebra becomes explicit offset functions; they are more verbose but easy to verify (the oracle check).
 - **Performance:** parity with C++ at the same LLVM version, but only after reproducing the C++ kernel's register-allocation hints. A Rust kernel at this level needs register-pinned inline asm, which today means a ~150-line IR post-processing step.
+- **Compile time:** incremental kernel rebuild 1.2 s vs 2.2 s for C++ (same LLVM backend, much cheaper frontend); a one-time ~8 s to build core for the GPU target.
 - **What would remove the relink step:** a launch-bounds attribute for `extern "gpu-kernel"`, address-space-qualified pointers (or LDS-typed intrinsics in `core::arch::amdgpu`), a bf16 type, and `vgpr`/`sgpr` register classes for amdgpu `asm!`.
