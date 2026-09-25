@@ -1,0 +1,8 @@
+[build]
+target = "amdgcn-amd-amdhsa"
+# -Clinker-plugin-lto: object files are LLVM bitcode, so rustc does no machine codegen;
+# tools/relink.py compiles the crate bitcode (--emit=llvm-bc) once, with launch bounds.
+rustflags = ["-Ctarget-cpu=gfx950", "-Clinker-plugin-lto"]
+
+[unstable]
+build-std = ["core"]

@@ -1,0 +1,16 @@
+[package]
+name = "mxfp8_gemm"
+version = "0.1.0"
+edition = "2024"
+
+# Built as bitcode only (see Makefile / tools/relink.py), never linked by rustc.
+[lib]
+crate-type = ["lib"]
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
