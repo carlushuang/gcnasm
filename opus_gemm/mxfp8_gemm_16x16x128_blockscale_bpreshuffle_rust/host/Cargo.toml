@@ -1,0 +1,11 @@
+[package]
+name = "mxfp8_gemm_host"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "gemm_mxfp8_bpreshuffle"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

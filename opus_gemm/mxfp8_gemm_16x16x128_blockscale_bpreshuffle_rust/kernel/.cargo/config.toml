@@ -1,0 +1,7 @@
+[build]
+target = "amdgcn-amd-amdhsa"
+# -Csave-temps keeps the post-LTO-link bitcode that tools/relink.py finishes
+rustflags = ["-Ctarget-cpu=gfx950", "-Csave-temps"]
+
+[unstable]
+build-std = ["core"]
