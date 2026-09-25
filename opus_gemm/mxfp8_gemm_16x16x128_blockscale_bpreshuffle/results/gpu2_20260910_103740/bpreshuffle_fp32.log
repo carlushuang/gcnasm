@@ -1,0 +1,4 @@
+Launching blockscale bpreshuffle GEMM: M=8192, N=8192, K=8192, batch=1, dtype=fp32, seed=1, grid=(256,1,1), block=512, output_tiles_per_wg=4 (auto)
+Input layout: A raw [B,M,K], B packed (16,16), SFA [B,K/128,M], SFB [B,N/128,K/128]
+
+Kernel Performance: avg_time=0.3774 ms, 2913.13 TFlops
