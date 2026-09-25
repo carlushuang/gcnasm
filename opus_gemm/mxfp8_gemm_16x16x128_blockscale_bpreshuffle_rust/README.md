@@ -50,7 +50,7 @@ make check-layouts CLANG23_ROOT=... OPUS_INCLUDE_DIR=...
 | C++ / opus | Rust |
 |---|---|
 | `__global__ __launch_bounds__(512, 1)` | `extern "gpu-kernel" fn` + `amdgpu-flat-work-group-size=1,512` / `amdgpu-waves-per-eu=1` added by relink.py |
-| `opus_gemm_scale_kargs` by value | `#[repr(C)] struct Kargs` by value (identical 96-byte byref kernarg) |
+| `opus_gemm_scale_kargs` by value | `#[repr(C)] struct opus_gemm_scale_kargs` by value (identical 96-byte byref kernarg) |
 | opus layouts (`make_layout`, `unfold_x_stride`, `partition_layout_c`, ...) | plain functions in layout.rs, checked lane-for-lane against opus |
 | `make_gmem` / `load` / `store` | `v4i32` buffer resource + `llvm.amdgcn.raw.buffer.{load,store}` |
 | `async_load` (`buffer_load_dwordx4 ... lds`) | `llvm.amdgcn.raw.buffer.load.lds` via IR shim |

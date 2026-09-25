@@ -45,33 +45,33 @@ const BUFFER_CONFIG: i32 = 0x0002_0000;
 // cache-policy aux: on gfx940+ SLC encodes NT
 pub const AUX_NT: i32 = 2;
 
-pub type Rsrc = i32x4;
+pub type buffer_rsrc = i32x4;
 
 /// __builtin_amdgcn_make_buffer_rsrc(ptr, stride = 0, num_records, config)
 #[inline(always)]
-pub fn make_rsrc(ptr: *const u8, num_records: u32) -> Rsrc {
+pub fn make_rsrc(ptr: *const u8, num_records: u32) -> buffer_rsrc {
     let a = ptr as u64;
     i32x4::from_array([a as i32, ((a >> 32) as i32) & 0xffff, num_records as i32, BUFFER_CONFIG])
 }
 
 /// buffer_load_dwordx4 ... lds: 16 bytes per lane from rsrc+voffset+soffset into lds + 16*lane.
 #[inline(always)]
-pub unsafe fn buffer_load_lds_b128(rsrc: Rsrc, lds: *mut u8, voffset: i32, soffset: i32) {
+pub unsafe fn buffer_load_lds_b128(rsrc: buffer_rsrc, lds: *mut u8, voffset: i32, soffset: i32) {
     unsafe { rk_buffer_load_lds_b128(rsrc, lds, voffset, soffset) }
 }
 
 #[inline(always)]
-pub unsafe fn buffer_load_u8(rsrc: Rsrc, voffset: i32, soffset: i32) -> u8 {
+pub unsafe fn buffer_load_u8(rsrc: buffer_rsrc, voffset: i32, soffset: i32) -> u8 {
     unsafe { llvm_raw_buffer_load_i8(rsrc, voffset, soffset, 0) }
 }
 
 #[inline(always)]
-pub unsafe fn buffer_store_b128<const AUX: i32>(v: f32x4, rsrc: Rsrc, voffset: i32, soffset: i32) {
+pub unsafe fn buffer_store_b128<const AUX: i32>(v: f32x4, rsrc: buffer_rsrc, voffset: i32, soffset: i32) {
     unsafe { llvm_raw_buffer_store_v4f32(v, rsrc, voffset, soffset, AUX) }
 }
 
 #[inline(always)]
-pub unsafe fn buffer_store_b64<const AUX: i32>(v: i32x2, rsrc: Rsrc, voffset: i32, soffset: i32) {
+pub unsafe fn buffer_store_b64<const AUX: i32>(v: i32x2, rsrc: buffer_rsrc, voffset: i32, soffset: i32) {
     unsafe { llvm_raw_buffer_store_v2i32(v, rsrc, voffset, soffset, AUX) }
 }
 

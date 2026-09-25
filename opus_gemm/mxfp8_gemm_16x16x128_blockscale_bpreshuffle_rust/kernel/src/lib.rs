@@ -8,8 +8,10 @@
 #![no_std]
 #![feature(abi_gpu_kernel, stdarch_amdgpu, link_llvm_intrinsics, portable_simd, simd_ffi, gpu_intrinsics, gpu_launch_sized_workgroup_mem, core_intrinsics)]
 #![allow(internal_features)]
-// Kargs is passed by value exactly like the C++ kernel (byref kernarg, 96 bytes, same offsets).
+// opus_gemm_scale_kargs is passed by value exactly like the C++ kernel (byref kernarg, 96 bytes, same offsets).
 #![allow(improper_gpu_kernel_arg)]
+// Project style: snake_case type names.
+#![allow(non_camel_case_types)]
 
 mod amdgpu;
 pub mod layout;
@@ -22,7 +24,7 @@ use layout::*;
 /// Same layout as opus_gemm_scale_kargs in gemm_a8w8_mxfp8_scale_common.h.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Kargs {
+pub struct opus_gemm_scale_kargs {
     pub ptr_a: *const u8,
     pub ptr_b: *const u8,
     pub ptr_c: *mut u8,
@@ -51,9 +53,9 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 const MAX_RECORDS: u32 = 0xffff_ffff;
 
-type VA = [i32x4; 4]; // ra issues: (m_repeat, k_half)
-type VB = [i32x4; 8]; // rb issues: two 16-byte K pieces per n_repeat
-type VC = [f32x4; 8]; // m_repeat * 4 + n_repeat
+type vtype_a = [i32x4; 4]; // ra issues: (m_repeat, k_half)
+type vtype_b = [i32x4; 8]; // rb issues: two 16-byte K pieces per n_repeat
+type vtype_c = [f32x4; 8]; // m_repeat * 4 + n_repeat
 
 #[inline(always)]
 fn cat(lo: i32x4, hi: i32x4) -> i32x8 {
@@ -83,7 +85,7 @@ fn sched_barrier0() {
 // B scale/op_sel goes with src0: op_sel_b = n_repeat, op_sel_a = half_m * E_M + m_repeat.
 #[inline(always)]
 fn mfma_one<const MREP: usize, const NR: usize, const OPSEL_SFB: i32, const OPSEL_SFA: i32>(
-    va: &VA, vb: &VB, vc: &mut VC, sfa: u32, sfb: u32) {
+    va: &vtype_a, vb: &vtype_b, vc: &mut vtype_c, sfa: u32, sfb: u32) {
     let a = cat(va[MREP * 2], va[MREP * 2 + 1]);
     let b = cat(vb[NR * 2], vb[NR * 2 + 1]);
     vc[MREP * 4 + NR] = mfma_scale_16x16x128_fp8::<OPSEL_SFB, OPSEL_SFA>(b, a, vc[MREP * 4 + NR], sfb as i32, sfa as i32);
@@ -93,7 +95,7 @@ fn mfma_one<const MREP: usize, const NR: usize, const OPSEL_SFB: i32, const OPSE
 /// `asm volatile("" : "+v"(v_c_pin[M_REPEAT]))` and sched_barrier_pairs_scale().
 macro_rules! mfma_pair {
     ($half:literal, $mrep:literal, $ngroup:literal, $va:expr, $vb:expr, $vc:expr, $sfa:expr, $sfb:expr) => {{
-        let vc: &mut VC = $vc;
+        let vc: &mut vtype_c = $vc;
         mfma_one::<$mrep, { $ngroup * 2 }, { $ngroup * 2 }, { $half * 2 + $mrep }>($va, $vb, vc, $sfa, $sfb);
         mfma_one::<$mrep, { $ngroup * 2 + 1 }, { $ngroup * 2 + 1 }, { $half * 2 + $mrep }>($va, $vb, vc, $sfa, $sfb);
         pin_acc(&mut vc[$mrep * 4..$mrep * 4 + 4]);
@@ -111,7 +113,7 @@ unsafe fn lds_read_b128(p: *mut u8) -> i32x4 {
     unsafe { (p as *const i32x4).read() }
 }
 
-struct Ctx {
+struct ctx {
     lds: *mut u8,
     lane_id: i32,
     wave_id_m: i32,
@@ -119,14 +121,14 @@ struct Ctx {
     stride_a: i32,
     stride_b: i32,
     stride_sfa: i32,
-    g_sf: Rsrc,
+    g_sf: buffer_rsrc,
     u_gsf: i32,
     u_ssf: i32,
     u_rsfa: i32,
     u_rsfb: i32,
 }
 
-impl Ctx {
+impl ctx {
     #[inline(always)]
     fn at(&self, off: i32) -> *mut u8 {
         unsafe { self.lds.add(off as usize) }
@@ -149,18 +151,18 @@ impl Ctx {
     }
     /// async_load<VEC>(g, s.ptr, u_g, u_s + s_off, g_off): 2 x buffer_load_dwordx4 ... lds
     #[inline(always)]
-    fn async_load(&self, g: Rsrc, u_g: &[i32; 2], u_s: &[i32; 2], s_off: i32, g_off: i32) {
+    fn async_load(&self, g: buffer_rsrc, u_g: &[i32; 2], u_s: &[i32; 2], s_off: i32, g_off: i32) {
         unsafe {
             buffer_load_lds_b128(g, self.at(u_s[0] + s_off), u_g[0], g_off);
             buffer_load_lds_b128(g, self.at(u_s[1] + s_off), u_g[1], g_off);
         }
     }
     #[inline(always)]
-    fn load_a(&self, u_ra: &[i32; 4], s_off: i32) -> VA {
+    fn load_a(&self, u_ra: &[i32; 4], s_off: i32) -> vtype_a {
         unsafe { [0, 1, 2, 3].map(|i| lds_read_b128(self.at(u_ra[i] + s_off))) }
     }
     #[inline(always)]
-    fn load_b_range<const BEGIN: usize, const END: usize>(&self, u_rb: &[i32; 8], s_off: i32, dst: &mut VB) {
+    fn load_b_range<const BEGIN: usize, const END: usize>(&self, u_rb: &[i32; 8], s_off: i32, dst: &mut vtype_b) {
         let mut i = BEGIN;
         while i < END {
             dst[i] = unsafe { lds_read_b128(self.at(u_rb[i] + s_off)) };
@@ -204,7 +206,7 @@ impl Ctx {
 
 /// store<VEC_C>(g_c, cast<D_C>(v), u_gc, c_off, aux): BF16 default policy, FP32 nt.
 #[inline(always)]
-unsafe fn store_c<const BF16: bool>(g_c: Rsrc, v: &VC, u_gc: &[i32; 8], c_off: i32) {
+unsafe fn store_c<const BF16: bool>(g_c: buffer_rsrc, v: &vtype_c, u_gc: &[i32; 8], c_off: i32) {
     let mut i = 0;
     while i < 8 {
         unsafe {
@@ -219,7 +221,7 @@ unsafe fn store_c<const BF16: bool>(g_c: Rsrc, v: &VC, u_gc: &[i32; 8], c_off: i
 }
 
 #[inline(always)]
-unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
+unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &opus_gemm_scale_kargs) {
     let c_elem = if BF16 { 2 } else { 4 };
     let num_tiles_m = (kargs.m + B_M - 1) / B_M;
     let num_tiles_n = (kargs.n + B_N - 1) / B_N;
@@ -253,7 +255,7 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
 
     let wave_id_m = wave_id % T_M;
     let wave_id_n = wave_id / T_M;
-    let cx = Ctx {
+    let cx = ctx {
         lds: core::intrinsics::gpu::gpu_launch_sized_workgroup_mem::<i32x4>() as *mut u8,
         lane_id,
         wave_id_m,
@@ -292,10 +294,10 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
         let g_c = make_rsrc(p_c.wrapping_offset((row * kargs.stride_c * c_elem) as isize), MAX_RECORDS);
 
         let zero_a = [i32x4::splat(0); 4];
-        let mut v_a: [VA; 2] = [zero_a; 2];
-        let mut v_b: VB = [i32x4::splat(0); 8];
-        let mut v_b_second: VB = [i32x4::splat(0); 8];
-        let mut v_c: [[VC; 2]; 2] = [[[f32x4::splat(0.0); 8]; 2]; 2];
+        let mut v_a: [vtype_a; 2] = [zero_a; 2];
+        let mut v_b: vtype_b = [i32x4::splat(0); 8];
+        let mut v_b_second: vtype_b = [i32x4::splat(0); 8];
+        let mut v_c: [[vtype_c; 2]; 2] = [[[f32x4::splat(0.0); 8]; 2]; 2];
         let mut v_sfa: u32 = 0;
         let mut v_sfb: [u32; 2] = [0; 2];
 
@@ -309,10 +311,10 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
         // Prologue
         if output_tile == 0 {
             v_scale_raw = cx.load_scale_raw(output_tile, 0);
-            cx.async_load(g_a, &u_ga, &u_sa, Ctx::sa_offset(stage, 0), cx.ga_offset(0, 0));
-            cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(stage, 0), cx.gb_offset(0, 0));
-            cx.async_load(g_a, &u_ga, &u_sa, Ctx::sa_offset(stage, 1), cx.ga_offset(1, 0));
-            cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(stage, 1), cx.gb_offset(1, 0));
+            cx.async_load(g_a, &u_ga, &u_sa, ctx::sa_offset(stage, 0), cx.ga_offset(0, 0));
+            cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(stage, 0), cx.gb_offset(0, 0));
+            cx.async_load(g_a, &u_ga, &u_sa, ctx::sa_offset(stage, 1), cx.ga_offset(1, 0));
+            cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(stage, 1), cx.gb_offset(1, 0));
 
             s_waitcnt_vmcnt0();
             cx.store_scale_dword(stage, v_scale_raw);
@@ -321,8 +323,8 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
             sched_barrier0();
         }
         if loops > 1 && output_tile == 0 {
-            cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(stage ^ 1, 0), cx.gb_offset(0, 1));
-            cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(stage ^ 1, 1), cx.gb_offset(1, 1));
+            cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(stage ^ 1, 0), cx.gb_offset(0, 1));
+            cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(stage ^ 1, 1), cx.gb_offset(1, 1));
             sched_barrier0();
         }
 
@@ -335,22 +337,22 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
 
             v_sfa = cx.load_sfa_dword(*scale_stage);
             v_sfb = cx.load_sfb_pair(*scale_stage);
-            v_a[0] = cx.load_a(&u_ra, Ctx::sa_offset(*stage, 0));
+            v_a[0] = cx.load_a(&u_ra, ctx::sa_offset(*stage, 0));
             sched_barrier0();
 
-            cx.load_b_range::<0, 8>(&u_rb, Ctx::sb_offset(*stage, 0), &mut v_b);
-            cx.load_b_range::<0, 4>(&u_rb, Ctx::sb_offset(*stage, 1), &mut v_b_second);
+            cx.load_b_range::<0, 8>(&u_rb, ctx::sb_offset(*stage, 0), &mut v_b);
+            cx.load_b_range::<0, 4>(&u_rb, ctx::sb_offset(*stage, 1), &mut v_b_second);
             sched_barrier0();
 
-            cx.async_load(g_a, &u_ga, &u_sa, Ctx::sa_offset(next_stage, 0), cx.ga_offset(0, tile + 1));
-            cx.async_load(g_a, &u_ga, &u_sa, Ctx::sa_offset(next_stage, 1), cx.ga_offset(1, tile + 1));
+            cx.async_load(g_a, &u_ga, &u_sa, ctx::sa_offset(next_stage, 0), cx.ga_offset(0, tile + 1));
+            cx.async_load(g_a, &u_ga, &u_sa, ctx::sa_offset(next_stage, 1), cx.ga_offset(1, tile + 1));
             sched_barrier0();
 
             s_waitcnt_lgkmcnt0();
             // A half 0 x B half 0 -> C[0][0]
             mfma_pair!(0, 0, 0, &v_a[0], &v_b, &mut v_c[0][0], v_sfa, v_sfb[0]);
 
-            v_a[1] = cx.load_a(&u_ra, Ctx::sa_offset(*stage, 1));
+            v_a[1] = cx.load_a(&u_ra, ctx::sa_offset(*stage, 1));
             s_waitcnt_lgkmcnt0();
 
             mfma_pair!(0, 0, 1, &v_a[0], &v_b, &mut v_c[0][0], v_sfa, v_sfb[0]);
@@ -362,7 +364,7 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
             mfma_pair!(1, 1, 0, &v_a[1], &v_b, &mut v_c[1][0], v_sfa, v_sfb[0]);
             mfma_pair!(1, 1, 1, &v_a[1], &v_b, &mut v_c[1][0], v_sfa, v_sfb[0]);
 
-            cx.load_b_range::<4, 8>(&u_rb, Ctx::sb_offset(*stage, 1), &mut v_b_second);
+            cx.load_b_range::<4, 8>(&u_rb, ctx::sb_offset(*stage, 1), &mut v_b_second);
 
             // A half 0 x B half 1 -> C[0][1]
             mfma_pair!(0, 0, 0, &v_a[0], &v_b_second, &mut v_c[0][1], v_sfa, v_sfb[1]);
@@ -379,10 +381,10 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
 
             if tile + 2 < loops {
                 if wave_id_n == 1 {
-                    cx.async_load(g_b, &u_gb_producer_0, &u_sb_producer_0, Ctx::sb_offset(*stage, 0), cx.gb_offset(0, tile + 2));
-                    cx.async_load(g_b, &u_gb_producer_1, &u_sb_producer_1, Ctx::sb_offset(*stage, 0), cx.gb_offset(0, tile + 2));
-                    cx.async_load(g_b, &u_gb_producer_0, &u_sb_producer_0, Ctx::sb_offset(*stage, 1), cx.gb_offset(1, tile + 2));
-                    cx.async_load(g_b, &u_gb_producer_1, &u_sb_producer_1, Ctx::sb_offset(*stage, 1), cx.gb_offset(1, tile + 2));
+                    cx.async_load(g_b, &u_gb_producer_0, &u_sb_producer_0, ctx::sb_offset(*stage, 0), cx.gb_offset(0, tile + 2));
+                    cx.async_load(g_b, &u_gb_producer_1, &u_sb_producer_1, ctx::sb_offset(*stage, 0), cx.gb_offset(0, tile + 2));
+                    cx.async_load(g_b, &u_gb_producer_0, &u_sb_producer_0, ctx::sb_offset(*stage, 1), cx.gb_offset(1, tile + 2));
+                    cx.async_load(g_b, &u_gb_producer_1, &u_sb_producer_1, ctx::sb_offset(*stage, 1), cx.gb_offset(1, tile + 2));
                 }
                 sched_barrier0();
             }
@@ -421,9 +423,9 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
         // Epilogue
         v_sfa = cx.load_sfa_dword(scale_stage);
         v_sfb = cx.load_sfb_pair(scale_stage);
-        v_a[0] = cx.load_a(&u_ra, Ctx::sa_offset(stage, 0));
-        v_a[1] = cx.load_a(&u_ra, Ctx::sa_offset(stage, 1));
-        cx.load_b_range::<0, 8>(&u_rb, Ctx::sb_offset(stage, 0), &mut v_b);
+        v_a[0] = cx.load_a(&u_ra, ctx::sa_offset(stage, 0));
+        v_a[1] = cx.load_a(&u_ra, ctx::sa_offset(stage, 1));
+        cx.load_b_range::<0, 8>(&u_rb, ctx::sb_offset(stage, 0), &mut v_b);
         s_waitcnt_lgkmcnt0();
 
         let has_next_output = output_tile + 1 < OUTPUT_TILES && block_m + 1 < num_tiles_m;
@@ -433,10 +435,10 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
             let next_row = (block_m + 1) * B_M;
             let g_a_next = make_rsrc(p_a.wrapping_offset((next_row * kargs.stride_a) as isize), MAX_RECORDS);
             v_scale_raw = cx.load_scale_raw(output_tile + 1, 0);
-            cx.async_load(g_a_next, &u_ga, &u_sa, Ctx::sa_offset(next_output_stage, 0), cx.ga_offset(0, 0));
-            cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(next_output_stage, 0), cx.gb_offset(0, 0));
-            cx.async_load(g_a_next, &u_ga, &u_sa, Ctx::sa_offset(next_output_stage, 1), cx.ga_offset(1, 0));
-            cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(next_output_stage, 1), cx.gb_offset(1, 0));
+            cx.async_load(g_a_next, &u_ga, &u_sa, ctx::sa_offset(next_output_stage, 0), cx.ga_offset(0, 0));
+            cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(next_output_stage, 0), cx.gb_offset(0, 0));
+            cx.async_load(g_a_next, &u_ga, &u_sa, ctx::sa_offset(next_output_stage, 1), cx.ga_offset(1, 0));
+            cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(next_output_stage, 1), cx.gb_offset(1, 0));
             sched_barrier0();
         }
 
@@ -459,7 +461,7 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
         }
         sched_barrier0();
 
-        cx.load_b_range::<0, 8>(&u_rb, Ctx::sb_offset(stage, 1), &mut v_b);
+        cx.load_b_range::<0, 8>(&u_rb, ctx::sb_offset(stage, 1), &mut v_b);
 
         mfma_pair!(0, 0, 0, &v_a[0], &v_b, &mut v_c[0][1], v_sfa, v_sfb[1]);
 
@@ -471,8 +473,8 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
             s_barrier();
             sched_barrier0();
             if loops > 1 {
-                cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(stage, 0), cx.gb_offset(0, 1));
-                cx.async_load(g_b, &u_gb, &u_sb, Ctx::sb_offset(stage, 1), cx.gb_offset(1, 1));
+                cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(stage, 0), cx.gb_offset(0, 1));
+                cx.async_load(g_b, &u_gb, &u_sb, ctx::sb_offset(stage, 1), cx.gb_offset(1, 1));
                 sched_barrier0();
             }
             first_stage = next_output_stage;
@@ -496,21 +498,21 @@ unsafe fn gemm<const OUTPUT_TILES: i32, const BF16: bool>(kargs: &Kargs) {
 
 // The four specializations of gemm_a8w8_mxfp8_scale_kernel.cc: {FP32, BF16} x {1, 4} output tiles.
 #[unsafe(no_mangle)]
-pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_fp32_t4(kargs: Kargs) {
+pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_fp32_t4(kargs: opus_gemm_scale_kargs) {
     unsafe { gemm::<4, false>(&kargs) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_fp32_t1(kargs: Kargs) {
+pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_fp32_t1(kargs: opus_gemm_scale_kargs) {
     unsafe { gemm::<1, false>(&kargs) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_bf16_t4(kargs: Kargs) {
+pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_bf16_t4(kargs: opus_gemm_scale_kargs) {
     unsafe { gemm::<4, true>(&kargs) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_bf16_t1(kargs: Kargs) {
+pub unsafe extern "gpu-kernel" fn gemm_mxfp8_bpreshuffle_bf16_t1(kargs: opus_gemm_scale_kargs) {
     unsafe { gemm::<1, true>(&kargs) }
 }

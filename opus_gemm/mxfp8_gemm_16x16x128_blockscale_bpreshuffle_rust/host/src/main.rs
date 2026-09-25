@@ -4,6 +4,9 @@
 //! double-precision CPU reference, then launches either the Rust kernels
 //! (build/mxfp8_gemm_rust.co) or the C++/opus kernels (a device-only .co of
 //! gemm_a8w8_mxfp8_scale_kernel.cc) through one launch/timing path.
+// Project style: snake_case type names.
+#![allow(non_camel_case_types)]
+
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr::null_mut;
 
@@ -11,8 +14,8 @@ use std::ptr::null_mut;
 #[allow(dead_code)]
 mod layout;
 
-type HipError = c_int;
-type Handle = *mut c_void;
+type hip_error = c_int;
+type handle = *mut c_void;
 
 const HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 63;
 const H2D: c_int = 1;
@@ -20,24 +23,24 @@ const D2H: c_int = 2;
 
 #[link(name = "amdhip64")]
 unsafe extern "C" {
-    fn hipSetDevice(dev: c_int) -> HipError;
-    fn hipGetDevice(dev: *mut c_int) -> HipError;
-    fn hipDeviceGetAttribute(v: *mut c_int, attr: c_int, dev: c_int) -> HipError;
-    fn hipGetErrorString(e: HipError) -> *const c_char;
-    fn hipMalloc(p: *mut *mut c_void, size: usize) -> HipError;
-    fn hipFree(p: *mut c_void) -> HipError;
-    fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: c_int) -> HipError;
-    fn hipMemset(dst: *mut c_void, v: c_int, size: usize) -> HipError;
-    fn hipDeviceSynchronize() -> HipError;
-    fn hipModuleLoadData(m: *mut Handle, image: *const c_void) -> HipError;
-    fn hipModuleGetFunction(f: *mut Handle, m: Handle, name: *const c_char) -> HipError;
-    fn hipModuleLaunchKernel(f: Handle, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32, shared: u32,
-                             stream: Handle, params: *mut *mut c_void, extra: *mut *mut c_void) -> HipError;
-    fn hipEventCreate(e: *mut Handle) -> HipError;
-    fn hipEventDestroy(e: Handle) -> HipError;
-    fn hipEventRecord(e: Handle, s: Handle) -> HipError;
-    fn hipEventSynchronize(e: Handle) -> HipError;
-    fn hipEventElapsedTime(ms: *mut f32, a: Handle, b: Handle) -> HipError;
+    fn hipSetDevice(dev: c_int) -> hip_error;
+    fn hipGetDevice(dev: *mut c_int) -> hip_error;
+    fn hipDeviceGetAttribute(v: *mut c_int, attr: c_int, dev: c_int) -> hip_error;
+    fn hipGetErrorString(e: hip_error) -> *const c_char;
+    fn hipMalloc(p: *mut *mut c_void, size: usize) -> hip_error;
+    fn hipFree(p: *mut c_void) -> hip_error;
+    fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: c_int) -> hip_error;
+    fn hipMemset(dst: *mut c_void, v: c_int, size: usize) -> hip_error;
+    fn hipDeviceSynchronize() -> hip_error;
+    fn hipModuleLoadData(m: *mut handle, image: *const c_void) -> hip_error;
+    fn hipModuleGetFunction(f: *mut handle, m: handle, name: *const c_char) -> hip_error;
+    fn hipModuleLaunchKernel(f: handle, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32, shared: u32,
+                             stream: handle, params: *mut *mut c_void, extra: *mut *mut c_void) -> hip_error;
+    fn hipEventCreate(e: *mut handle) -> hip_error;
+    fn hipEventDestroy(e: handle) -> hip_error;
+    fn hipEventRecord(e: handle, s: handle) -> hip_error;
+    fn hipEventSynchronize(e: handle) -> hip_error;
+    fn hipEventElapsedTime(ms: *mut f32, a: handle, b: handle) -> hip_error;
 }
 
 macro_rules! check {
@@ -53,7 +56,7 @@ macro_rules! check {
 /// Same layout as opus_gemm_scale_kargs.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Kargs {
+struct opus_gemm_scale_kargs {
     ptr_a: *const c_void,
     ptr_b: *const c_void,
     ptr_c: *mut c_void,
@@ -188,7 +191,7 @@ fn pack_weight_16x16(raw: &[u8], batches: usize, n: usize, k: usize) -> Vec<u8> 
 // ---------------------------------------------------------------------------------------------
 // Reference + validation, same math and tolerance as the C++ harness
 
-struct Problem<'a> {
+struct problem<'a> {
     a: &'a [u8],
     b: &'a [u8],
     sfa: &'a [u8],
@@ -197,7 +200,7 @@ struct Problem<'a> {
     k: usize,
 }
 
-impl Problem<'_> {
+impl problem<'_> {
     /// (value, sum |term|) for one output, double accumulation.
     fn reference(&self, row: usize, col: usize) -> (f32, f64) {
         let groups_k = self.k / 128;
@@ -216,14 +219,14 @@ impl Problem<'_> {
 }
 
 #[derive(Default)]
-struct Stats {
+struct check_stats {
     checked: usize,
     errors: usize,
     max_diff: f64,
     max_ratio: f64,
 }
 
-fn check_one(st: &mut Stats, raw_ref: f32, mag: f64, got: f32, bf16: bool, where_: (usize, usize)) {
+fn check_one(st: &mut check_stats, raw_ref: f32, mag: f64, got: f32, bf16: bool, where_: (usize, usize)) {
     const REL_MAG: f64 = 5e-5;
     const ABS_FLOOR: f64 = 1e-4;
     let expected = if bf16 { round_bf16(raw_ref) } else { raw_ref };
@@ -246,25 +249,25 @@ fn check_one(st: &mut Stats, raw_ref: f32, mag: f64, got: f32, bf16: bool, where
 }
 
 // ---------------------------------------------------------------------------------------------
-// Kernels
+// kernel_module
 
 #[derive(Clone, Copy, PartialEq)]
-enum Style {
-    Rust,
-    Opus,
+enum kernel_style {
+    rust,
+    opus,
 }
 
-struct Kernels {
+struct kernel_module {
     label: String,
-    style: Style,
-    module: Handle,
+    style: kernel_style,
+    module: handle,
 }
 
-impl Kernels {
-    fn load(spec: &str) -> Kernels {
+impl kernel_module {
+    fn load(spec: &str) -> kernel_module {
         let (style, path) = match spec.split_once(':') {
-            Some(("rust", p)) => (Style::Rust, p),
-            Some(("opus", p)) => (Style::Opus, p),
+            Some(("rust", p)) => (kernel_style::rust, p),
+            Some(("opus", p)) => (kernel_style::opus, p),
             _ => panic!("--co expects rust:<path> or opus:<path>, got {spec}"),
         };
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -275,16 +278,16 @@ impl Kernels {
         }).collect();
         let mut module = null_mut();
         check!(hipModuleLoadData(&mut module, image.as_ptr() as *const c_void));
-        let label = format!("{}:{}", if style == Style::Rust { "rust" } else { "opus" },
+        let label = format!("{}:{}", if style == kernel_style::rust { "rust" } else { "opus" },
                             std::path::Path::new(path).file_name().unwrap().to_string_lossy());
-        Kernels { label, style, module }
+        kernel_module { label, style, module }
     }
 
-    fn function(&self, tiles: i32, bf16: bool) -> (Handle, u32) {
+    fn function(&self, tiles: i32, bf16: bool) -> (handle, u32) {
         let (name, lds) = match self.style {
-            Style::Rust => (format!("gemm_mxfp8_bpreshuffle_{}_t{}", if bf16 { "bf16" } else { "fp32" }, tiles),
+            kernel_style::rust => (format!("gemm_mxfp8_bpreshuffle_{}_t{}", if bf16 { "bf16" } else { "fp32" }, tiles),
                             layout::LDS_BYTES as u32),
-            Style::Opus => (format!("_Z28gemm_a8w8_mxfp8_scale_kernelI28gemm_a8w8_mxfp8_scale_traitsILi256ELi256ELi128ELi1ELi128ELi128ELi{}ELb{}EEEv21opus_gemm_scale_kargs",
+            kernel_style::opus => (format!("_Z28gemm_a8w8_mxfp8_scale_kernelI28gemm_a8w8_mxfp8_scale_traitsILi256ELi256ELi128ELi1ELi128ELi128ELi{}ELb{}EEEv21opus_gemm_scale_kargs",
                                     tiles, bf16 as i32), 0),
         };
         let mut f = null_mut();
@@ -294,13 +297,13 @@ impl Kernels {
     }
 }
 
-fn launch(f: Handle, lds: u32, grid: (u32, u32), kargs: &Kargs) {
-    let mut args: [*mut c_void; 1] = [kargs as *const Kargs as *mut c_void];
+fn launch(f: handle, lds: u32, grid: (u32, u32), kargs: &opus_gemm_scale_kargs) {
+    let mut args: [*mut c_void; 1] = [kargs as *const opus_gemm_scale_kargs as *mut c_void];
     check!(hipModuleLaunchKernel(f, grid.0, 1, grid.1, layout::BLOCK_SIZE as u32, 1, 1, lds, null_mut(),
                                  args.as_mut_ptr(), null_mut()));
 }
 
-fn time_ms(f: Handle, lds: u32, grid: (u32, u32), kargs: &Kargs, warmup: usize, iters: usize) -> f64 {
+fn time_ms(f: handle, lds: u32, grid: (u32, u32), kargs: &opus_gemm_scale_kargs, warmup: usize, iters: usize) -> f64 {
     for _ in 0..warmup {
         launch(f, lds, grid, kargs);
     }
@@ -323,7 +326,7 @@ fn time_ms(f: Handle, lds: u32, grid: (u32, u32), kargs: &Kargs, warmup: usize, 
 
 // ---------------------------------------------------------------------------------------------
 
-struct Options {
+struct options {
     m: i32,
     n: i32,
     k: i32,
@@ -339,8 +342,8 @@ struct Options {
     co: Vec<String>,
 }
 
-fn parse_options() -> Options {
-    let mut o = Options { m: 8192, n: 8192, k: 8192, batch: 1, verify: 1, warmup: 200, iters: 100, rounds: 1,
+fn parse_options() -> options {
+    let mut o = options { m: 8192, n: 8192, k: 8192, batch: 1, verify: 1, warmup: 200, iters: 100, rounds: 1,
                           bf16: true, tiles: 0, seed: 1, samples: 65536, co: vec![] };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -460,7 +463,7 @@ fn main() {
     check!(hipMemcpy(d_sfb, sfb.as_ptr() as _, sfb.len(), H2D));
     drop(b_packed);
 
-    let kargs = Kargs {
+    let kargs = opus_gemm_scale_kargs {
         ptr_a: d_a, ptr_b: d_b, ptr_c: d_c, m: o.m, n: o.n, k: o.k, batch: o.batch,
         stride_a: o.k, stride_b: o.k, stride_c: o.n,
         stride_a_batch: a_batch as i32, stride_b_batch: b_batch as i32, stride_c_batch: c_batch as i32,
@@ -480,7 +483,7 @@ fn main() {
              o.m, o.n, o.k, o.batch, if o.bf16 { "bf16" } else { "fp32" }, o.seed, grid.0, grid.1,
              layout::BLOCK_SIZE, tiles, if o.tiles == 0 { " (auto)" } else { " (forced)" });
 
-    let kernels: Vec<Kernels> = o.co.iter().map(|s| Kernels::load(s)).collect();
+    let kernels: Vec<kernel_module> = o.co.iter().map(|s| kernel_module::load(s)).collect();
     let mut all_valid = true;
     let mut out_bytes = vec![0u8; batch * c_batch * c_elem];
     for kn in &kernels {
@@ -499,7 +502,7 @@ fn main() {
             f32::from_le_bytes(out_bytes[4 * i..4 * i + 4].try_into().unwrap())
         };
         for bi in 0..batch {
-            let p = Problem { a: &a[bi * a_batch..], b: &b[bi * b_batch..], sfa: &sfa[bi * sfa_batch..],
+            let p = problem { a: &a[bi * a_batch..], b: &b[bi * b_batch..], sfa: &sfa[bi * sfa_batch..],
                               sfb: &sfb[bi * sfb_batch..], m, k };
             let points: Vec<(usize, usize)> = if o.verify == 1 {
                 (0..m * n).map(|i| (i / n, i % n)).collect()
@@ -508,12 +511,12 @@ fn main() {
             };
             let threads = std::thread::available_parallelism().map_or(16, |x| x.get());
             let chunk = points.len().div_ceil(threads).max(1);
-            let stats: Vec<Stats> = std::thread::scope(|s| {
+            let stats: Vec<check_stats> = std::thread::scope(|s| {
                 let hs: Vec<_> = points.chunks(chunk).map(|pts| {
                     let p = &p;
                     let got = &got;
                     s.spawn(move || {
-                        let mut st = Stats::default();
+                        let mut st = check_stats::default();
                         for &(r, c) in pts {
                             let (rf, mag) = p.reference(r, c);
                             check_one(&mut st, rf, mag, got(bi * c_batch + r * n + c), o.bf16, (r, c));
