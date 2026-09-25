@@ -11,6 +11,7 @@ assembly kernels, HIP C++ device code, and PyTorch/Triton extensions.
 | `[A]` | Hand-written GCN assembly kernel (`.s`) |
 | `[H]` | HIP / C++ / CUDA device code |
 | `[A/H]` | Both hand-written assembly **and** HIP host code |
+| `[R]` | Rust device code (`amdgcn-amd-amdhsa` target) |
 | `+` | Has Python / PyTorch / Triton interface (can run from Python directly) |
 
 ## Highlighted Examples
@@ -67,6 +68,7 @@ See the [detailed README](vector_add_asm/README.md).
 | `[H]` | [`bandwidth_c`](bandwidth_c/) | Memory bandwidth benchmark (CUDA/HIP memcpy kernel) |
 | `[H]` | [`bandwidth_hip_jit`](bandwidth_hip_jit/) | JIT HIP bandwidth -- kernel compiled and loaded at runtime |
 | `[H]` | [`bandwidth_memread`](bandwidth_memread/) | **Memory bandwidth microbenchmark** -- read-only & read+write, float4, non-temporal, persistent kernels (ROCm / CUDA) |
+| `[R]` | [`bandwidth_memread_rust`](bandwidth_memread_rust/) | `bandwidth_memread` ported to **Rust** (kernels + host, no HIP C++) -- matches hipcc bandwidth to ~1-3% on gfx950; documents rustc amdgpu gotchas. See the [detailed README](bandwidth_memread_rust/README.md). |
 | `[H]` | [`bandwidth_memread_2d`](bandwidth_memread_2d/) | 2D memory read bandwidth benchmark |
 | `[H+]` | [`membench`](membench/) | Memory bandwidth test suite with JSON config |
 | `[H]` | [`memcpy_async`](memcpy_async/) | Async memcpy via shared memory (global -> LDS -> global) |

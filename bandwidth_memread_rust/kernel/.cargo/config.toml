@@ -1,0 +1,7 @@
+[build]
+target = "amdgcn-amd-amdhsa"
+# no runtime unroll of the outer iters loop: matches hipcc (4 loads in flight, 24 vs 61 VGPRs)
+rustflags = ["-Ctarget-cpu=gfx950", "-Cllvm-args=-unroll-runtime=false"]
+
+[unstable]
+build-std = ["core"]
