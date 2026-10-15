@@ -154,3 +154,4 @@ See the [detailed README](vector_add_asm/README.md).
 | `[+]` | [`hadmard_rotate`](hadmard_rotate/) | Hadamard / orthogonal matrix (PyTorch) |
 | `[+]` | [`merge_w_kv_o`](merge_w_kv_o/) | Merge K/KV/O utility (Python) |
 | `[+]` | [`co-exec`](co-exec/) | Python tool: compile + run asm/HIP kernels via HSA |
+| `[+]` | [`oir`](oir/) | opus-ir: Cake-style typed schedule IR whose vocabulary is opus.hpp (spec, builder, verifier with wait-counter hazard simulation; no codegen yet) |
