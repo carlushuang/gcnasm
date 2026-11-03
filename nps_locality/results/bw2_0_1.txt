@@ -1,0 +1,6 @@
+devices 0, 1 (DPX partitions of one MI355X, NPS2); 4 GiB x 8 reads per partition
+  dev0<-local only                             aggregate  2897.6 GB/s  (12 ms)
+  dev0<-local + dev1<-local (concurrent)       aggregate  5801.7 GB/s  (12 ms)
+  dev0<-remote only                            aggregate  2023.6 GB/s  (17 ms)
+  dev0<-remote + dev1<-remote (concurrent)     aggregate  3854.3 GB/s  (18 ms)
+  dev0<-local + dev1<-remote(dev0 mem) (concurrent) aggregate  3055.1 GB/s  (22 ms)

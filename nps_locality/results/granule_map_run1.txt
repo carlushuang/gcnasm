@@ -1,0 +1,12 @@
+dev 0: 256 CUs; buffer 16 GiB at 0x74bbe5200000, 2097152 granules, 8192 pages
+map: 0.41 s for 8 x 2097152 samples; IOD1 share 0.5000; margin p0.1 7 p1 31 p10 66 p50 92 ns
+repeat (XCC1 vs XCC5, +4 KiB inside the granule): agreement 0.9681 overall, 0.9689 on confident granules
+per-page fit home = parity(granule_idx & mask) ^ c: perfect 6336/8192, <=2 errors 8116/8192; masks (bit0 = addr bit13): 0x01:8192
+page masks of pages 0..63: 1111111111111111111111111111111111111111111111111111111111111111  (1 = plain 8 KiB alternation)
+lists: IOD0 1048516 granules, IOD1 1048636 granules
+  [rep 0] naive (every XCC, every granule)    6073.7 GB/s   power 967 W   6.28 GB/J   sclk 2390 MHz
+  [rep 0] local (exact per-granule lists)     5953.3 GB/s   power 887 W   6.71 GB/J   sclk 2394 MHz
+  [rep 0] remote (lists swapped)              3954.1 GB/s   power 835 W   4.74 GB/J   sclk 2395 MHz
+  [rep 1] naive (every XCC, every granule)    6073.3 GB/s   power 970 W   6.26 GB/J   sclk 2391 MHz
+  [rep 1] local (exact per-granule lists)     5953.4 GB/s   power 889 W   6.70 GB/J   sclk 2391 MHz
+  [rep 1] remote (lists swapped)              3954.5 GB/s   power 835 W   4.73 GB/J   sclk 2394 MHz

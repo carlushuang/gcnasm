@@ -1,0 +1,9 @@
+dev 0: AMD Instinct MI355X gfx950:sramecc+:xnack- CUs=256 mem=288.0 GiB
+XCC_ID values: 0 1 2 3 4 5 6 7  wg0..15 -> 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7  round-robin (xcc == (xcc0 + wg) % 8) for 4096/4096 WGs
+s_memtime rate: 2.393 cycles/ns (2392.6 MHz)
+buffer base 0x7043c3600000 (base % 2MiB = 0)
+part A: median ns per XCC: 0:398(p10 309 p90 446) 1:376(p10 311 p90 425) 2:393(p10 309 p90 446) 3:378(p10 311 p90 428) 4:396(p10 313 p90 448) 5:378(p10 313 p90 430) 6:400(p10 311 p90 453) 7:381(p10 314 p90 426)
+part B written (65536 samples x 8 XCCs)
+cyc_per_ns=2.3926
+0.12user 0.19system 0:00.34elapsed 91%CPU (0avgtext+0avgdata 632612maxresident)k
+0inputs+6760outputs (0major+15712minor)pagefaults 0swaps
