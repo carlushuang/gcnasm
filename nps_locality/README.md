@@ -133,6 +133,16 @@ The per-line latency vectors (1 MiB at 128 B resolution) correlate +0.62 to +0.7
 
 Details and tables are in `fp8_gemm_locality/README.md`.
 
+## FlyDSL MegaMoEV2 GEMM1 with IOD-placed weights
+
+`flydsl_mega_moe/` applies the same idea to a production MoE kernel: aiter's FlyDSL MegaMoEV2 GEMM1 (A8W4), on DeepSeek-V3-like shapes.
+
+- **Only the weight addressing changes.** The stock scheduler already gives each XCD fixed N-tiles, so W1 tile `(e, n)` is placed on IOD `(n mod 8) / 4` and the loader adds the IOD bit per tile. Outputs are bitwise identical to stock.
+- **Results at the default cap:**
+  - Decode keeps the same throughput with 73 W less.
+  - Heavier batches gain +6.3% (4 M-tiles per expert) and +2.5% (32 M-tiles per expert).
+  - Anti-local placement loses up to 33%.
+
 ## Comparison with B200: DeepGEMM's locality-aware Mega MoE and MLOPart
 
 **What MLOPart is.** MLOPart is an option on one MPS server (`nvidia-cuda-mps-control` → `start_server -mlopart`, CUDA 13.1+), not a GPU mode. Only clients of that server see each B200 die as its own CUDA device, with about 70 SMs and memory allocated from that die's HBM. Every other process keeps seeing the whole 148-SM GPU at the same time. It needs no root and no driver reload, and it disappears when the MPS server stops.

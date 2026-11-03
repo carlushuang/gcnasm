@@ -1,0 +1,26 @@
+W1 448 MiB logical, placed 256 x 2 MiB pages; phases probed in 0.04 s (weak pages: 0, 0)
+dev 0: MODEL=7168 INTER=2048 E=32 tile_n=256 sort_block_m=32; power cap 1000 W
+  [tpe=1] local (IOD-placed W1) vs stock: bitwise identical
+  [tpe=1] anti-local vs stock: bitwise identical
+
+### 1 m-tile(s) per expert: 1024 rows, 60 GFLOP per launch
+config                       TFLOP/s        [min,max]  power W  sclk MHz   Tj C  vs stock
+stock                          588.7 [   587,   592]     1000      1006   53.9     +0.0%
+local (IOD-placed W1)          604.8 [   604,   605]     1000      1416   54.6     +2.7%
+anti-local                     420.7 [   421,   421]      999      2120   54.9    -28.5%
+  [tpe=4] local (IOD-placed W1) vs stock: bitwise identical
+  [tpe=4] anti-local vs stock: bitwise identical
+
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP per launch
+config                       TFLOP/s        [min,max]  power W  sclk MHz   Tj C  vs stock
+stock                         1039.5 [  1038,  1040]     1000      1429   55.8     +0.0%
+local (IOD-placed W1)         1093.1 [  1093,  1093]     1000      1418   56.0     +5.2%
+anti-local                     989.8 [   989,   990]     1000      1484   56.0     -4.8%
+  [tpe=32] local (IOD-placed W1) vs stock: bitwise identical
+  [tpe=32] anti-local vs stock: bitwise identical
+
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP per launch
+config                       TFLOP/s        [min,max]  power W  sclk MHz   Tj C  vs stock
+stock                         1331.9 [  1332,  1332]     1000      1580   56.3     +0.0%
+local (IOD-placed W1)         1358.3 [  1357,  1359]     1000      1560   56.6     +2.0%
+anti-local                    1299.9 [  1300,  1300]     1000      1630   56.8     -2.4%
