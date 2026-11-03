@@ -131,7 +131,7 @@ The per-line latency vectors (1 MiB at 128 B resolution) correlate +0.62 to +0.7
 | `dpx_concurrent_bw.cpp` | DPX + NPS2 | Both partitions of one GPU streaming at once: local + local and cross + cross |
 | `spx_interleave_probe.cpp`, `analyze_interleave.py` | SPX + NPS1 | Per-line cold latency from each XCC (1 MiB at 128 B, 256 MiB at 4 KiB), then XCC grouping, home pattern and GF(2) fit |
 | `spx_granule_map.cpp` | SPX + NPS1 | Home IOD of every 8 KiB granule from all 8 XCCs, per-page fit, then naive / local / anti-local streaming with board power from hwmon |
-| `spx_page_phase_bw.cpp` | SPX + NPS1 | The same PoC with a per-2 MiB phase table, plus the plain grid-stride kernel for comparison |
+| `spx_page_phase_bw.cpp` | SPX + NPS1 | The same PoC with a per-2 MiB phase table, plus the plain grid-stride kernel for comparison. Its "4 granules do not alternate" counter is strict and flags a page for a single noisy granule; the 256-granule fit in `spx_granule_map` shows every page alternates |
 
 ```sh
 sh rebuild.sh                                   # ARCH=gfx950 by default
