@@ -1,0 +1,16 @@
+[L2-resident round 0] row-major (8 KiB stride)                  28566.8 GB/s
+[L2-resident round 0] IOD-placed-like (16 KiB stride)           30797.5 GB/s
+[L2-resident round 0] IOD-placed-like + k-chunk XOR swizzle     27597.3 GB/s
+[L2-resident round 0] row-major + k-chunk XOR swizzle           32172.1 GB/s
+[L2-resident round 1] row-major (8 KiB stride)                  30753.1 GB/s
+[L2-resident round 1] IOD-placed-like (16 KiB stride)           32718.6 GB/s
+[L2-resident round 1] IOD-placed-like + k-chunk XOR swizzle     28409.7 GB/s
+[L2-resident round 1] row-major + k-chunk XOR swizzle           32751.1 GB/s
+[HBM 4 GiB round 0] row-major (8 KiB stride)                   5827.6 GB/s
+[HBM 4 GiB round 0] IOD-placed-like (16 KiB stride)            5789.3 GB/s
+[HBM 4 GiB round 0] IOD-placed-like + k-chunk XOR swizzle      6242.3 GB/s
+[HBM 4 GiB round 0] row-major + k-chunk XOR swizzle            6236.2 GB/s
+[HBM 4 GiB round 1] row-major (8 KiB stride)                   5760.4 GB/s
+[HBM 4 GiB round 1] IOD-placed-like (16 KiB stride)            5761.0 GB/s
+[HBM 4 GiB round 1] IOD-placed-like + k-chunk XOR swizzle      6230.3 GB/s
+[HBM 4 GiB round 1] row-major + k-chunk XOR swizzle            6227.8 GB/s

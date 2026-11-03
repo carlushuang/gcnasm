@@ -1,0 +1,49 @@
+GPU[3]		: Successfully set power to: 1000W
+cap now: 1000 W
+######## M=4096 cap=1000
+dev 0: M=4096 N=65536 K=8192, power cap 1000 W (now 255 W, junction 48 C)
+page phases: A copies 32 pages (0 weak), B 256 pages (0 weak), probed in 0.05 s
+naive vs CPU (4096 sampled outputs): max |err| / sum|a*b| = 2.47e-07  VALID
+all other configs vs naive: bitwise identical
+
+config (mean of rounds)                     TFLOP/s [min,max]  power W  GFLOP/J  sclk MHz    Tj C vs naive
+naive (row-major A/B, one queue)            1598.2 [  1593,  1606]     1000     1598       955    53.0  +0.0%
+local B (placed B + per-IOD queues)         1728.7 [  1725,  1732]     1000     1729      1052    53.7  +8.2%
+local A+B                                   1739.3 [  1738,  1742]     1000     1739      1054    54.0  +8.8%
+anti-local B                                1520.3 [  1518,  1523]     1000     1520       927    54.0  -4.9%
+######## M=1024 cap=1000
+dev 0: M=1024 N=65536 K=8192, power cap 1000 W (now 285 W, junction 54 C)
+page phases: A copies 8 pages (0 weak), B 256 pages (0 weak), probed in 0.05 s
+naive vs CPU (4096 sampled outputs): max |err| / sum|a*b| = 2.43e-07  VALID
+all other configs vs naive: bitwise identical
+
+config (mean of rounds)                     TFLOP/s [min,max]  power W  GFLOP/J  sclk MHz    Tj C vs naive
+naive (row-major A/B, one queue)            1588.7 [  1586,  1591]     1000     1589       975    54.0  +0.0%
+local B (placed B + per-IOD queues)         1716.5 [  1716,  1717]     1000     1716      1119    54.0  +8.0%
+local A+B                                   1730.4 [  1730,  1731]     1000     1730      1135    54.0  +8.9%
+anti-local B                                1512.3 [  1512,  1513]     1000     1512       944    54.4  -4.8%
+GPU[3]		: Successfully set power to: 800W
+cap now: 800 W
+######## M=4096 cap=800
+dev 0: M=4096 N=65536 K=8192, power cap 800 W (now 280 W, junction 54 C)
+page phases: A copies 32 pages (0 weak), B 256 pages (0 weak), probed in 0.05 s
+naive vs CPU (4096 sampled outputs): max |err| / sum|a*b| = 2.33e-07  VALID
+all other configs vs naive: bitwise identical
+
+config (mean of rounds)                     TFLOP/s [min,max]  power W  GFLOP/J  sclk MHz    Tj C vs naive
+naive (row-major A/B, one queue)            1122.5 [  1122,  1123]      800     1403       667    52.8  +0.0%
+local B (placed B + per-IOD queues)         1235.5 [  1235,  1236]      800     1544       736    53.0 +10.1%
+local A+B                                   1245.4 [  1244,  1247]      800     1557       744    53.0 +10.9%
+anti-local B                                1065.9 [  1065,  1066]      800     1332       641    53.0  -5.0%
+######## M=1024 cap=800
+dev 0: M=1024 N=65536 K=8192, power cap 800 W (now 282 W, junction 53 C)
+page phases: A copies 8 pages (0 weak), B 256 pages (0 weak), probed in 0.05 s
+naive vs CPU (4096 sampled outputs): max |err| / sum|a*b| = 2.26e-07  VALID
+all other configs vs naive: bitwise identical
+
+config (mean of rounds)                     TFLOP/s [min,max]  power W  GFLOP/J  sclk MHz    Tj C vs naive
+naive (row-major A/B, one queue)            1129.1 [  1129,  1129]      800     1411       678    52.7  +0.0%
+local B (placed B + per-IOD queues)         1239.1 [  1239,  1240]      800     1549       747    53.0  +9.7%
+local A+B                                   1252.0 [  1251,  1252]      800     1565       755    53.0 +10.9%
+anti-local B                                1070.0 [  1070,  1070]      800     1337       649    53.0  -5.2%
+restored cap: 1400 W

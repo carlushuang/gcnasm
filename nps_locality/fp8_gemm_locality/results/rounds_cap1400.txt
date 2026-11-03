@@ -1,0 +1,42 @@
+######## M=1024 cap=1400
+dev 0: M=1024 N=65536 K=8192, power cap 1400 W (now 255 W, junction 47 C)
+page phases: A copies 8 pages (0 weak), B 256 pages (0 weak), probed in 0.05 s
+naive vs CPU (4096 sampled outputs): max |err| / sum|a*b| = 2.27e-07  VALID
+all other configs vs naive: bitwise identical
+
+config (mean of rounds)                     TFLOP/s [min,max]  power W  GFLOP/J  sclk MHz    Tj C vs naive
+naive (row-major A/B, one queue)            1916.1 [  1915,  1918]     1383     1386      2002    58.9  +0.0%
+sched only (per-IOD queues, row-major B)    1910.1 [  1910,  1911]     1382     1383      2005    59.9  -0.3%
+layout only (placed B, one queue)           1863.0 [  1862,  1865]     1373     1356      2045    59.8  -2.8%
+A-local only (per-IOD A copy)               1907.8 [  1907,  1910]     1382     1380      2006    60.0  -0.4%
+local B (placed B + per-IOD queues)         1842.9 [  1842,  1844]     1388     1328      2276    61.3  -3.8%
+local A+B                                   1902.6 [  1902,  1903]     1391     1368      2186    61.5  -0.7%
+anti-local B                                1705.1 [  1705,  1706]     1384     1232      2201    61.0 -11.0%
+######## M=4096 cap=1400
+dev 0: M=4096 N=65536 K=8192, power cap 1400 W (now 310 W, junction 60 C)
+page phases: A copies 32 pages (0 weak), B 256 pages (0 weak), probed in 0.05 s
+naive vs CPU (4096 sampled outputs): max |err| / sum|a*b| = 2.47e-07  VALID
+all other configs vs naive: bitwise identical
+
+config (mean of rounds)                     TFLOP/s [min,max]  power W  GFLOP/J  sclk MHz    Tj C vs naive
+naive (row-major A/B, one queue)            1987.2 [  1986,  1989]     1397     1423      1931    60.3  +0.0%
+sched only (per-IOD queues, row-major B)    1975.1 [  1974,  1976]     1395     1416      1944    61.1  -0.6%
+layout only (placed B, one queue)           1919.0 [  1918,  1920]     1394     1377      1973    61.0  -3.4%
+A-local only (per-IOD A copy)               1986.0 [  1984,  1987]     1397     1422      1924    61.0  -0.1%
+local B (placed B + per-IOD queues)         1951.2 [  1950,  1952]     1372     1422      2070    61.9  -1.8%
+local A+B                                   2063.1 [  2063,  2063]     1391     1484      1965    62.0  +3.8%
+anti-local B                                1745.8 [  1745,  1746]     1386     1260      2131    61.9 -12.1%
+######## M=256 cap=1400
+dev 0: M=256 N=65536 K=8192, power cap 1400 W (now 292 W, junction 60 C)
+page phases: A copies 2 pages (0 weak), B 256 pages (0 weak), probed in 0.05 s
+naive vs CPU (4096 sampled outputs): max |err| / sum|a*b| = 2.13e-07  VALID
+all other configs vs naive: bitwise identical
+
+config (mean of rounds)                     TFLOP/s [min,max]  power W  GFLOP/J  sclk MHz    Tj C vs naive
+naive (row-major A/B, one queue)            1775.1 [  1774,  1777]     1340     1325      2097    59.4  +0.0%
+sched only (per-IOD queues, row-major B)    1785.2 [  1783,  1788]     1343     1329      2084    60.0  +0.6%
+layout only (placed B, one queue)           1708.6 [  1707,  1710]     1345     1270      2236    60.0  -3.7%
+A-local only (per-IOD A copy)               1757.9 [  1756,  1759]     1335     1317      2111    60.0  -1.0%
+local B (placed B + per-IOD queues)         1722.7 [  1722,  1723]     1365     1262      2356    61.5  -3.0%
+local A+B                                   1697.2 [  1697,  1698]     1335     1272      2355    61.0  -4.4%
+anti-local B                                1590.1 [  1590,  1590]     1373     1158      2355    61.0 -10.4%

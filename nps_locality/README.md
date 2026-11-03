@@ -123,6 +123,16 @@ The per-line latency vectors (1 MiB at 128 B resolution) correlate +0.62 to +0.7
 5. **Tile layout.** Pack tiles in units of 8 KiB, for example 64 rows × 128 B of FP8 per granule.
 6. **Scheduling.** Use per-IOD task queues (XCC 0–3 vs XCC 4–7), as in DeepGEMM's per-die queues. Activations stay half-remote, since both IODs need all of them under an N split.
 
+## Locality-aware FP8 GEMM
+
+`fp8_gemm_locality/` applies the recipe above to the opus 8-wave FP8 GEMM. It uses per-IOD tile queues (`XCC_ID >> 2`), IOD-placed weights (a row permutation when K = 8192, using the page phases), and a per-IOD copy of the activations. All configurations are bitwise identical to the naive GEMM.
+
+- **Power-limited (cap lowered to 1000 W or 800 W).** Locality gives **+9–11% FP8 GEMM throughput at the same power**: sclk rises 10–16% because less power moves data across the IOD–IOD link.
+- **Default 1400 W cap.** The compute-heavy shape gains +3.8% (M = 4096). Memory-heavy shapes lose 1–4%, because the placed layout costs about 3% there.
+- **Separate finding.** Swizzling the 128 B k-chunk order per row streams the GEMM's B pattern 7–8% faster from HBM.
+
+Details and tables are in `fp8_gemm_locality/README.md`.
+
 ## Programs
 
 | File | Mode | What it does |
