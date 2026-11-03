@@ -1,8 +1,10 @@
 """MegaMoEV2 standalone GEMM1 (aiter FlyDSL, a8w4) with stock vs IOD-placed W1 on MI355X (SPX + NPS1).
 
-stock      : W1 in the stock shuffle_weight_w4 layout
-local      : W1 tile (e, n) placed in the 8 KiB granules homed on the IOD of the XCD that owns N-tile n
-anti-local : same layout, but placed on the other IOD (control)
+stock      : W1 and activations in the stock layouts
+B local    : W1 tile (e, n) placed in the 8 KiB granules homed on the IOD of the XCD that owns N-tile n
+A local    : one copy of the activations per IOD; the block computing (m, n) reads the copy on its own IOD
+A+B local  : both
+A+B anti   : both placed on the other IOD (control)
 The stock grid-stride loop gives XCD x the N-tiles n % 8 == x (round-robin dispatch), so no scheduling change.
 """
 import ctypes
@@ -88,11 +90,28 @@ def build_placed(dst, ph):
 
 build_placed(w_loc, ph_loc)
 build_placed(w_anti, ph_anti)
-CFGS = {
-    "stock": (w_log, None, 0),
-    "local (IOD-placed W1)": (w_loc, torch.from_numpy(ph_loc.astype(np.int32)).cuda(), 1),
-    "anti-local": (w_anti, torch.from_numpy(ph_anti.astype(np.int32)).cuda(), 1),
-}
+PH_B_LOC = torch.from_numpy(ph_loc.astype(np.int32)).cuda()
+PH_B_ANTI = torch.from_numpy(ph_anti.astype(np.int32)).cuda()
+
+
+def placed_x(x, m_tiles, flip):
+    """Per-IOD copies of the activations: copy d of 32-row tile m (28 granules) goes to page m // 4, slot m % 4."""
+    assert SBM * MODEL == 28 * 8192
+    npages = (m_tiles + 3) // 4
+    dst = torch.zeros(npages << 21, dtype=torch.uint8, device="cuda")
+    ph, weak = page_phases(dst)
+    if flip:
+        ph = ph ^ 1
+    m = torch.arange(m_tiles)
+    page, slot = m // 4, m % 4
+    phase = torch.from_numpy(ph.astype(np.int64))[page]
+    j = torch.arange(28)
+    src = x.view(torch.uint8).reshape(m_tiles * 28, 8192)
+    dstg = dst.view(npages * 256, 8192)
+    for d in (0, 1):
+        idx = page[:, None] * 256 + 2 * (slot[:, None] * 32 + j[None, :]) + (d ^ phase[:, None])
+        dstg.index_copy_(0, idx.reshape(-1).cuda(), src)
+    return dst.view(torch.float8_e4m3fn).view(npages * 256, 8192), torch.from_numpy(ph.astype(np.int32)).cuda(), weak
 
 
 def make_inputs(tpe):
@@ -105,16 +124,26 @@ def make_inputs(tpe):
     out = torch.zeros(rows, INTER, dtype=torch.float8_e4m3fn, device="cuda")
     pcols = ((INTER // 32) + 7) // 8 * 8
     out_scale = torch.zeros(((rows + 255) // 256) * 256 * pcols + INTER + 8192, dtype=torch.uint8, device="cuda")
-    return rows, x, scale_x, trb, eids, out, out_scale
+    x_loc, ph_a_loc, wl = placed_x(x, m_tiles, False)
+    x_anti, ph_a_anti, wa = placed_x(x, m_tiles, True)
+    cfgs = {
+        "stock": (w_log, None, 0, x, None, 0),
+        "B local": (w_loc, PH_B_LOC, 1, x, None, 0),
+        "A local": (w_log, None, 0, x_loc, ph_a_loc, 1),
+        "A+B local": (w_loc, PH_B_LOC, 1, x_loc, ph_a_loc, 1),
+        "A+B anti": (w_anti, PH_B_ANTI, 1, x_anti, ph_a_anti, 1),
+    }
+    return rows, x, scale_x, trb, eids, out, out_scale, cfgs
 
 
 def launch(cfg, inp):
-    rows, x, scale_x, trb, eids, out, out_scale = inp
-    w, phase, mode = CFGS[cfg]
-    gemm1_kernel(out, x, w, scale_x, scale_w, trb, eids, out_scale, rows,
+    rows, _x, scale_x, trb, eids, out, out_scale, cfgs = inp
+    w, phase, mode, xa, phase_a, a_mode = cfgs[cfg]
+    gemm1_kernel(out, xa, w, scale_x, scale_w, trb, eids, out_scale, rows,
                  fx.Stream(torch.cuda.current_stream().cuda_stream),
                  model_dim=MODEL, inter_dim=INTER, tile_n=TILE_N, sort_block_m=SBM, grid_mult=GRID_MULT,
-                 a_dtype="fp8", out_dtype="fp8", phase=phase, placed_mode=mode)
+                 a_dtype="fp8", out_dtype="fp8", phase=phase, placed_mode=mode, phase_a=phase_a,
+                 a_placed_mode=a_mode)
 
 
 def bench(cfg, inp, flop):
@@ -154,7 +183,8 @@ for tpe in TPE_LIST:
     rows = inp[0]
     flop = 2.0 * rows * (2 * INTER) * MODEL
     ref = None
-    for cfg in CFGS:
+    names = list(inp[7])
+    for cfg in names:
         inp[5].zero_()
         inp[6].zero_()
         launch(cfg, inp)
@@ -165,7 +195,6 @@ for tpe in TPE_LIST:
         else:
             same = torch.equal(res[0], ref[0]) and torch.equal(res[1], ref[1])
             print(f"  [tpe={tpe}] {cfg} vs stock: {'bitwise identical' if same else 'MISMATCH'}", flush=True)
-    names = list(CFGS)
     acc = {c: [] for c in names}
     for r in range(ROUNDS):
         for i in range(len(names)):

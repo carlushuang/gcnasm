@@ -133,15 +133,15 @@ The per-line latency vectors (1 MiB at 128 B resolution) correlate +0.62 to +0.7
 
 Details and tables are in `fp8_gemm_locality/README.md`.
 
-## FlyDSL MegaMoEV2 GEMM1 with IOD-placed weights
+## FlyDSL MegaMoEV2 GEMM1 with IOD-local weights and activations
 
 `flydsl_mega_moe/` applies the same idea to a production MoE kernel: aiter's FlyDSL MegaMoEV2 GEMM1 (A8W4), on DeepSeek-V3-like shapes.
 
-- **Only the weight addressing changes.** The stock scheduler already gives each XCD fixed N-tiles, so W1 tile `(e, n)` is placed on IOD `(n mod 8) / 4` and the loader adds the IOD bit per tile. Outputs are bitwise identical to stock.
-- **Results at the default cap:**
-  - Decode keeps the same throughput with 73 W less.
-  - Heavier batches gain +6.3% (4 M-tiles per expert) and +2.5% (32 M-tiles per expert).
-  - Anti-local placement loses up to 33%.
+- **Only the address computation changes.** The stock scheduler already gives each XCD fixed N-tiles. So W1 tile `(e, n)` is placed on IOD `(n mod 8) / 4`, the activations get one copy per IOD, and the loaders insert the IOD bit per tile. Outputs are bitwise identical to stock.
+- **Results with both operands local:**
+  - At the default 1400 W cap: **+15.2%** (4 M-tiles per expert) and **+9.5%** (32 M-tiles, prefill). Decode keeps its throughput with 70 W less.
+  - At 1000 W: +5.2%, +14.9% and +8.9%.
+  - Either operand alone gives only +3–7%, and anti-local placement loses 19–36%.
 
 ## Comparison with B200: DeepGEMM's locality-aware Mega MoE and MLOPart
 

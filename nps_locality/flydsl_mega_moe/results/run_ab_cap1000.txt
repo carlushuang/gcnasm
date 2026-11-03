@@ -1,0 +1,38 @@
+W1 448 MiB logical, placed 256 x 2 MiB pages; phases probed in 0.04 s (weak pages: 0, 0)
+dev 0: MODEL=7168 INTER=2048 E=32 tile_n=256 sort_block_m=32; power cap 1000 W
+  [tpe=1] B local vs stock: bitwise identical
+  [tpe=1] A local vs stock: bitwise identical
+  [tpe=1] A+B local vs stock: bitwise identical
+  [tpe=1] A+B anti vs stock: bitwise identical
+
+### 1 m-tile(s) per expert: 1024 rows, 60 GFLOP per launch
+config                       TFLOP/s        [min,max]  power W  sclk MHz   Tj C  vs stock
+stock                          587.9 [   587,   589]     1000      1080   53.0     +0.0%
+B local                        594.8 [   594,   596]     1000      1460   53.7     +1.2%
+A local                        579.9 [   578,   581]     1000      1049   53.7     -1.3%
+A+B local                      618.5 [   618,   619]     1000      1306   54.0     +5.2%
+A+B anti                       404.0 [   404,   404]     1000      2182   54.0    -31.3%
+  [tpe=4] B local vs stock: bitwise identical
+  [tpe=4] A local vs stock: bitwise identical
+  [tpe=4] A+B local vs stock: bitwise identical
+  [tpe=4] A+B anti vs stock: bitwise identical
+
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP per launch
+config                       TFLOP/s        [min,max]  power W  sclk MHz   Tj C  vs stock
+stock                         1031.9 [  1031,  1033]     1000      1438   54.9     +0.0%
+B local                       1085.5 [  1085,  1086]     1000      1426   55.0     +5.2%
+A local                       1105.7 [  1105,  1106]     1000      1281   55.0     +7.2%
+A+B local                     1185.8 [  1185,  1186]     1000      1288   55.0    +14.9%
+A+B anti                       966.3 [   965,   967]     1000      1412   55.0     -6.4%
+  [tpe=32] B local vs stock: bitwise identical
+  [tpe=32] A local vs stock: bitwise identical
+  [tpe=32] A+B local vs stock: bitwise identical
+  [tpe=32] A+B anti vs stock: bitwise identical
+
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP per launch
+config                       TFLOP/s        [min,max]  power W  sclk MHz   Tj C  vs stock
+stock                         1333.8 [  1333,  1335]     1000      1586   55.2     +0.0%
+B local                       1360.4 [  1360,  1361]     1000      1563   55.4     +2.0%
+A local                       1377.4 [  1377,  1378]     1000      1449   55.1     +3.3%
+A+B local                     1452.5 [  1452,  1453]     1000      1392   55.0     +8.9%
+A+B anti                       924.6 [   919,   928]     1000      2048   55.1    -30.7%
