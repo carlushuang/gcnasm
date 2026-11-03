@@ -32,10 +32,10 @@ The configurations compared:
 
 | Cap | M | naive | local B | local A+B | anti-local |
 |---|---|---|---|---|---|
-| 1000 W | 4096 | 1598 TF/s, 955 MHz | +8.2%, 1052 MHz | **+8.8%**, 1054 MHz | −4.9% |
-| 1000 W | 1024 | 1589 TF/s, 975 MHz | +8.0%, 1119 MHz | **+8.9%**, 1135 MHz | −4.8% |
-| 800 W | 4096 | 1123 TF/s, 667 MHz | +10.1%, 736 MHz | **+10.9%**, 744 MHz | −5.0% |
-| 800 W | 1024 | 1129 TF/s, 678 MHz | +9.7%, 747 MHz | **+10.9%**, 755 MHz | −5.2% |
+| 1000 W | 4096 | 1598 TFLOP/s, 955 MHz | +8.2%, 1052 MHz | **+8.8%**, 1054 MHz | −4.9% |
+| 1000 W | 1024 | 1589 TFLOP/s, 975 MHz | +8.0%, 1119 MHz | **+8.9%**, 1135 MHz | −4.8% |
+| 800 W | 4096 | 1123 TFLOP/s, 667 MHz | +10.1%, 736 MHz | **+10.9%**, 744 MHz | −5.0% |
+| 800 W | 1024 | 1129 TFLOP/s, 678 MHz | +9.7%, 747 MHz | **+10.9%**, 755 MHz | −5.2% |
 
 Board power sits exactly at the cap in every row, so throughput per watt improves by the same percentage as throughput.
 
@@ -43,9 +43,9 @@ Board power sits exactly at the cap in every row, so throughput per watt improve
 
 | M | naive | sched only | layout only | A-local only | local B | local A+B | anti-local |
 |---|---|---|---|---|---|---|---|
-| 256 | 1775 TF/s, 2097 MHz | +0.6% | −3.7% | −1.0% | −3.0%, 2356 MHz | −4.4%, 2355 MHz | −10.4% |
-| 1024 | 1916 TF/s, 2002 MHz | −0.3% | −2.8% | −0.4% | −3.8%, 2276 MHz | −0.7%, 2186 MHz | −11.0% |
-| 4096 | 1987 TF/s, 1931 MHz | −0.6% | −3.4% | −0.1% | −1.8%, 2070 MHz | **+3.8%**, 1965 MHz (+4.3% GFLOP/J) | −12.1% |
+| 256 | 1775 TFLOP/s, 2097 MHz | +0.6% | −3.7% | −1.0% | −3.0%, 2356 MHz | −4.4%, 2355 MHz | −10.4% |
+| 1024 | 1916 TFLOP/s, 2002 MHz | −0.3% | −2.8% | −0.4% | −3.8%, 2276 MHz | −0.7%, 2186 MHz | −11.0% |
+| 4096 | 1987 TFLOP/s, 1931 MHz | −0.6% | −3.4% | −0.1% | −1.8%, 2070 MHz | **+3.8%**, 1965 MHz (+4.3% GFLOP/J) | −12.1% |
 
 ### Reading the results
 
