@@ -1,0 +1,40 @@
+XCC latency correlation over part A lines (1 MiB, 128 B granularity):
+  x0 +1.00 +0.68 +0.76 +0.62 -0.70 -0.67 -0.70 -0.64
+  x1 +0.68 +1.00 +0.69 +0.63 -0.65 -0.60 -0.65 -0.58
+  x2 +0.76 +0.69 +1.00 +0.65 -0.71 -0.66 -0.74 -0.66
+  x3 +0.62 +0.63 +0.65 +1.00 -0.58 -0.52 -0.60 -0.52
+  x4 -0.70 -0.65 -0.71 -0.58 +1.00 +0.68 +0.72 +0.64
+  x5 -0.67 -0.60 -0.66 -0.52 +0.68 +1.00 +0.68 +0.65
+  x6 -0.70 -0.65 -0.74 -0.60 +0.72 +0.68 +1.00 +0.66
+  x7 -0.64 -0.58 -0.66 -0.52 +0.64 +0.65 +0.66 +1.00
+groups: G0 = [0, 1, 2, 3]  G1 = [4, 5, 6, 7]
+near-group mean latency: p10 314  p50 325  p90 350 ns
+far-group  mean latency: p10 401  p50 420  p90 444 ns
+margin |G0-G1|: p1 31  p10 67  p50 94 ns
+  x0: local-home lines 324 ns, remote-home lines 428 ns (medians)
+  x1: local-home lines 324 ns, remote-home lines 408 ns (medians)
+  x2: local-home lines 324 ns, remote-home lines 430 ns (medians)
+  x3: local-home lines 326 ns, remote-home lines 411 ns (medians)
+  x4: local-home lines 328 ns, remote-home lines 431 ns (medians)
+  x5: local-home lines 328 ns, remote-home lines 413 ns (medians)
+  x6: local-home lines 326 ns, remote-home lines 436 ns (medians)
+  x7: local-home lines 328 ns, remote-home lines 410 ns (medians)
+
+part A home IOD per 128 B line (first 256 lines = 32 KiB):
+  +     0 B: 0000000000000000000000000000000000000000000000000000000000000000
+  +  8192 B: 1111111111111111111111111111111111111111111111111111111111111111
+  + 16384 B: 0000000000000000000000000000000000000000000000000000000000000000
+  + 24576 B: 1111111111111111111111111111101111111111111111111111111111111111
+  fraction homed on G0: 0.500
+  run lengths (in 128 B lines): [(64, 119), (1, 10), (29, 1), (34, 1), (22, 1), (41, 1), (58, 1), (5, 1)]
+
+part B home IOD per 4 KiB block (offset 0), 256 MiB:
+  fraction homed on G0: 0.500
+  run lengths (in 4 KiB blocks): [(2, 32356), (4, 126), (1, 78), (3, 77), (5, 1), (6, 1)]
+  first 128 blocks: 00110011001100110011001100110011001100110011001100110011001100110111001100110011001100110011001100110011001100110011001100110011
+
+GF(2) fit over 72128 confident samples (margin > 40 ns):
+  bits 7..20: home = parity(offset & 0x2000) ^ 0  -> uses bits [13]; inconsistent rows 32020; violations 32020/72128
+  bits 7..27: home = parity(offset & 0x202000) ^ 0  -> uses bits [13, 21]; inconsistent rows 16; violations 16/72128
+
+2 MiB pages: 128 total; identical to page 0: 1; complement of page 0: 0; other: 127

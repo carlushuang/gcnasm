@@ -1,0 +1,59 @@
+HIP devices: 16
+  dev  0: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:75:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  1: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:75:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  2: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:05:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  3: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:05:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  4: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:65:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  5: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:65:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  6: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:15:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  7: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:15:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  8: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:f5:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev  9: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:f5:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev 10: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:85:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev 11: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:85:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev 12: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:e5:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev 13: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:e5:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev 14: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:95:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+  dev 15: AMD Instinct MI355X gfx950:sramecc+:xnack- pci 0000:95:00 CUs=128 mem=144.0 GiB wallclock=100000 kHz
+
+== per-device hardware IDs (1024 WGs x 64 threads) ==
+  dev  0: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  1: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  2: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  3: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  4: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  5: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  6: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  7: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  8: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev  9: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev 10: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev 11: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev 12: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev 13: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev 14: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+  dev 15: XCC_ID raw32 = { 0x0 0x1 0x2 0x3 }  unique (xcc,se,sh,cu)=128  unique __smid=128  wg0..15 -> xcc [0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3]  CUs/xcc: 0:32 1:32 2:32 3:32
+
+== memory placement test: run devices {0,1}, memory on {0,1,2} ==
+  peer 0 -> 1: canAccess=1 linkType=4 hops=1 perfRank=4
+  peer 0 -> 2: canAccess=1 linkType=4 hops=3 perfRank=4
+  peer 1 -> 0: canAccess=1 linkType=4 hops=1 perfRank=4
+  peer 1 -> 2: canAccess=1 linkType=4 hops=3 perfRank=4
+  run dev 0 -> mem dev 0 [local (same partition / NPS domain)]
+      chase latency median 325 ns (p10 320, p90 328); per XCC_ID: 0:323 1:324 2:325 3:325
+      stream read 2848.9 GB/s (4 GiB, best of 5)
+  run dev 0 -> mem dev 1 [sibling partition (other NPS domain, same GPU)]
+      chase latency median 409 ns (p10 397, p90 420); per XCC_ID: 0:417 1:398 2:418 3:401
+      stream read 1885.8 GB/s (4 GiB, best of 5)
+  run dev 0 -> mem dev 2 [other physical GPU (XGMI)]
+      chase latency median 986 ns (p10 972, p90 998); per XCC_ID: 0:991 1:979 2:995 3:982
+      stream read 66.1 GB/s (4 GiB, best of 5)
+  run dev 1 -> mem dev 0 [sibling partition (other NPS domain, same GPU)]
+      chase latency median 411 ns (p10 397, p90 422); per XCC_ID: 0:419 1:400 2:418 3:399
+      stream read 1886.5 GB/s (4 GiB, best of 5)
+  run dev 1 -> mem dev 1 [local (same partition / NPS domain)]
+      chase latency median 322 ns (p10 318, p90 326); per XCC_ID: 0:322 1:322 2:322 3:322
+      stream read 2863.3 GB/s (4 GiB, best of 5)
+  run dev 1 -> mem dev 2 [other physical GPU (XGMI)]
+      chase latency median 984 ns (p10 970, p90 996); per XCC_ID: 0:982 1:992 2:976 3:987
+      stream read 66.1 GB/s (4 GiB, best of 5)

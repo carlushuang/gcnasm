@@ -1,0 +1,64 @@
+power caps: 1400 1400 1400 1400 1400 1400 1400 1400 W
+[tokens/rank=64] building stock
+  built + checked in 3.4 s; {}
+  stage1 Stage1Config(sort_block_m=32, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=256, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=32, block_n=256, persist=False, persist_cu=0, use_nt=True, persist_strided=False, skew_cu=0, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=64] building s1q
+  built + checked in 3.3 s; {}
+[tokens/rank=64] building s1q+s1w
+  built + checked in 3.1 s; {'w1_weak_pages': 0}
+[tokens/rank=64] building s1q+s1w+s1v
+  built + checked in 0.1 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 116}
+[tokens/rank=64] building s1q+s1m0
+  built + checked in 0.1 s; {}
+[tokens/rank=64] building s1q+s1w+s1v+s1m0
+  built + checked in 0.1 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 116}
+### tokens/rank=64 (mtpr=64), 5 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  0.374 [ 0.371, 0.377]    +0.0%     0.190     0.062       +0.0%   0.327    742  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q                    0.371 [ 0.368, 0.373]    -0.8%     0.188     0.062       +0.0%   0.323    746  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w                0.370 [ 0.367, 0.374]    -1.1%     0.185     0.063       +1.3%   0.322    724  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1v            0.365 [ 0.363, 0.365]    -2.7%     0.182     0.062       +0.7%   0.314    731  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1m0               0.378 [ 0.378, 0.382]    +1.0%     0.192     0.062       +0.2%   0.330    740  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1v+s1m0       0.358 [ 0.354, 0.359]    -4.5%     0.175     0.063       +1.2%   0.309    737  2396  bitwise 8/8, non-finite 0, dirty counters 0
+[tokens/rank=512] building stock
+  built + checked in 0.2 s; {}
+  stage1 Stage1Config(sort_block_m=64, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=256, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=32, block_n=128, persist=True, persist_cu=240, use_nt=False, persist_strided=True, skew_cu=0, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=512] building s1q
+  built + checked in 3.4 s; {}
+[tokens/rank=512] building s1q+s1w
+  built + checked in 3.5 s; {'w1_weak_pages': 0}
+[tokens/rank=512] building s1q+s1w+s1v
+  built + checked in 3.6 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 508}
+[tokens/rank=512] building s1q+s1m0
+  built + checked in 3.4 s; {}
+[tokens/rank=512] building s1q+s1w+s1v+s1m0
+  built + checked in 3.7 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 508}
+### tokens/rank=512 (mtpr=512), 5 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  0.643 [ 0.640, 0.644]    +0.0%     0.301     0.198       +0.0%   0.591    987  2376  bitwise 8/8, non-finite 0, dirty counters 0
+s1q                    0.655 [ 0.652, 0.658]    +2.0%     0.318     0.198       -0.2%   0.594    993  2377  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w                0.629 [ 0.626, 0.630]    -2.1%     0.289     0.199       +0.3%   0.580    987  2373  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1v            0.641 [ 0.636, 0.642]    -0.3%     0.304     0.199       +0.1%   0.582    985  2373  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1m0               0.658 [ 0.657, 0.662]    +2.5%     0.318     0.199       +0.0%   0.604    980  2359  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1v+s1m0       0.641 [ 0.634, 0.646]    -0.2%     0.305     0.199       +0.4%   0.582    988  2372  bitwise 8/8, non-finite 0, dirty counters 0
+power caps after run: 1400 1400 1400 1400 1400 1400 1400 1400 W
+power caps: 1400 1400 1400 1400 1400 1400 1400 1400 W
+[tokens/rank=4096] building stock
+  built + checked in 3.5 s; {}
+  stage1 Stage1Config(sort_block_m=128, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=1536, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=64, block_n=256, persist=True, persist_cu=240, use_nt=False, persist_strided=False, skew_cu=96, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=4096] building s1q
+  built + checked in 4.7 s; {}
+[tokens/rank=4096] building s1q+s1w
+  built + checked in 4.4 s; {'w1_weak_pages': 0}
+[tokens/rank=4096] building s1q+s1w+s1v
+  built + checked in 0.2 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 3644}
+### tokens/rank=4096 (mtpr=4096), 5 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  2.433 [ 2.432, 2.448]    +0.0%     1.141     1.086       +0.0%   2.373   1139  2364  bitwise 8/8, non-finite 0, dirty counters 0
+s1q                    2.443 [ 2.441, 2.446]    +0.4%     1.133     1.090       +0.4%   2.380   1145  2361  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w                2.447 [ 2.432, 2.461]    +0.6%     1.129     1.094       +0.7%   2.377   1141  2361  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1v            2.426 [ 2.419, 2.448]    -0.3%     1.127     1.087       +0.0%   2.366   1147  2357  bitwise 8/8, non-finite 0, dirty counters 0
+power caps after run: 1400 1400 1400 1400 1400 1400 1400 1400 W

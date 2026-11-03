@@ -1,0 +1,59 @@
+power caps: 1400 1400 1400 1400 1400 1400 1400 1400 W
+[tokens/rank=64] building stock
+  built + checked in 3.5 s; {}
+  stage1 Stage1Config(sort_block_m=32, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=256, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=32, block_n=256, persist=False, persist_cu=0, use_nt=True, persist_strided=False, skew_cu=0, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=64] building s2q+s2g1
+  built + checked in 0.6 s; {}
+[tokens/rank=64] building s2q
+  built + checked in 0.1 s; {}
+[tokens/rank=64] building s2q+s2g4
+  built + checked in 0.3 s; {}
+[tokens/rank=64] building s2q+s2g8
+  built + checked in 0.1 s; {}
+### tokens/rank=64 (mtpr=64), 3 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  0.379 [ 0.373, 0.380]    +0.0%     0.192     0.062       +0.0%   0.329    729  2395  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g1               0.384 [ 0.384, 0.385]    +1.4%     0.196     0.071      +14.5%   0.337    722  2395  bitwise 8/8, non-finite 0, dirty counters 0
+s2q                    0.381 [ 0.381, 0.382]    +0.5%     0.195     0.071      +14.5%   0.334    724  2395  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4               0.388 [ 0.387, 0.389]    +2.4%     0.201     0.076      +22.8%   0.338    721  2395  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g8               0.398 [ 0.394, 0.399]    +4.9%     0.190     0.084      +35.9%   0.348    713  2395  bitwise 8/8, non-finite 0, dirty counters 0
+[tokens/rank=512] building stock
+  built + checked in 0.2 s; {}
+  stage1 Stage1Config(sort_block_m=64, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=256, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=32, block_n=128, persist=True, persist_cu=240, use_nt=False, persist_strided=True, skew_cu=0, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=512] building s2q+s2g1
+  built + checked in 9.0 s; {}
+[tokens/rank=512] building s2q
+  built + checked in 0.1 s; {}
+[tokens/rank=512] building s2q+s2g4
+  built + checked in 0.1 s; {}
+[tokens/rank=512] building s2q+s2g8
+  built + checked in 0.1 s; {}
+### tokens/rank=512 (mtpr=512), 3 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  0.643 [ 0.637, 0.643]    +0.0%     0.300     0.199       +0.0%   0.590    952  2369  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g1               0.800 [ 0.797, 0.800]   +24.5%     0.294     0.366      +84.5%   0.754    869  2390  bitwise 8/8, non-finite 0, dirty counters 0
+s2q                    0.691 [ 0.688, 0.695]    +7.6%     0.312     0.243      +22.2%   0.631    941  2392  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4               0.669 [ 0.669, 0.670]    +4.2%     0.314     0.214       +7.9%   0.613    972  2389  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g8               0.679 [ 0.678, 0.679]    +5.7%     0.317     0.221      +11.4%   0.623    963  2388  bitwise 8/8, non-finite 0, dirty counters 0
+[tokens/rank=4096] building stock
+  built + checked in 0.4 s; {}
+  stage1 Stage1Config(sort_block_m=128, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=1536, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=64, block_n=256, persist=True, persist_cu=240, use_nt=False, persist_strided=False, skew_cu=96, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=4096] building s2q+s2g1
+  built + checked in 25.0 s; {}
+[tokens/rank=4096] building s2q
+  built + checked in 0.1 s; {}
+[tokens/rank=4096] building s2q+s2g4
+  built + checked in 0.1 s; {}
+[tokens/rank=4096] building s2q+s2g8
+  built + checked in 0.1 s; {}
+### tokens/rank=4096 (mtpr=4096), 3 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  2.436 [ 2.436, 2.446]    +0.0%     1.137     1.076       +0.0%   2.370   1098  2354  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g1               2.930 [ 2.915, 2.947]   +20.2%     1.146     1.513      +40.7%   2.876    971  2343  bitwise 8/8, non-finite 0, dirty counters 0
+s2q                    2.459 [ 2.458, 2.470]    +0.9%     1.135     1.095       +1.8%   2.383   1090  2356  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4               2.455 [ 2.453, 2.462]    +0.8%     1.128     1.079       +0.3%   2.388   1095  2360  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g8               2.472 [ 2.461, 2.472]    +1.5%     1.134     1.080       +0.4%   2.379   1095  2359  bitwise 8/8, non-finite 0, dirty counters 0
+power caps after run: 1400 1400 1400 1400 1400 1400 1400 1400 W

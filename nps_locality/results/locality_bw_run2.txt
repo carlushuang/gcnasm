@@ -1,0 +1,15 @@
+hwmon freq1=sclk freq2=mclk
+dev 0: gfx950:sramecc+:xnack- CUs=256 pci 75; power file /sys/bus/pci/devices/0000:75:00.0/hwmon/hwmon12/power1_input (now 255 W)
+buffer 16 GiB at 0x7f2db5200000 (base % 2MiB = 0), 8192 pages
+page probe (4 granules x 8 XCCs per page): pages whose 4 granules do not alternate 0101/1010: 1515/8192; weak (<40 ns) 92; per-granule margin p1 38 p10 65 p50 93 ns
+home(page) == bit21 rule: 4099/8192; fraction of pages with granule0 on IOD1: 0.500
+page home vs single address bits (agreement with page_home ^ home0): b21:0.50 b22:0.50 b23:0.50 b24:0.50 b25:0.50 b26:0.50 b27:0.50 b28:0.50 b29:0.50 b30:0.50 b31:0.50 b32:0.50 b33:0.50
+first 64 page phases: 1010101010101010101010101010101010101010101010101010101010101011
+  [rep 0] naive (all XCCs, all granules)          6181.0 GB/s   power 970 W (n=191)   6.37 GB/J   freq1 2396 MHz  freq2 2000 MHz
+  [rep 0] local (XCC grp g -> IOD g granules)     6023.6 GB/s   power 885 W (n=191)   6.81 GB/J   freq1 2395 MHz  freq2 2000 MHz
+  [rep 0] remote (XCC grp g -> other IOD)         3980.9 GB/s   power 831 W (n=191)   4.79 GB/J   freq1 2388 MHz  freq2 2000 MHz
+  [rep 0] naive grid-stride (DPX test kernel)     5854.3 GB/s   power 953 W (n=191)   6.14 GB/J   freq1 2394 MHz  freq2 2000 MHz
+  [rep 1] naive (all XCCs, all granules)          6181.5 GB/s   power 973 W (n=191)   6.36 GB/J   freq1 2397 MHz  freq2 2000 MHz
+  [rep 1] local (XCC grp g -> IOD g granules)     6023.2 GB/s   power 887 W (n=191)   6.79 GB/J   freq1 2395 MHz  freq2 2000 MHz
+  [rep 1] remote (XCC grp g -> other IOD)         3980.9 GB/s   power 833 W (n=191)   4.78 GB/J   freq1 2395 MHz  freq2 2000 MHz
+  [rep 1] naive grid-stride (DPX test kernel)     5857.1 GB/s   power 954 W (n=191)   6.14 GB/J   freq1 2397 MHz  freq2 2000 MHz

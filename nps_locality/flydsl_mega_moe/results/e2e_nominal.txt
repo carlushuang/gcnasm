@@ -1,0 +1,104 @@
+power caps: 1400 1400 1400 1400 1400 1400 1400 1400 W
+[tokens/rank=64] building stock
+  built + checked in 3.4 s; {}
+  stage1 Stage1Config(sort_block_m=32, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=256, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=32, block_n=256, persist=False, persist_cu=0, use_nt=True, persist_strided=False, skew_cu=0, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=64] building s1q
+  built + checked in 3.3 s; {}
+[tokens/rank=64] building s1q+s1w
+  built + checked in 3.1 s; {'w1_weak_pages': 0}
+[tokens/rank=64] building s1q+s1x
+  built + checked in 0.1 s; {'w1_weak_pages': 0}
+[tokens/rank=64] building s1q+s1a
+  built + checked in 3.0 s; {'rx_weak_pages': 0, 'rx_placed_MiB': 116}
+[tokens/rank=64] building s1q+s1w+s1a
+  built + checked in 0.1 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 116}
+[tokens/rank=64] building s2q+s2g4
+  built + checked in 0.2 s; {}
+[tokens/rank=64] building s2q+s2g4+s2w
+  built + checked in 0.1 s; {'w2_weak_pages': 0}
+[tokens/rank=64] building s2q+s2g4+s2x
+  built + checked in 0.1 s; {'w2_weak_pages': 0}
+[tokens/rank=64] building s1q+s1w+s1a+s2q+s2g4+s2w
+  built + checked in 0.1 s; {'w2_weak_pages': 0, 'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 116}
+### tokens/rank=64 (mtpr=64), 5 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  0.380 [ 0.378, 0.388]    +0.0%     0.199     0.061       +0.0%   0.329    742  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q                    0.371 [ 0.368, 0.373]    -2.6%     0.187     0.061       +0.4%   0.319    750  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w                0.368 [ 0.366, 0.371]    -3.1%     0.184     0.060       -0.4%   0.319    727  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1x                0.405 [ 0.403, 0.407]    +6.5%     0.223     0.061       +0.2%   0.352    738  2395  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1a                0.379 [ 0.378, 0.382]    -0.3%     0.198     0.060       -0.6%   0.331    742  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1a            0.366 [ 0.366, 0.366]    -3.7%     0.183     0.060       -0.4%   0.317    730  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4               0.394 [ 0.392, 0.394]    +3.7%     0.199     0.075      +23.3%   0.343    724  2396  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4+s2w           0.387 [ 0.384, 0.388]    +1.6%     0.191     0.074      +22.8%   0.339    720  2395  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4+s2x           0.408 [ 0.408, 0.410]    +7.3%     0.190     0.099      +64.2%   0.360    724  2395  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1a+s2q+s2g4+s2w       0.380 [ 0.377, 0.382]    +0.0%     0.184     0.076      +25.3%   0.333    703  2396  bitwise 8/8, non-finite 0, dirty counters 0
+[tokens/rank=512] building stock
+  built + checked in 0.2 s; {}
+  stage1 Stage1Config(sort_block_m=64, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=256, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=32, block_n=128, persist=True, persist_cu=240, use_nt=False, persist_strided=True, skew_cu=0, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=512] building s1q
+  built + checked in 4.1 s; {}
+[tokens/rank=512] building s1q+s1w
+  built + checked in 3.5 s; {'w1_weak_pages': 0}
+[tokens/rank=512] building s1q+s1x
+  built + checked in 0.1 s; {'w1_weak_pages': 0}
+[tokens/rank=512] building s1q+s1a
+  built + checked in 3.5 s; {'rx_weak_pages': 0, 'rx_placed_MiB': 508}
+[tokens/rank=512] building s1q+s1w+s1a
+  built + checked in 3.6 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 508}
+[tokens/rank=512] building s2q+s2g4
+  built + checked in 0.2 s; {}
+[tokens/rank=512] building s2q+s2g4+s2w
+  built + checked in 0.1 s; {'w2_weak_pages': 0}
+[tokens/rank=512] building s2q+s2g4+s2x
+  built + checked in 0.1 s; {'w2_weak_pages': 0}
+[tokens/rank=512] building s1q+s1w+s1a+s2q+s2g4+s2w
+  built + checked in 0.1 s; {'w2_weak_pages': 0, 'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 508}
+### tokens/rank=512 (mtpr=512), 5 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  0.641 [ 0.638, 0.644]    +0.0%     0.302     0.199       +0.0%   0.585    991  2369  bitwise 8/8, non-finite 0, dirty counters 0
+s1q                    0.650 [ 0.647, 0.653]    +1.4%     0.314     0.198       -0.4%   0.597    988  2374  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w                0.634 [ 0.631, 0.635]    -1.1%     0.294     0.199       +0.2%   0.576    988  2368  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1x                0.702 [ 0.700, 0.704]    +9.4%     0.361     0.199       +0.0%   0.651    962  2383  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1a                0.686 [ 0.686, 0.689]    +7.0%     0.349     0.198       -0.2%   0.639    962  2381  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1a            0.673 [ 0.668, 0.674]    +4.9%     0.336     0.198       -0.4%   0.620    961  2380  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4               0.676 [ 0.672, 0.678]    +5.4%     0.321     0.215       +8.2%   0.614   1003  2391  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4+s2w           0.666 [ 0.662, 0.669]    +3.9%     0.317     0.208       +4.7%   0.605    988  2360  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4+s2x           0.778 [ 0.775, 0.779]   +21.4%     0.311     0.329      +65.5%   0.726    932  2394  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1a+s2q+s2g4+s2w       0.694 [ 0.694, 0.699]    +8.2%     0.345     0.208       +4.5%   0.638    962  2373  bitwise 8/8, non-finite 0, dirty counters 0
+[tokens/rank=4096] building stock
+  built + checked in 0.4 s; {}
+  stage1 Stage1Config(sort_block_m=128, tile_n=512, num_waves=8, grid_mult=1, num_dispatch_cu=32, mfma_amajor=True, async_a_copy=True, use_tile_resource=True, b_nt=0, waves_per_eu_hint=2, tile_k=256, pipe_weights=True, swizzle_a=True, work_shards=4, payload_chunk_rows=1536, prepare_quant_cu=64)
+  stage2 Stage2Config(block_m=64, block_n=256, persist=True, persist_cu=240, use_nt=False, persist_strided=False, skew_cu=96, block_k=256, b_hoist=True, b2stage=False, ascale_prefetch=True, spatial_partition=402, bf16_lds=False, aligned_pair=False, pair_cu=0, pair_block_m=32, pair_block_n=256, deep_a_pipeline=False)
+[tokens/rank=4096] building s1q
+  built + checked in 5.8 s; {}
+[tokens/rank=4096] building s1q+s1w
+  built + checked in 4.4 s; {'w1_weak_pages': 0}
+[tokens/rank=4096] building s1q+s1x
+  built + checked in 0.1 s; {'w1_weak_pages': 0}
+[tokens/rank=4096] building s1q+s1a
+  built + checked in 4.5 s; {'rx_weak_pages': 0, 'rx_placed_MiB': 3644}
+[tokens/rank=4096] building s1q+s1w+s1a
+  built + checked in 4.6 s; {'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 3644}
+[tokens/rank=4096] building s2q+s2g4
+  built + checked in 0.7 s; {}
+[tokens/rank=4096] building s2q+s2g4+s2w
+  built + checked in 0.1 s; {'w2_weak_pages': 0}
+[tokens/rank=4096] building s2q+s2g4+s2x
+  built + checked in 0.1 s; {'w2_weak_pages': 0}
+[tokens/rank=4096] building s1q+s1w+s1a+s2q+s2g4+s2w
+  built + checked in 0.2 s; {'w2_weak_pages': 0, 'w1_weak_pages': 0, 'rx_weak_pages': 0, 'rx_placed_MiB': 3644}
+### tokens/rank=4096 (mtpr=4096), 5 interleaved rounds x 20 forwards; ms = median over rounds of the max-rank median; spread = [min,max] over rounds
+variant           forward ms          spread vs stock stage1 ms stage2 ms s2 vs stock  b2b ms  W/GPU  sclk  checks
+stock                  2.439 [ 2.426, 2.451]    +0.0%     1.135     1.076       +0.0%   2.367   1149  2364  bitwise 8/8, non-finite 0, dirty counters 0
+s1q                    2.447 [ 2.442, 2.453]    +0.3%     1.140     1.079       +0.3%   2.377   1155  2358  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w                2.443 [ 2.436, 2.448]    +0.2%     1.139     1.078       +0.2%   2.370   1149  2360  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1x                2.527 [ 2.523, 2.534]    +3.6%     1.211     1.080       +0.4%   2.468   1140  2363  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1a                2.682 [ 2.677, 2.687]    +9.9%     1.383     1.081       +0.5%   2.624   1114  2372  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1a            2.671 [ 2.671, 2.678]    +9.5%     1.363     1.076       +0.1%   2.618   1108  2375  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4               2.458 [ 2.444, 2.473]    +0.8%     1.138     1.102       +2.4%   2.381   1134  2363  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4+s2w           2.522 [ 2.507, 2.548]    +3.4%     1.119     1.152       +7.1%   2.469   1104  2360  bitwise 8/8, non-finite 0, dirty counters 0
+s2q+s2g4+s2x           2.620 [ 2.591, 2.629]    +7.4%     1.134     1.225      +13.9%   2.545   1093  2356  bitwise 8/8, non-finite 0, dirty counters 0
+s1q+s1w+s1a+s2q+s2g4+s2w       2.760 [ 2.746, 2.773]   +13.2%     1.369     1.153       +7.1%   2.713   1071  2373  bitwise 8/8, non-finite 0, dirty counters 0
+power caps after run: 1400 1400 1400 1400 1400 1400 1400 1400 W
