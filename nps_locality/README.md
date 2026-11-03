@@ -133,6 +133,39 @@ The per-line latency vectors (1 MiB at 128 B resolution) correlate +0.62 to +0.7
 
 Details and tables are in `fp8_gemm_locality/README.md`.
 
+## Comparison with B200: DeepGEMM's locality-aware Mega MoE and MLOPart
+
+**What MLOPart is.** MLOPart is an option on one MPS server (`nvidia-cuda-mps-control` → `start_server -mlopart`, CUDA 13.1+), not a GPU mode. Only clients of that server see each B200 die as its own CUDA device, with about 70 SMs and memory allocated from that die's HBM. Every other process keeps seeing the whole 148-SM GPU at the same time. It needs no root and no driver reload, and it disappears when the MPS server stops.
+
+**How DeepGEMM uses it: only as a one-time allocator** at weight-load time ([deepseek-ai/DeepGEMM#462](https://github.com/deepseek-ai/DeepGEMM/pull/462)):
+
+1. A helper process starts a private MLOPart MPS server.
+2. The helper allocates memory on die-device `d` with `cuMemCreate` and passes it to the main process as a POSIX file descriptor.
+3. The main process, an ordinary full-GPU context, imports and maps it.
+4. `destroy_localizer()` stops the helper, and the memory stays valid.
+
+The compute is never split. Mega MoE runs on all SMs of both dies; its die-awareness comes from a pointer-chase probe that maps each SM to a die, plus per-die task queues.
+
+**No per-launch control.** DeepGEMM has no switch to run a launch on one die or on both.
+
+- Mega MoE asserts that it runs on every SM: `set_num_sms` must equal the device count.
+- Whether it uses two per-die task queues or one is fixed when the kernel is compiled, from the shapes: 2 × intermediate and hidden must be multiples of 512.
+- The only user choice is whether the weights are localized, made per weight tensor at load time with `deep_gemm.localize()`. Localized and normal weights run through the same kernel code.
+- The one per-launch decision is made inside the kernel: a phase steals tasks from the other die's queue only if it has at least 2 waves of tasks.
+
+**Compared with MI355X partition modes:**
+
+| | B200 + MLOPart | MI355X DPX + NPS2 |
+|---|---|---|
+| Scope | Only the clients of one MPS server | The whole GPU, and the memory mode applies to the whole hive |
+| How to switch | Start or stop an MPS daemon | `rocm-smi` plus an amdgpu reload; all GPUs must be idle |
+| Rest of the system | Still sees the normal full GPU | Sees the split devices |
+| Memory allocated through it | Stays valid when used from a normal full-GPU process | Gone after switching back, because the reload wipes it |
+
+On B200, whether memory is die-local or interleaved is a property of each allocation, independent of how the compute is exposed. On MI355X it is a mode for the whole GPU (hive), tied to the compute partition (NPS2 requires DPX or finer), and switching wipes memory. So "allocate in DPX + NPS2, then run in SPX" is not possible. The AMD substitute is this directory's approach: stay in SPX + NPS1 and place data per 8 KiB granule using the probed page phases. That gives the same locality, at granule rather than page granularity, at the cost of a layout constraint.
+
+CUDA 13.4 removes the MPS workaround: `cuMemCreate` with `CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN` allocates die-local memory directly, and green contexts can split SMs by die ([CUDA Programming Guide §4.7](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/locality-domains.html), [NVIDIA MLOPart blog](https://developer.nvidia.com/blog/boost-gpu-memory-performance-with-no-code-changes-using-nvidia-cuda-mps/)).
+
 ## Programs
 
 | File | Mode | What it does |
