@@ -302,6 +302,13 @@ def _lib():
     return _LIB
 
 
+def aligned_zeros(nbytes, dev):
+    \"\"\"2 MiB-aligned zeroed uint8 buffer (the caching allocator may return a block at any 512 B offset).\"\"\"
+    raw = torch.zeros(nbytes + (1 << 21), dtype=torch.uint8, device=dev)
+    off = (-raw.data_ptr()) % (1 << 21)
+    return raw[off: off + nbytes]
+
+
 def page_phases(buf):
     \"\"\"Home IOD of granule 0 of every 2 MiB page of ``buf`` (uint8, 2 MiB aligned) and the weak-page count.\"\"\"
     assert buf.data_ptr() % (1 << 21) == 0 and buf.numel() % (1 << 21) == 0
@@ -327,7 +334,7 @@ def place_w2(w2, epr, model_dim, inter_dim, anti=False):
     per_iod = epr * half * gpg
     npages = (per_iod + 127) // 128
     src = w2.contiguous().view(torch.uint8).view(epr, 2, half, gpg, 8192)
-    dst = torch.zeros(npages << 21, dtype=torch.uint8, device=w2.device)
+    dst = aligned_zeros(npages << 21, w2.device)
     ph, weak = page_phases(dst)
     if anti:
         ph = ph ^ 1
@@ -347,7 +354,7 @@ def phase_table(ph, dev, pad=2):
     return torch.from_numpy(np.concatenate([ph, np.zeros(pad, ph.dtype)]).astype(np.int32)).to(dev)
 
 
-def place_w1(w1, epr, model_dim, inter_dim, tile_n, anti=False):
+def place_w1(w1, epr, model_dim, inter_dim, tile_n, anti=False, owner="half"):
     \"\"\"IOD-placed copy of the shuffled a8w4 W1 for the fused Stage1 with per-IOD queues (BWeightLoader "stream").
 
     N-tile n of an expert (tile_n rows, gpt = tile_n / 16 * model_dim / 1024 granules) belongs to IOD
@@ -361,8 +368,16 @@ def place_w1(w1, epr, model_dim, inter_dim, tile_n, anti=False):
     assert model_dim % 1024 == 0 and n_tiles % 2 == 0
     per_iod = epr * half * gpt
     npages = (per_iod + 127) // 128
-    src = w1.contiguous().view(torch.uint8).view(epr, 2, half * gpt, 8192)
-    dst = torch.zeros(npages << 21, dtype=torch.uint8, device=w1.device)
+    # owner "half": IOD g owns N-tiles [g * half, (g + 1) * half); "rr": IOD (n % 8) // 4 (stock grid-stride loop),
+    # in stream order local(n) = (n // 8) * 4 + n % 4
+    n = np.arange(n_tiles)
+    if owner == "rr":
+        assert n_tiles % 8 == 0
+        g_of, local = (n & 7) >> 2, (n >> 3) * 4 + (n & 3)
+    else:
+        g_of, local = n // half, n % half
+    tiles = w1.contiguous().view(torch.uint8).view(epr, n_tiles, gpt, 8192)
+    dst = aligned_zeros(npages << 21, w1.device)
     ph, weak = page_phases(dst)
     if anti:
         ph = ph ^ 1
@@ -371,10 +386,27 @@ def place_w1(w1, epr, model_dim, inter_dim, tile_n, anti=False):
     page = q >> 7
     gran = dst.view(npages * 256, 8192)
     for g in (0, 1):
+        order = torch.from_numpy(n[g_of == g][np.argsort(local[g_of == g])]).to(w1.device)
         idx = page * 256 + 2 * (q & 127) + (g ^ phase[page])
-        gran.index_copy_(0, idx, src[:, g].reshape(per_iod, 8192))
+        gran.index_copy_(0, idx, tiles[:, order].reshape(per_iod, 8192))
     torch.cuda.synchronize()
     return dst, phase_table(ph, w1.device), weak
+
+
+def place_rows_insert13(x):
+    \"\"\"Two copies of a row buffer in the ATileLoader "insert13" layout: logical granule G -> granules 2G and 2G + 1.\"\"\"
+    src = x.contiguous().view(torch.uint8).view(-1)
+    ngran = (src.numel() + 8191) // 8192
+    placed = ((2 * ngran * 8192 + (1 << 21) - 1) >> 21) << 21
+    dst = aligned_zeros(placed, x.device)
+    ph, weak = page_phases(dst)
+    padded = torch.zeros(ngran * 8192, dtype=torch.uint8, device=x.device)
+    padded[: src.numel()] = src
+    pairs = dst[: 2 * ngran * 8192].view(ngran, 2, 8192)
+    pairs[:, 0] = padded.view(ngran, 8192)
+    pairs[:, 1] = padded.view(ngran, 8192)
+    torch.cuda.synchronize()
+    return dst, phase_table(ph, x.device), weak
 
 
 def alloc_placed_rx(op, rank, world, dev):
@@ -917,5 +949,105 @@ patch("mega_moe_v2.py", """                payload_chunk_rows=config.payload_chu
                 tile_state_stride=self._s1_tile_state_stride,
                 iod_s1=self._iod_s1,
             )""")
+
+
+# ================================================================ v5: standalone GEMM1 with the fused layouts (bridge)
+# W1 "stream" with the stock grid-stride ownership, A "insert13" (2 = own IOD, 3 = 50/50 control, 4 = other IOD)
+patch("gemm_util.py", """        g = n // fx.Int32(half)
+        q0 = (e * fx.Int32(half) + n - g * fx.Int32(half)) * fx.Int32(gpt)""", """        if const_expr(self._placed.get("owner", "half") == "rr"):
+            # stock grid-stride loop: N-tile n runs on XCD n % 8, i.e. IOD (n % 8) // 4
+            g = (n & fx.Int32(7)) >> fx.Int32(2)
+            local = ((n >> fx.Int32(3)) << fx.Int32(2)) + (n & fx.Int32(3))
+        else:
+            g = n // fx.Int32(half)
+            local = n - g * fx.Int32(half)
+        q0 = (e * fx.Int32(half) + local) * fx.Int32(gpt)""")
+patch("gemm1.py", """        placed = None
+        if const_expr(placed_mode != 0):
+            placed = dict(
+                phase_rsrc=ptr_buf_tensor(fx.get_iter(phase), fx.Int32), n_tiles=n_tiles, tile_n=tile_n
+            )
+        placed_a = None
+        if const_expr(a_placed_mode != 0):
+            placed_a = dict(phase_rsrc=ptr_buf_tensor(fx.get_iter(phase_a), fx.Int32))
+""", """        placed = None
+        if const_expr(placed_mode != 0):
+            placed = dict(
+                phase_rsrc=ptr_buf_tensor(fx.get_iter(phase), fx.Int32), n_tiles=n_tiles, tile_n=tile_n
+            )
+            if const_expr(placed_mode == 2):
+                placed.update(mode="stream", owner="rr")
+        placed_a = None
+        if const_expr(a_placed_mode != 0):
+            placed_a = dict(phase_rsrc=ptr_buf_tensor(fx.get_iter(phase_a), fx.Int32))
+            if const_expr(a_placed_mode >= 2):
+                placed_a.update(mode="insert13", select={2: "iod", 3: "parity", 4: "anti"}[a_placed_mode])
+""")
+
+
+# ================================================================ v6: single sparse token copy (s1v) + B-major MFMA order (s1m0)
+# s1v: dispatch writes each 8 KiB granule G of a row once, into granule 2G + (G & 1) of the pair layout (no extra
+# traffic); GEMM1 reads it with the parity selection. iod_s1 bit 32 = single write.
+patch("dispatch.py", """    fast_copy,
+    placed_rx=False,
+):""", """    fast_copy,
+    placed_rx=0,
+):""")
+patch("dispatch.py", """                _store_token_placed(placed_buffer, token_vals, fx.Int32(o_row & fx.Int64(8191)))""",
+"""                _store_token_placed(
+                    placed_buffer, token_vals, fx.Int32(o_row & fx.Int64(8191)),
+                    fx.Int32((o_row >> fx.Int64(13)) & fx.Int64(1)),
+                )""")
+patch("dispatch.py", """        def _store_token_placed(destination_buffer, vals, row_rb):
+            for j in range_constexpr(len(vals)):
+                unit = lane + fx.Int32(j * 64)
+                y = row_rb + unit * fx.Int32(16)
+                phys = (y + ((y >> fx.Int32(13)) << fx.Int32(13))) >> fx.Int32(4)
+                if const_expr(j < full_units):
+                    buf_copy_store(destination_buffer, phys, vals[j], fx.Int32, unit_elems=4)
+                    buf_copy_store(destination_buffer, phys + fx.Int32(512), vals[j], fx.Int32, unit_elems=4)
+                else:
+                    if unit < fx.Int32(fz_n_i32 // 4):
+                        buf_copy_store(destination_buffer, phys, vals[j], fx.Int32, unit_elems=4)
+                        buf_copy_store(destination_buffer, phys + fx.Int32(512), vals[j], fx.Int32, unit_elems=4)
+""", """        def _store_token_placed(destination_buffer, vals, row_rb, row_gpar):
+            # placed_rx 1: both granules of the pair; 2: only granule (G & 1) of the pair (single sparse copy)
+            for j in range_constexpr(len(vals)):
+                unit = lane + fx.Int32(j * 64)
+                y = row_rb + unit * fx.Int32(16)
+                gy = y >> fx.Int32(13)
+                phys = (y + (gy << fx.Int32(13))) >> fx.Int32(4)
+                if const_expr(placed_rx == 2):
+                    phys = phys + ((row_gpar + gy) & fx.Int32(1)) * fx.Int32(512)
+                active = unit < fx.Int32(fz_n_i32 // 4) if const_expr(j >= full_units) else None
+                if const_expr(active is None):
+                    buf_copy_store(destination_buffer, phys, vals[j], fx.Int32, unit_elems=4)
+                    if const_expr(placed_rx == 1):
+                        buf_copy_store(destination_buffer, phys + fx.Int32(512), vals[j], fx.Int32, unit_elems=4)
+                else:
+                    if active:
+                        buf_copy_store(destination_buffer, phys, vals[j], fx.Int32, unit_elems=4)
+                        if const_expr(placed_rx == 1):
+                            buf_copy_store(destination_buffer, phys + fx.Int32(512), vals[j], fx.Int32, unit_elems=4)
+""")
+patch("mega_moe_stage1.py", """                    placed_rx=bool(iod_s1 & 4),""", """                    placed_rx=(2 if iod_s1 & 32 else 1) if iod_s1 & 4 else 0,""")
+patch("mega_moe_v2.py", """        unknown = self._iod - {"s2q", "s2w", "s2x", "s1q", "s1w", "s1x", "s1a", "s1z", "s1y"}
+        if self._iod & {"s1w", "s1x", "s1a", "s1z", "s1y"} and "s1q" not in self._iod:""",
+"""        unknown = self._iod - {"s2q", "s2w", "s2x", "s1q", "s1w", "s1x", "s1a", "s1z", "s1y", "s1v", "s1m0"}
+        if self._iod & {"s1w", "s1x", "s1a", "s1z", "s1y", "s1v", "s1m0"} and "s1q" not in self._iod:""")
+patch("mega_moe_v2.py", """        if not self._iod & {"s1q", "s1w", "s1x", "s1a", "s1z", "s1y"}:
+            return""", """        if not self._iod & {"s1q", "s1w", "s1x", "s1a", "s1z", "s1y", "s1v", "s1m0"}:
+            return""")
+patch("mega_moe_v2.py", """            | (4 if self._iod & {"s1a", "s1z", "s1y"} else 0)
+            | (8 if "s1z" in self._iod else 0)
+            | (16 if "s1y" in self._iod else 0)
+        )""", """            | (4 if self._iod & {"s1a", "s1z", "s1y", "s1v"} else 0)
+            | (8 if self._iod & {"s1z", "s1v"} else 0)
+            | (16 if "s1y" in self._iod else 0)
+            | (32 if "s1v" in self._iod else 0)  # s1v: one sparse copy, written once and read 50 / 50
+        )""")
+patch("mega_moe_v2.py", """                mfma_amajor=config.mfma_amajor,
+                swizzle_a=config.swizzle_a,""", """                mfma_amajor=False if "s1m0" in self._iod else config.mfma_amajor,  # s1m0: B-major MFMA order
+                swizzle_a=config.swizzle_a,""")
 
 print("mega_moe_iod created at", dst)

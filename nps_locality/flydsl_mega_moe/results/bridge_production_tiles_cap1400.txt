@@ -1,0 +1,32 @@
+=== SBM=64 TPE=2 AMAJOR=1 (tile_n=512, 8 waves, LDS-DMA A)
+### 2 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A 50/50: ok; A 50/50 + B: ok; A+B local: ok; A+B anti: ok
+  stock            1606.1 TFLOP/s [  1605,  1609]   1371 W   2006 MHz   +0.0%
+  B local          1751.7 TFLOP/s [  1748,  1755]   1389 W   1929 MHz   +9.1%
+  A 50/50          1607.4 TFLOP/s [  1607,  1609]   1373 W   1999 MHz   +0.1%
+  A 50/50 + B      1716.3 TFLOP/s [  1713,  1720]   1381 W   1936 MHz   +6.9%
+  A+B local        1668.3 TFLOP/s [  1668,  1669]   1335 W   1949 MHz   +3.9%
+  A+B anti         1215.3 TFLOP/s [  1215,  1215]   1303 W   2394 MHz  -24.3%
+=== SBM=64 TPE=2 AMAJOR=0 (tile_n=512, 8 waves, LDS-DMA A)
+### 2 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A 50/50: ok; A 50/50 + B: ok; A+B local: ok; A+B anti: ok
+  stock            1518.8 TFLOP/s [  1518,  1521]   1374 W   2160 MHz   +0.0%
+  B local          1640.9 TFLOP/s [  1638,  1644]   1359 W   1925 MHz   +8.0%
+  A 50/50          1612.0 TFLOP/s [  1611,  1613]   1384 W   1958 MHz   +6.1%
+  A 50/50 + B      1749.0 TFLOP/s [  1747,  1750]   1396 W   1887 MHz  +15.2%
+  A+B local        1742.8 TFLOP/s [  1740,  1745]   1385 W   1934 MHz  +14.7%
+  A+B anti         1220.8 TFLOP/s [  1221,  1221]   1323 W   2390 MHz  -19.6%
+=== SBM=128 TPE=8 AMAJOR=1 (tile_n=512, 8 waves, LDS-DMA A)
+### 8 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A 50/50: ok; A 50/50 + B: ok; A+B local: ok; A+B anti: ok
+  stock            2301.4 TFLOP/s [  2297,  2306]   1362 W   2180 MHz   +0.0%
+  B local          2330.5 TFLOP/s [  2322,  2338]   1368 W   2156 MHz   +1.3%
+  A 50/50          2334.9 TFLOP/s [  2331,  2340]   1364 W   2124 MHz   +1.5%
+  A 50/50 + B      2344.8 TFLOP/s [  2343,  2346]   1364 W   2107 MHz   +1.9%
+  A+B local        2362.5 TFLOP/s [  2358,  2369]   1373 W   2162 MHz   +2.7%
+  A+B anti         2182.0 TFLOP/s [  2180,  2185]   1353 W   2103 MHz   -5.2%
+=== SBM=128 TPE=8 AMAJOR=0 (tile_n=512, 8 waves, LDS-DMA A)
+### 8 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A 50/50: ok; A 50/50 + B: ok; A+B local: ok; A+B anti: ok
+  stock             420.1 TFLOP/s [   420,   420]   1010 W   2396 MHz   +0.0%
+  B local           410.8 TFLOP/s [   411,   411]   1010 W   2395 MHz   -2.2%
+  A 50/50           458.3 TFLOP/s [   458,   458]   1051 W   2396 MHz   +9.1%
+  A 50/50 + B       409.7 TFLOP/s [   410,   410]   1026 W   2396 MHz   -2.5%
+  A+B local         411.7 TFLOP/s [   412,   412]   1017 W   2396 MHz   -2.0%
+  A+B anti          416.6 TFLOP/s [   417,   417]   1030 W   2396 MHz   -0.8%

@@ -4,6 +4,7 @@ This directory applies the parent directory's SPX + NPS1 locality rule to a prod
 
 - **Part 1** places the operands of the standalone GEMM1.
 - **Part 2** carries the placement through the fused pipeline on 8 GPUs (Stage 1 with dispatch, Stage 2, per-IOD token copies) and measures it end to end.
+- **Part 3** bridges the two and explains why the pipeline barely gains.
 
 Tested with aiter `6fe1bfc8f` (`aiter/ops/flydsl/kernels/mega_moe`), flydsl 0.4.1 and torch 2.10 on ROCm 7.2, in a `rocm/atom-dev` container on an 8×MI355X box, on 2026-11-03.
 
@@ -61,6 +62,8 @@ The same placement rule, applied to the production pipeline: fused Stage 1 (disp
 | `s1q` | `mega_moe_stage1.py` | XCC_ID-based ownership in the fused Stage 1. Each CTA reads `s_getreg_b32 hwreg(20)` once and claims tiles from the work-head shard of its IOD (`XCC_ID >> 2`); IOD g takes N-tiles [4g, 4g + 4) of every M slot. Works for both the sharded and the ready-order schedule, and the prepare kernel already zeroes the shards. |
 | `s1w` / `s1x` | `gemm_util.py` (`BWeightLoader`) | W1 in a per-IOD granule stream. A 512-row tile is 224 granules and can straddle 3 pages, whose phases are loaded once per tile. `s1x` puts every tile on the other IOD (control). |
 | `s1a` | `dispatch.py`, `gemm_util.py` (`ATileLoader`), `mega_moe_v2.py` | Per-IOD token copies. The receive buffer becomes a symmetric buffer of twice the size. The producer CTAs on all 8 source GPUs write every 16 B of a row to both granules of its pair, `o + (o & ~8191)` and `+ 8192`, so they need no phase tables. GEMM1 reads the copy homed on its IOD, `+ ((iod ^ phase[o >> 20]) << 13)`, on both the register and the LDS-DMA A paths. Controls: `s1z` reads the same copies in the stock 50/50 IOD mix, `s1y` reads the other IOD's copy. |
+| `s1v` | `dispatch.py` | One sparse token copy (added in Part 3). Dispatch writes each granule G once, into granule 2G + (G & 1) of its pair, so it adds no traffic. GEMM1 reads it like `s1z`. |
+| `s1m0` | `mega_moe_v2.py` | Stage 1 with the B-major MFMA order instead of the production A-major order (Part 3). |
 | `s2q` | `mega_moe_stage2.py` | Replaces the four stock Stage 2 schedules with one persistent per-IOD queue (4 blocks per CU; `s2gN` sets N). IOD g owns N-blocks [g·nnb/2, (g + 1)·nnb/2) of every M-block. The next ticket is claimed before the current unit runs, and the last block to retire zeroes the counters. |
 | `s2w` / `s2x` | `gemm2.py` | W2 placed per 16-row group, so the layout does not depend on BN (128 or 256): group r of an expert goes to IOD r // (N / 32). `s2x` is the other-IOD control. |
 
@@ -123,12 +126,62 @@ Whole forward (dispatch, both stages and combine), relative to stock:
 - **Neither W2 placement nor the per-IOD queue pays off in Stage 2.**
   - The queue replaces four tuned static schedules with a dynamic one, at +23%, +8% and +2% of Stage 2 time (64, 512, 4096 tokens per rank).
   - On top of the queue, local W2 is 1–3% faster at 64 and 512 tokens, but 4.5% (1400 W) and 6% (900 W) slower at 4096, even though it lowers power (sclk 1993 vs 1951 MHz under 900 W). This is the same placed-layout cost the opus GEMM showed at 1400 W.
-- **Why the standalone GEMM1 gains (+9.5–15%) do not carry over is not isolated yet.** The fused kernel differs in several ways:
-  - Tile shape: tile_n 512 with 8 waves.
-  - A reaches LDS by DMA, and GEMM1 overlaps the dispatch traffic.
-  - W1 is read through the stream layout, whose tiles straddle pages.
+- **Why the standalone GEMM1 gains (+9.5–15%) do not carry over** is worked out in Part 3.
 
-  At the default cap the pipeline is not power-limited, so the mechanism measured before, lower fabric power turning into higher sclk, has nothing to act on. Under the 900 W cap it is power-limited, but W1-local still only breaks even.
+## Part 3: why the pipeline barely gains
+
+`bench_gemm1_bridge.py` closes the gap between Part 1 and Part 2 one step at a time.
+
+- **What it runs.** The standalone GEMM1 with the fused kernel's layouts: W1 in the per-IOD stream, activations as `insert13` copy pairs.
+- **What varies.** Kernel knobs come from the environment: `SBM`, `TILE_N`, `NUM_WAVES`, `GRID_MULT`, `ASYNC_A` and `AMAJOR`.
+- **Ownership.** The stock grid-stride loop (N-tile n on XCD n % 8).
+- **Method.** HIP device 0 at the default 1400 W cap, 2 s × 3 interleaved rounds per variant. Every output is bitwise identical to stock.
+- **Variants.**
+  - `A 50/50` reads the copy pairs in the stock IOD mix, so it has the paired layout without the locality.
+  - `A+B anti` places both operands on the other IOD.
+
+**1. Production uses bigger M-tiles at bigger batches, and they barely care about locality.** Stage 1 runs tile_n 512, 8 waves, A-major MFMA order and an LDS-DMA A path. Its M-tile is 32 rows at 64 tokens per rank, 64 rows at 512 and 128 rows at 4096. With the production configuration at the matching tile sizes:
+
+| Rows per expert (≈ tokens/rank) | M-tile | stock | B local | A 50/50 + B | A+B local | A+B anti |
+|---|---|---|---|---|---|---|
+| 32 (≈ 64) | 32 rows | 601 TFLOP/s | +6.5% | +8.2% | +9.6% | −31.4% |
+| 128 (≈ 512) | 64 rows | 1606 TFLOP/s | **+9.1%** | +6.9% | +3.9% | −24.3% |
+| 1024 (≈ 4096) | 128 rows | 2301 TFLOP/s | +1.3% | +1.9% | **+2.7%** | −5.2% |
+
+- **Large batches.** With 128-row tiles every W1 byte feeds 4× more math than with 32-row tiles. GEMM1 runs at 2.3 PFLOP/s, power-limited at 1360 W, and locality is worth at most +2.7%.
+- **Why Part 1 looked better.** Part 1 used 32-row tiles at every batch size, in a slower, memory-bound configuration: 1224 and 1612 TFLOP/s for the 512- and 4096-token row counts. Locality is worth much more there.
+
+**2. The production schedule hides the layout.** A one-knob sweep from the production configuration, at 32-row tiles with 4 M-tiles per expert, compares stock with A+B local:
+
+| Change from production | stock | A+B local | A+B local vs production stock |
+|---|---|---|---|
+| none | 1252 TFLOP/s | +2.0% | +2.0% |
+| tile_n 256 | 940 TFLOP/s | +4.0% | −22% |
+| 4 waves | 1066 TFLOP/s | +5.9% | −10% |
+| 4 CTAs per CU | 1238 TFLOP/s | +2.7% | +1.5% (only one 8-wave CTA fits per CU) |
+| register A path | 1107 TFLOP/s | +13.2% | +0.1% |
+| B-major MFMA order | 1100 TFLOP/s | **+26.8%** | **+11.4%** |
+
+- **B-major with placement wins at 32-row tiles.** It beats the production stock by +10.7%, +11.4% and +8.2% at 1, 4 and 32 M-tiles per expert. At 64-row tiles it gains about +9%, the same as A-major with W1 local.
+- **At 128-row tiles B-major collapses** to 420 TFLOP/s, most likely from register spills, so A-major is the only option there.
+
+**3. The activation gain is a layout effect, not locality.**
+- `A 50/50 + B` performs like `A+B local`, between 4% worse and 6% better depending on the configuration.
+- With B-major order, even `A+B anti` beats stock, by +4% and +11% at 4 and 32 M-tiles per expert.
+- Placing W1 in the stream layout while keeping the dense stock activation layout loses 13–23% at 32-row tiles with 4 or more M-tiles per expert. It does not happen at 64- or 128-row tiles, and the fused pipeline did not show it.
+- So one sparse copy is enough. Flag `s1v` has dispatch write each granule once, into granule 2G + (G & 1) of its pair, and GEMM1 reads that copy. This is the `A 50/50` layout with no extra traffic.
+
+**4. GEMM1 is only part of the forward.** Fused Stage 1 runs at 0.8 PFLOP/s at 512 tokens per rank and 1.7 PFLOP/s at 4096, against 1.6 and 2.3 PFLOP/s for GEMM1 alone; the difference is dispatch overlap and tile-ready waits. Stage 1 in turn is just under half of the forward. At 512 tokens per rank, GEMM1 alone would take about 150 µs of the 300 µs Stage 1, so a 9% faster GEMM1 saves about 12 µs: −4% of Stage 1 and −2% of the forward, which is what Part 2 measured.
+
+**5. End-to-end check of the best variants.** 1400 W cap, 5 interleaved rounds, all bitwise identical; `results/e2e_sparse_copy_bmajor.txt`. `s1m0` uses the B-major order and is not usable at 4096 tokens per rank (128-row tiles spill):
+
+| Tokens/rank | stock | `s1q+s1w` | `s1q+s1w+s1v` | `s1q+s1w+s1v+s1m0` |
+|---|---|---|---|---|
+| 64 | 0.374 ms | −1.1% | −2.7% | **−4.5%** (Stage 1 175 vs 190 µs) |
+| 512 | 0.643 ms | **−2.1%** (Stage 1 289 vs 301 µs) | −0.3% | −0.2% |
+| 4096 | 2.433 ms | +0.6% | −0.3% | – |
+
+**Summary.** The +9.5–15% of Part 1 measured a memory-bound 32-row GEMM1 configuration that production only uses at the smallest batches. At production tile sizes GEMM1 is compute- and power-bound, the tuned A-major schedule already hides the remaining memory latency, and GEMM1 is only part of Stage 1 and of the forward. What remains is −4.5% (64 tokens per rank), −2.1% (512) and 0% (4096) per forward.
 
 ## Run
 
@@ -140,6 +193,10 @@ TPE=1,4,32 SECONDS=3 ROUNDS=3 python3 bench_gemm1_iod.py
 # on the host, with sudo and idle GPUs: same benchmark under a 1000 W cap, cap restored on exit
 CAP=1000 DEV=0 BDF=0000:75:00.0 SMI=3 ./run_capped.sh
 
+# Part 3, in the container: standalone GEMM1 with the fused layouts, kernel knobs from the environment
+SBM=128 TPE=8 AMAJOR=1 SECONDS=2 ROUNDS=3 python3 bench_gemm1_bridge.py
+SBM=32 TPE=1,4,32 AMAJOR=0 SECONDS=2 ROUNDS=3 python3 bench_gemm1_bridge.py
+
 # Part 2, on the host with all 8 GPUs idle: end to end, every variant side by side (IOD_PROBE_LIB = libiodprobe.so path)
 VARIANTS=stock,s1q,s1q+s1w,s1q+s1x,s1q+s1w+s1a,s2q+s2g4,s2q+s2g4+s2w,s2q+s2g4+s2x TOKENS=64,512,4096 ./run_e2e.sh
 # the same with all 8 GPUs capped at 900 W, caps restored on exit
@@ -148,7 +205,8 @@ CAP=900 VARIANTS=stock,s1q+s1w,s1q+s1w+s1a,s1q+s1w+s1z,s1q+s1w+s1y TOKENS=64,512
 
 ## Limitations and next steps
 
-- **The standalone and fused results disagree, and the gap is not explained yet.** A natural next step is to run the fused layouts (W1 stream, A insert13) and tile shape (tile_n 512, 8 waves, LDS-DMA A) in the standalone benchmark. That would separate the layout and kernel-shape effects from the dispatch overlap and power regime of the pipeline.
+- **Mechanisms left open.** Part 3 explains the end-to-end gap quantitatively but leaves two mechanisms open: the W1-stream / dense-activation interaction at 32-row tiles, and why the paired activation layout helps even without locality. Probing the HBM channel and L2 set mapping around address bit 13 would be the next step.
+- **B-major order at 128-row tiles.** It might be usable if its register use were reduced.
 - **The Stage 2 per-IOD queue is costly at small batches** (+23% of Stage 2 time at 64 tokens per rank). A cheaper schedule would hand out units without a per-unit atomic, for example by binding the static stock schedules to `XCC_ID`. That would make the W2 measurement independent of the queue overhead.
 - **Scales use the stock layout.** The W1, W2 and activation scales were not placed.
 - **Limited coverage.** Only 64, 512 and 4096 tokens per rank with uniform random routing, the DeepSeek-V3 shape, and caps of 1400 W and 900 W were measured.

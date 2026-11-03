@@ -1,0 +1,50 @@
+=== TILE_N=512 NUM_WAVES=8 GRID_MULT=1 ASYNC_A=1 AMAJOR=0
+### 1 m-tile(s) per expert: 1024 rows, 60 GFLOP; bitwise vs stock: B local: ok; A local: ok; A 50/50: ok; A+B local: ok; A 50/50 + B: ok; A+B anti: ok
+  stock             580.6 TFLOP/s [   580,   581]   1191 W   2394 MHz   +0.0%
+  B local           627.6 TFLOP/s [   627,   629]   1206 W   2396 MHz   +8.1%
+  A local           606.4 TFLOP/s [   606,   607]   1236 W   2394 MHz   +4.5%
+  A 50/50           610.9 TFLOP/s [   610,   611]   1247 W   2393 MHz   +5.2%
+  A+B local         665.8 TFLOP/s [   666,   666]   1208 W   2395 MHz  +14.7%
+  A 50/50 + B       661.4 TFLOP/s [   661,   661]   1242 W   2392 MHz  +13.9%
+  A+B anti          412.5 TFLOP/s [   412,   413]   1041 W   2395 MHz  -28.9%
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A local: ok; A 50/50: ok; A+B local: ok; A 50/50 + B: ok; A+B anti: ok
+  stock            1100.9 TFLOP/s [  1100,  1102]   1277 W   2393 MHz   +0.0%
+  B local           956.6 TFLOP/s [   956,   957]   1143 W   2396 MHz  -13.1%
+  A local          1229.3 TFLOP/s [  1228,  1230]   1367 W   2356 MHz  +11.7%
+  A 50/50          1216.0 TFLOP/s [  1215,  1217]   1359 W   2361 MHz  +10.5%
+  A+B local        1395.4 TFLOP/s [  1395,  1396]   1376 W   2200 MHz  +26.8%
+  A 50/50 + B      1382.3 TFLOP/s [  1382,  1383]   1373 W   2150 MHz  +25.6%
+  A+B anti         1148.4 TFLOP/s [  1148,  1149]   1350 W   2378 MHz   +4.3%
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A local: ok; A 50/50: ok; A+B local: ok; A 50/50 + B: ok; A+B anti: ok
+  stock            1274.2 TFLOP/s [  1273,  1275]   1156 W   2397 MHz   +0.0%
+  B local          1044.6 TFLOP/s [  1044,  1045]   1015 W   2397 MHz  -18.0%
+  A local          1457.1 TFLOP/s [  1457,  1457]   1278 W   2396 MHz  +14.3%
+  A 50/50          1432.5 TFLOP/s [  1432,  1433]   1273 W   2398 MHz  +12.4%
+  A+B local        1615.8 TFLOP/s [  1615,  1617]   1319 W   2373 MHz  +26.8%
+  A 50/50 + B      1564.7 TFLOP/s [  1564,  1565]   1260 W   2332 MHz  +22.8%
+  A+B anti         1417.4 TFLOP/s [  1417,  1418]   1285 W   2396 MHz  +11.2%
+=== TILE_N=512 NUM_WAVES=8 GRID_MULT=1 ASYNC_A=0 AMAJOR=0
+### 1 m-tile(s) per expert: 1024 rows, 60 GFLOP; bitwise vs stock: B local: ok; A local: ok; A 50/50: ok; A+B local: ok; A 50/50 + B: ok; A+B anti: ok
+  stock             636.2 TFLOP/s [   636,   636]   1272 W   2388 MHz   +0.0%
+  B local           619.7 TFLOP/s [   619,   620]   1207 W   2395 MHz   -2.6%
+  A local           648.1 TFLOP/s [   648,   648]   1293 W   2380 MHz   +1.9%
+  A 50/50           653.1 TFLOP/s [   653,   653]   1299 W   2373 MHz   +2.7%
+  A+B local         658.2 TFLOP/s [   658,   658]   1208 W   2394 MHz   +3.5%
+  A 50/50 + B       655.5 TFLOP/s [   655,   656]   1241 W   2393 MHz   +3.0%
+  A+B anti          411.9 TFLOP/s [   412,   412]   1042 W   2396 MHz  -35.3%
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A local: ok; A 50/50: ok; A+B local: ok; A 50/50 + B: ok; A+B anti: ok
+  stock            1191.6 TFLOP/s [  1191,  1192]   1340 W   2372 MHz   +0.0%
+  B local          1046.2 TFLOP/s [  1046,  1047]   1213 W   2395 MHz  -12.2%
+  A local          1253.8 TFLOP/s [  1254,  1254]   1382 W   2338 MHz   +5.2%
+  A 50/50          1245.5 TFLOP/s [  1245,  1246]   1380 W   2344 MHz   +4.5%
+  A+B local        1317.9 TFLOP/s [  1317,  1319]   1380 W   2340 MHz  +10.6%
+  A 50/50 + B      1319.1 TFLOP/s [  1318,  1320]   1375 W   2280 MHz  +10.7%
+  A+B anti         1082.7 TFLOP/s [  1082,  1083]   1300 W   2395 MHz   -9.1%
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A local: ok; A 50/50: ok; A+B local: ok; A 50/50 + B: ok; A+B anti: ok
+  stock            1420.2 TFLOP/s [  1420,  1420]   1268 W   2397 MHz   +0.0%
+  B local          1136.4 TFLOP/s [  1136,  1137]   1086 W   2398 MHz  -20.0%
+  A local          1408.0 TFLOP/s [  1408,  1408]   1255 W   2398 MHz   -0.9%
+  A 50/50          1407.4 TFLOP/s [  1407,  1408]   1271 W   2398 MHz   -0.9%
+  A+B local        1505.3 TFLOP/s [  1505,  1506]   1298 W   2397 MHz   +6.0%
+  A 50/50 + B      1506.8 TFLOP/s [  1506,  1507]   1317 W   2396 MHz   +6.1%
+  A+B anti         1279.3 TFLOP/s [  1278,  1280]   1204 W   2398 MHz   -9.9%

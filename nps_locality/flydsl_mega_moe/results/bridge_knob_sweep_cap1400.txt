@@ -1,0 +1,55 @@
+=== TILE_N=256 NUM_WAVES=8 GRID_MULT=1 ASYNC_A=1 AMAJOR=1
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock             939.9 TFLOP/s [   939,   940]   1186 W   2397 MHz   +0.0%
+  B local           954.2 TFLOP/s [   954,   954]   1177 W   2395 MHz   +1.5%
+  A+B local         977.2 TFLOP/s [   977,   977]   1182 W   2399 MHz   +4.0%
+  A 50/50 + B       947.2 TFLOP/s [   947,   947]   1177 W   2397 MHz   +0.8%
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1073.1 TFLOP/s [  1072,  1074]   1089 W   2396 MHz   +0.0%
+  B local          1075.2 TFLOP/s [  1075,  1075]   1087 W   2398 MHz   +0.2%
+  A+B local        1126.7 TFLOP/s [  1127,  1127]   1115 W   2396 MHz   +5.0%
+  A 50/50 + B      1072.8 TFLOP/s [  1072,  1073]   1089 W   2398 MHz   -0.0%
+=== TILE_N=512 NUM_WAVES=4 GRID_MULT=1 ASYNC_A=1 AMAJOR=1
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1066.1 TFLOP/s [  1065,  1068]   1200 W   2395 MHz   +0.0%
+  B local          1115.7 TFLOP/s [  1115,  1117]   1221 W   2395 MHz   +4.7%
+  A+B local        1128.6 TFLOP/s [  1129,  1129]   1195 W   2398 MHz   +5.9%
+  A 50/50 + B      1115.7 TFLOP/s [  1115,  1116]   1209 W   2399 MHz   +4.7%
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1252.2 TFLOP/s [  1252,  1252]   1089 W   2396 MHz   +0.0%
+  B local          1234.1 TFLOP/s [  1234,  1234]   1068 W   2398 MHz   -1.4%
+  A+B local        1217.2 TFLOP/s [  1217,  1217]   1034 W   2395 MHz   -2.8%
+  A 50/50 + B      1186.7 TFLOP/s [  1186,  1187]   1031 W   2397 MHz   -5.2%
+=== TILE_N=512 NUM_WAVES=8 GRID_MULT=4 ASYNC_A=1 AMAJOR=1
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1237.8 TFLOP/s [  1236,  1239]   1359 W   2352 MHz   +0.0%
+  B local          1065.2 TFLOP/s [  1065,  1066]   1208 W   2395 MHz  -13.9%
+  A+B local        1271.0 TFLOP/s [  1271,  1271]   1352 W   2377 MHz   +2.7%
+  A 50/50 + B      1256.2 TFLOP/s [  1256,  1256]   1359 W   2364 MHz   +1.5%
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1490.6 TFLOP/s [  1490,  1491]   1285 W   2396 MHz   +0.0%
+  B local          1184.0 TFLOP/s [  1184,  1184]   1086 W   2400 MHz  -20.6%
+  A+B local        1495.7 TFLOP/s [  1496,  1496]   1279 W   2396 MHz   +0.3%
+  A 50/50 + B      1444.0 TFLOP/s [  1444,  1444]   1254 W   2396 MHz   -3.1%
+=== TILE_N=512 NUM_WAVES=8 GRID_MULT=1 ASYNC_A=0 AMAJOR=1
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1107.2 TFLOP/s [  1106,  1108]   1266 W   2394 MHz   +0.0%
+  B local          1071.7 TFLOP/s [  1072,  1072]   1220 W   2396 MHz   -3.2%
+  A+B local        1253.6 TFLOP/s [  1253,  1254]   1332 W   2382 MHz  +13.2%
+  A 50/50 + B      1315.7 TFLOP/s [  1315,  1316]   1378 W   2316 MHz  +18.8%
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1256.3 TFLOP/s [  1256,  1257]   1130 W   2396 MHz   +0.0%
+  B local          1164.1 TFLOP/s [  1164,  1165]   1092 W   2398 MHz   -7.3%
+  A+B local        1412.1 TFLOP/s [  1412,  1412]   1215 W   2398 MHz  +12.4%
+  A 50/50 + B      1492.2 TFLOP/s [  1492,  1493]   1318 W   2396 MHz  +18.8%
+=== TILE_N=512 NUM_WAVES=8 GRID_MULT=1 ASYNC_A=1 AMAJOR=0
+### 4 m-tile(s) per expert: 4096 rows, 241 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1100.3 TFLOP/s [  1100,  1101]   1269 W   2393 MHz   +0.0%
+  B local           955.7 TFLOP/s [   955,   956]   1139 W   2398 MHz  -13.1%
+  A+B local        1395.4 TFLOP/s [  1394,  1397]   1373 W   2194 MHz  +26.8%
+  A 50/50 + B      1382.6 TFLOP/s [  1382,  1383]   1372 W   2154 MHz  +25.7%
+### 32 m-tile(s) per expert: 32768 rows, 1924 GFLOP; bitwise vs stock: B local: ok; A+B local: ok; A 50/50 + B: ok
+  stock            1274.1 TFLOP/s [  1274,  1275]   1152 W   2396 MHz   +0.0%
+  B local          1044.4 TFLOP/s [  1044,  1044]   1013 W   2398 MHz  -18.0%
+  A+B local        1615.3 TFLOP/s [  1615,  1616]   1313 W   2376 MHz  +26.8%
+  A 50/50 + B      1566.6 TFLOP/s [  1567,  1567]   1261 W   2335 MHz  +23.0%

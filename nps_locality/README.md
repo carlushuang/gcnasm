@@ -148,6 +148,12 @@ Details and tables are in `fp8_gemm_locality/README.md`.
   - Per-IOD token copies, which dispatch writes twice, cost more than they save: up to +20% of Stage 1 time.
   - Neither W2 placement nor the Stage 2 per-IOD queue pays off.
   - Other-IOD controls lose up to +22% (Stage 1) and +53% (Stage 2), so the traffic is IOD-sensitive. The stock 50/50 granule interleave is simply already close to local.
+- **Why the gains don't carry over (bridge experiments).**
+  - Production Stage 1 uses 64- and 128-row M-tiles at 512 and 4096 tokens per rank. There GEMM1 is compute- and power-bound (2.3 PFLOP/s), and locality is worth at most +9% and +2.7% even standalone.
+  - The tuned A-major MFMA schedule hides the layout. B-major order with placement beats it by about 11% at 32-row tiles, but spills at 128 rows.
+  - The activation gain is a layout effect, so one sparse copy is enough.
+  - GEMM1 is only part of Stage 1 and of the forward.
+  - Best end to end: −4.5%, −2.1% and 0% per forward at 64, 512 and 4096 tokens per rank.
 
 ## Comparison with B200: DeepGEMM's locality-aware Mega MoE and MLOPart
 
