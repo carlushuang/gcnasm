@@ -133,15 +133,21 @@ The per-line latency vectors (1 MiB at 128 B resolution) correlate +0.62 to +0.7
 
 Details and tables are in `fp8_gemm_locality/README.md`.
 
-## FlyDSL MegaMoEV2 GEMM1 with IOD-local weights and activations
+## FlyDSL MegaMoEV2: GEMM1 with IOD-local weights and activations, then the 8-GPU pipeline
 
-`flydsl_mega_moe/` applies the same idea to a production MoE kernel: aiter's FlyDSL MegaMoEV2 GEMM1 (A8W4), on DeepSeek-V3-like shapes.
+`flydsl_mega_moe/` applies the same idea to a production MoE kernel: aiter's FlyDSL MegaMoEV2 (A8W4), on DeepSeek-V3-like shapes. It is applied first to the standalone GEMM1, then to the fused pipeline end to end.
 
 - **Only the address computation changes.** The stock scheduler already gives each XCD fixed N-tiles. So W1 tile `(e, n)` is placed on IOD `(n mod 8) / 4`, the activations get one copy per IOD, and the loaders insert the IOD bit per tile. Outputs are bitwise identical to stock.
 - **Results with both operands local:**
   - At the default 1400 W cap: **+15.2%** (4 M-tiles per expert) and **+9.5%** (32 M-tiles, prefill). Decode keeps its throughput with 70 W less.
   - At 1000 W: +5.2%, +14.9% and +8.9%.
   - Either operand alone gives only +3–7%, and anti-local placement loses 19–36%.
+- **End to end on 8 GPUs, the gains mostly do not carry over.** Measured with fused Stage 1, Stage 2 and combine, EP8, at 64 / 512 / 4096 tokens per rank, and at both the 1400 W and 900 W caps.
+  - `XCC_ID`-based per-IOD ownership is free in the fused Stage 1.
+  - W1 placement is the best variant: −3.1%, −1.1% and +0.2% per forward at the default cap.
+  - Per-IOD token copies, which dispatch writes twice, cost more than they save: up to +20% of Stage 1 time.
+  - Neither W2 placement nor the Stage 2 per-IOD queue pays off.
+  - Other-IOD controls lose up to +22% (Stage 1) and +53% (Stage 2), so the traffic is IOD-sensitive. The stock 50/50 granule interleave is simply already close to local.
 
 ## Comparison with B200: DeepGEMM's locality-aware Mega MoE and MLOPart
 
