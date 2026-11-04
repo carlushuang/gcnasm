@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IOD locality on MI355X</title>
+<meta name="description" content="How a kernel finds which IOD it runs on and where an address lives on MI355X (SPX + NPS1), what IOD-local placement buys, why a fused MoE barely gains, and how DeepGEMM does the same on B200.">
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #5b6672;
+  --line: #d8dee4;
+  --soft: #f6f8fa;
+  --accent: #b3122b;
+  --accent-soft: #fdf0f2;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --code-bg: #f6f8fa;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --line: #2b313a;
+    --soft: #161b22;
+    --accent: #ff7b8a;
+    --accent-soft: #21161a;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --code-bg: #161b22;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 900px; margin: 0 auto; padding: 0 20px 96px; }
+header.hero { border-bottom: 1px solid var(--line); background: var(--soft); padding: 48px 0 34px; margin-bottom: 40px; }
+header.hero .wrap { padding-bottom: 0; }
+h1 { font-size: 34px; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.02em; }
+.sub { color: var(--muted); font-size: 18px; margin: 0 0 20px; max-width: 62ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  font: 500 12px/1 var(--mono);
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--bg); color: var(--muted); text-decoration: none;
+}
+.chip a, a.chip:hover { color: var(--accent); }
+.chip.hot { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+h2 {
+  font-size: 24px; margin: 52px 0 14px; letter-spacing: -0.01em;
+  padding-top: 10px; border-top: 1px solid var(--line);
+}
+h2 .num { color: var(--accent); font: 600 14px/1 var(--mono); display: block; margin-bottom: 6px; }
+h3 { font-size: 17px; margin: 30px 0 8px; }
+p { margin: 0 0 14px; }
+ul, ol { margin: 0 0 14px; padding-left: 22px; }
+li { margin-bottom: 6px; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+code { font: 13px/1.5 var(--mono); background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 0 0 16px; }
+pre code { background: none; border: 0; padding: 0; font-size: 12.5px; line-height: 1.55; }
+.callout { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 8px 8px 0; padding: 14px 18px; margin: 0 0 20px; }
+.callout p:last-child { margin-bottom: 0; }
+.callout .label { font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); display: block; margin-bottom: 8px; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 18px; font-size: 14.5px; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+th { background: var(--soft); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ok { color: var(--ok); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+figure { margin: 24px 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
+.svgbox { border: 1px solid var(--line); border-radius: 8px; background: var(--soft); padding: 18px; }
+svg text { font-family: var(--mono); font-size: 11px; fill: var(--fg); }
+svg text.t { font-size: 12px; font-weight: 600; }
+svg text.s { fill: var(--muted); font-size: 10px; }
+svg rect.box { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+svg rect.hl { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+svg line, svg path.ln { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+svg path.acc { stroke: var(--accent); stroke-width: 1.4; fill: none; }
+.toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; }
+.toc ol { margin: 0; padding-left: 20px; }
+.toc li { margin-bottom: 3px; }
+footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px; color: var(--muted); font-size: 14px; }
+.small { font-size: 13.5px; color: var(--muted); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } h1 { font-size: 27px; } }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: var(--bg); }
+.card h4 { margin: 0 0 6px; font-size: 14px; }
+.card p { margin: 0; font-size: 14px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>IOD locality on MI355X</h1>
+    <p class="sub">MI355X is two I/O dies. In SPX + NPS1, every 2 MiB page alternates between them every 8 KiB. This page covers how a kernel finds which IOD it runs on and which IOD an address lives on, what IOD-local placement buys, why a fused MoE sees only a few percent, and how DeepGEMM does the same on B200.</p>
+    <div class="chips">
+      <a class="chip hot" href="https://github.com/carlushuang/gcnasm/pull/55">carlushuang/gcnasm#55</a>
+      <a class="chip" href="https://github.com/deepseek-ai/DeepGEMM/pull/462">deepseek-ai/DeepGEMM#462</a>
+      <span class="chip">MI355X &middot; gfx950</span>
+      <span class="chip">SPX + NPS1</span>
+      <span class="chip">ROCm 7.2</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="callout">
+  <span class="label">In one paragraph</span>
+  <p>A workgroup's IOD is <code>XCC_ID &gt;&gt; 2</code>, read straight from a hardware register. An address's IOD is <code>addr[13] ^ phase</code>, where the phase is one bit per 2 MiB physical page, probed once per allocation. A kernel exploits this by giving each IOD its own half of the work and placing that half's operands in the granules homed on that IOD; the placement is done in the kernel's address arithmetic, because no physical page is IOD-pure. Reading only local granules saves about 8% power when streaming, and all-remote reads cost 15–36%. But the stock 50/50 interleave is already close to local: real kernels gain +9–15% only when they are memory-bound or power-limited, and the fused MegaMoEV2 pipeline gains −4.5%, −2.1% and 0% per forward at 64, 512 and 4096 tokens per rank. On B200, DeepGEMM can allocate die-local memory and map it into one contiguous VA range; on MI355X the same gather has to live in the kernel's address math.</p>
+</div>
+
+<div class="toc">
+  <ol>
+    <li><a href="#hw">The hardware and its modes</a></li>
+    <li><a href="#rule">The rule: where a workgroup runs, where an address lives</a></li>
+    <li><a href="#place">Placing data on an IOD</a></li>
+    <li><a href="#worth">What locality buys</a></li>
+    <li><a href="#moe">Why the fused MoE barely gains</a></li>
+    <li><a href="#deepgemm">How DeepGEMM does it on B200</a></li>
+    <li><a href="#vmm">Why MI355X cannot map it the same way</a></li>
+    <li><a href="#thumb">Rules of thumb</a></li>
+  </ol>
+</div>
+
+<h2 id="hw"><span class="num">01</span>The hardware and its modes</h2>
+
+<p>MI355X has two I/O dies (IODs). Each IOD carries four XCDs of 32 CUs and four HBM3E stacks, and the two IODs are joined by a die-to-die link. A kernel on IOD 0 can read memory on IOD 1, but the data crosses the link: more latency, and power spent moving bytes rather than computing.</p>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 250" role="img" aria-label="MI355X topology: two IODs, each with four XCDs and four HBM stacks, joined by a link">
+  <rect class="box" x="16" y="30" width="380" height="196" rx="8"/>
+  <text class="t" x="30" y="52">IOD 0</text>
+  <rect class="hl" x="30" y="66" width="82" height="52" rx="4"/><text x="44" y="88">XCD 0</text><text class="s" x="44" y="104">32 CUs</text>
+  <rect class="hl" x="120" y="66" width="82" height="52" rx="4"/><text x="134" y="88">XCD 1</text><text class="s" x="134" y="104">32 CUs</text>
+  <rect class="hl" x="210" y="66" width="82" height="52" rx="4"/><text x="224" y="88">XCD 2</text><text class="s" x="224" y="104">32 CUs</text>
+  <rect class="hl" x="300" y="66" width="82" height="52" rx="4"/><text x="314" y="88">XCD 3</text><text class="s" x="314" y="104">32 CUs</text>
+  <rect class="box" x="30" y="150" width="82" height="52" rx="4"/><text x="44" y="180">HBM 0</text>
+  <rect class="box" x="120" y="150" width="82" height="52" rx="4"/><text x="134" y="180">HBM 1</text>
+  <rect class="box" x="210" y="150" width="82" height="52" rx="4"/><text x="224" y="180">HBM 2</text>
+  <rect class="box" x="300" y="150" width="82" height="52" rx="4"/><text x="314" y="180">HBM 3</text>
+
+  <rect class="box" x="464" y="30" width="380" height="196" rx="8"/>
+  <text class="t" x="478" y="52">IOD 1</text>
+  <rect class="box" x="478" y="66" width="82" height="52" rx="4"/><text x="492" y="88">XCD 4</text><text class="s" x="492" y="104">32 CUs</text>
+  <rect class="box" x="568" y="66" width="82" height="52" rx="4"/><text x="582" y="88">XCD 5</text><text class="s" x="582" y="104">32 CUs</text>
+  <rect class="box" x="658" y="66" width="82" height="52" rx="4"/><text x="672" y="88">XCD 6</text><text class="s" x="672" y="104">32 CUs</text>
+  <rect class="box" x="748" y="66" width="82" height="52" rx="4"/><text x="762" y="88">XCD 7</text><text class="s" x="762" y="104">32 CUs</text>
+  <rect class="box" x="478" y="150" width="82" height="52" rx="4"/><text x="492" y="180">HBM 4</text>
+  <rect class="box" x="568" y="150" width="82" height="52" rx="4"/><text x="582" y="180">HBM 5</text>
+  <rect class="box" x="658" y="150" width="82" height="52" rx="4"/><text x="672" y="180">HBM 6</text>
+  <rect class="box" x="748" y="150" width="82" height="52" rx="4"/><text x="762" y="180">HBM 7</text>
+
+  <path class="acc" d="M396 128 L464 128"/>
+  <text class="s" x="402" y="120">IOD link</text>
+  <text class="s" x="16" y="244">XCC_ID 0–3 → IOD 0, XCC_ID 4–7 → IOD 1. In NPS1, memory alternates between the two IODs' stacks every 8 KiB.</text>
+</svg>
+</div>
+<figcaption>One MI355X: 256 CUs and 8 HBM3E stacks, split across two IODs.</figcaption>
+</figure>
+
+<p>Two partition settings decide what software sees:</p>
+<table>
+  <tr><th>Setting</th><th>Options</th><th>What it means here</th></tr>
+  <tr><td>Compute partition</td><td>SPX, DPX, QPX, CPX</td><td>SPX is one HIP device with all 8 XCDs. DPX makes two HIP devices, one per IOD; in DPX <code>XCC_ID</code> reads 0–3 in each partition.</td></tr>
+  <tr><td>Memory partition</td><td>NPS1, NPS2</td><td>NPS1 interleaves all memory across both IODs. NPS2 gives each IOD its own memory, but only exists with DPX or finer, never with SPX.</td></tr>
+</table>
+<p>Memory-partition changes are hive-wide: they apply to every GPU in the box, need an <code>amdgpu</code> reload, and need all GPUs idle. So a kernel that wants the <em>whole</em> GPU runs in SPX + NPS1, and any locality has to be found inside the interleave.</p>
+
+<h2 id="rule"><span class="num">02</span>The rule: where a workgroup runs, where an address lives</h2>
+
+<h3>Which IOD a workgroup is on: read it</h3>
+<pre><code>// HIP: XCC id from the hardware register (HW_REG_XCC_ID = 20), bits [3:0]
+#define GETREG_FULL(REG) ((31 &lt;&lt; 11) | (0 &lt;&lt; 6) | (REG))
+uint32_t xcc = __builtin_amdgcn_s_getreg(GETREG_FULL(20)) &amp; 0xf;   // 0..7 in SPX
+uint32_t iod = xcc &gt;&gt; 2;                                            // XCD 0-3 -&gt; 0, 4-7 -&gt; 1</code></pre>
+<p>In FlyDSL the same is one inline-asm instruction, <code>s_getreg_b32 $0, hwreg(20, 0, 4)</code>. Workgroups are dispatched round-robin over the XCDs starting at XCD 0 (workgroup <code>i</code> lands on XCD <code>i % 8</code>). That is observed behaviour, not a guarantee: use <code>XCC_ID</code> for anything correctness depends on.</p>
+
+<h3>Which IOD an address lives on: probe the phase</h3>
+<p>Memory alternates between the IODs at 8 KiB granularity. Which IOD gets the first granule of a page depends on the physical page, so the rule has one unknown bit per 2 MiB page:</p>
+<pre><code>home_iod(addr) = addr[13] ^ phase(addr &gt;&gt; 21)      // granule i of a page is homed on phase ^ (i &amp; 1)</code></pre>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 170" role="img" aria-label="Two 2 MiB pages with opposite phases; granules alternate between IOD 0 and IOD 1">
+  <text class="t" x="16" y="20">home IOD = addr[13] XOR phase(2 MiB page)</text>
+  <text class="s" x="16" y="56">page p, phase 0</text>
+  <rect class="hl" x="130" y="38" width="44" height="30" rx="3"/><text x="148" y="58">0</text>
+  <rect class="box" x="176" y="38" width="44" height="30" rx="3"/><text x="194" y="58">1</text>
+  <rect class="hl" x="222" y="38" width="44" height="30" rx="3"/><text x="240" y="58">0</text>
+  <rect class="box" x="268" y="38" width="44" height="30" rx="3"/><text x="286" y="58">1</text>
+  <rect class="hl" x="314" y="38" width="44" height="30" rx="3"/><text x="332" y="58">0</text>
+  <rect class="box" x="360" y="38" width="44" height="30" rx="3"/><text x="378" y="58">1</text>
+  <rect class="hl" x="406" y="38" width="44" height="30" rx="3"/><text x="424" y="58">0</text>
+  <rect class="box" x="452" y="38" width="44" height="30" rx="3"/><text x="470" y="58">1</text>
+  <text class="s" x="508" y="58">… 256 granules of 8 KiB</text>
+
+  <text class="s" x="16" y="106">page p+1, phase 1</text>
+  <rect class="box" x="130" y="88" width="44" height="30" rx="3"/><text x="148" y="108">1</text>
+  <rect class="hl" x="176" y="88" width="44" height="30" rx="3"/><text x="194" y="108">0</text>
+  <rect class="box" x="222" y="88" width="44" height="30" rx="3"/><text x="240" y="108">1</text>
+  <rect class="hl" x="268" y="88" width="44" height="30" rx="3"/><text x="286" y="108">0</text>
+  <rect class="box" x="314" y="88" width="44" height="30" rx="3"/><text x="332" y="108">1</text>
+  <rect class="hl" x="360" y="88" width="44" height="30" rx="3"/><text x="378" y="108">0</text>
+  <rect class="box" x="406" y="88" width="44" height="30" rx="3"/><text x="424" y="108">1</text>
+  <rect class="hl" x="452" y="88" width="44" height="30" rx="3"/><text x="470" y="108">0</text>
+  <text class="s" x="508" y="108">… the phase is a property of the physical page</text>
+
+  <rect class="hl" x="130" y="134" width="16" height="14" rx="2"/><text class="s" x="152" y="145">homed on IOD 0</text>
+  <rect class="box" x="260" y="134" width="16" height="14" rx="2"/><text class="s" x="282" y="145">homed on IOD 1</text>
+</svg>
+</div>
+<figcaption>Inside every page the granules alternate; the phase decides which IOD gets the even ones. No 2 MiB page lives on a single IOD.</figcaption>
+</figure>
+
+<p>The phase is measured, not computed. The probe times one cold load of every granule from each of the 8 XCDs, one XCD per launch, with a 2 GiB memset between launches to flush L2 and the Infinity Cache; the home IOD is the one whose XCDs see the lower latency. That takes about 0.04 s per 512 MiB, or 0.41 s for 16 GiB. The probe needs 2 MiB-aligned buffers, and the PyTorch caching allocator may return a block at any 512 B offset, so allocate with 2 MiB of slack and align by hand.</p>
+
+<h2 id="place"><span class="num">03</span>Placing data on an IOD</h2>
+
+<p>To put logical byte <code>o</code> of a data set on IOD <code>d</code>, insert the IOD bit at bit 13. The buffer is twice the size of the data, and each IOD owns half of every page:</p>
+<pre><code>phys(o, d) = o + (o &amp; ~8191) + ((d ^ phase[o &gt;&gt; 20]) &lt;&lt; 13)
+
+// equivalently, with q = o &gt;&gt; 13 the logical granule:
+//   page = q &gt;&gt; 7,  granule in page = 2 * (q &amp; 127) + (d ^ phase[page])</code></pre>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 210" role="img" aria-label="Each IOD's data is a contiguous logical stream; its granules land on that IOD's half of each physical page">
+  <text class="t" x="16" y="20">two logical streams, one physical page (phase 0)</text>
+  <text class="s" x="16" y="52">IOD 0 stream</text>
+  <rect class="hl" x="120" y="34" width="56" height="28" rx="3"/><text x="134" y="52">q0</text>
+  <rect class="hl" x="180" y="34" width="56" height="28" rx="3"/><text x="194" y="52">q1</text>
+  <rect class="hl" x="240" y="34" width="56" height="28" rx="3"/><text x="254" y="52">q2</text>
+  <rect class="hl" x="300" y="34" width="56" height="28" rx="3"/><text x="314" y="52">q3</text>
+  <text class="s" x="460" y="52">IOD 1 stream</text>
+  <rect class="box" x="560" y="34" width="56" height="28" rx="3"/><text x="574" y="52">r0</text>
+  <rect class="box" x="620" y="34" width="56" height="28" rx="3"/><text x="634" y="52">r1</text>
+  <rect class="box" x="680" y="34" width="56" height="28" rx="3"/><text x="694" y="52">r2</text>
+  <rect class="box" x="740" y="34" width="56" height="28" rx="3"/><text x="754" y="52">r3</text>
+
+  <text class="s" x="16" y="152">physical granules</text>
+  <rect class="hl" x="134" y="134" width="76" height="28" rx="3"/><text x="148" y="152">0: q0</text>
+  <rect class="box" x="214" y="134" width="76" height="28" rx="3"/><text x="228" y="152">1: r0</text>
+  <rect class="hl" x="294" y="134" width="76" height="28" rx="3"/><text x="308" y="152">2: q1</text>
+  <rect class="box" x="374" y="134" width="76" height="28" rx="3"/><text x="388" y="152">3: r1</text>
+  <rect class="hl" x="454" y="134" width="76" height="28" rx="3"/><text x="468" y="152">4: q2</text>
+  <rect class="box" x="534" y="134" width="76" height="28" rx="3"/><text x="548" y="152">5: r2</text>
+  <rect class="hl" x="614" y="134" width="76" height="28" rx="3"/><text x="628" y="152">6: q3</text>
+  <rect class="box" x="694" y="134" width="76" height="28" rx="3"/><text x="708" y="152">7: r3</text>
+
+  <path class="acc" d="M148 62 L172 134"/>
+  <path class="acc" d="M208 62 L332 134"/>
+  <path class="acc" d="M268 62 L492 134"/>
+  <path class="acc" d="M328 62 L652 134"/>
+  <path class="ln" d="M588 62 L252 134"/>
+  <path class="ln" d="M648 62 L412 134"/>
+  <path class="ln" d="M708 62 L572 134"/>
+  <path class="ln" d="M768 62 L732 134"/>
+  <text class="s" x="16" y="196">With phase 1 the two streams swap parity. The kernel looks the phase up once per page it touches.</text>
+</svg>
+</div>
+<figcaption>Packing each IOD's data into its own stream wastes no memory: IOD 0's and IOD 1's data share every page.</figcaption>
+</figure>
+
+<p>A kernel then does three things:</p>
+<ol>
+  <li><b>Own the work per IOD.</b> Each workgroup reads <code>XCC_ID &gt;&gt; 2</code> and claims tiles from its IOD's own atomic queue. Splitting the output N dimension in half gives each weight tile exactly one reader IOD.</li>
+  <li><b>Place what the owner reads.</b> Weights go into the owner's stream, and the phase table is a kernel argument. A tile that straddles pages needs one phase per page: a 512-row W1 tile is 224 granules and touches up to 3 pages.</li>
+  <li><b>Copy what both IODs read, or don't.</b> Data both halves need (the activations, when N is split) can only be local as two copies: write both granules of a pair, and read <code>iod ^ phase</code>. Section 05 shows the copies rarely pay for themselves.</li>
+</ol>
+
+<h2 id="worth"><span class="num">04</span>What locality buys</h2>
+
+<p>All rows are bitwise-identical outputs versus stock, on MI355X at the default 1400 W cap unless noted. "Local" is compared with the stock 50/50 interleave; "remote" puts everything on the other IOD.</p>
+<table>
+  <tr><th>Workload</th><th>Local vs stock interleave</th><th>Remote</th></tr>
+  <tr><td>Streaming reads, whole GPU</td><td>98% of the bandwidth, <span class="ok">−80 W (−8%)</span></td><td>capped near 4 TB/s by the IOD link</td></tr>
+  <tr><td>FP8 GEMM (opus, per-IOD queues), power-capped at 1000 or 800 W</td><td class="ok">+9–11% (sclk +10–16%)</td><td></td></tr>
+  <tr><td>FP8 GEMM, 1400 W</td><td>+3.8% compute-heavy (M = 4096); <span class="warn">−1 to −4%</span> memory-heavy</td><td></td></tr>
+  <tr><td>FlyDSL MegaMoEV2 GEMM1 standalone, 32-row M-tiles</td><td class="ok">+9.5% to +15.2%</td><td>−19% to −36%</td></tr>
+  <tr><td>Same GEMM1 at the production tile sizes (64 / 128 rows)</td><td>+9.1% / +2.7%</td><td>−24% / −5%</td></tr>
+  <tr><td>Fused MegaMoEV2, EP8 on 8 GPUs, per forward</td><td>−4.5% / −2.1% / 0% at 64 / 512 / 4096 tokens per rank</td><td>+4–22% Stage 1, +11–53% Stage 2 (kernel time)</td></tr>
+</table>
+
+<div class="callout">
+  <span class="label">The pattern</span>
+  <p>The stock interleave already sends only half the traffic across, so going local gains little unless the kernel is <b>memory-bound</b> or <b>power-limited</b>; in the power-limited case the saved link power turns into clock. Going remote is what really hurts.</p>
+</div>
+
+<h2 id="moe"><span class="num">05</span>Why the fused MoE barely gains</h2>
+
+<p>The standalone GEMM1 gained up to 15%, the fused MegaMoEV2 forward about 2%. A bridge benchmark ran the standalone GEMM1 with the fused kernel's layouts and kernel settings, one knob at a time, to find where the gain goes. Four effects account for it.</p>
+
+<h3>1. Bigger M-tiles at bigger batches</h3>
+<p>The production Stage 1 uses 32-, 64- and 128-row M-tiles at 64, 512 and 4096 tokens per rank. With 128-row tiles every weight byte feeds 4× more math: GEMM1 runs at 2.3 PFLOP/s, compute- and power-bound, and locality is worth at most +2.7% even standalone. The +15% came from a 32-row configuration that is slower and memory-bound.</p>
+<table>
+  <tr><th>Rows per expert (≈ tokens/rank)</th><th>M-tile</th><th class="num">stock</th><th class="num">weights local</th><th class="num">both operands local</th></tr>
+  <tr><td>32 (≈ 64)</td><td>32 rows</td><td class="num">601 TFLOP/s</td><td class="num">+6.5%</td><td class="num">+9.6%</td></tr>
+  <tr><td>128 (≈ 512)</td><td>64 rows</td><td class="num">1606 TFLOP/s</td><td class="num">+9.1%</td><td class="num">+3.9%</td></tr>
+  <tr><td>1024 (≈ 4096)</td><td>128 rows</td><td class="num">2301 TFLOP/s</td><td class="num">+1.3%</td><td class="num">+2.7%</td></tr>
+</table>
+
+<h3>2. The tuned schedule hides the layout</h3>
+<p>At 32-row tiles, changing one production setting at a time shows how much placement can then add. Only the MFMA order matters a lot:</p>
+<table>
+  <tr><th>Change from production</th><th class="num">stock</th><th class="num">both local</th><th class="num">vs production stock</th></tr>
+  <tr><td>none (A-major MFMA order, LDS-DMA A)</td><td class="num">1252 TFLOP/s</td><td class="num">+2.0%</td><td class="num">+2.0%</td></tr>
+  <tr><td>register A path</td><td class="num">1107 TFLOP/s</td><td class="num">+13.2%</td><td class="num">+0.1%</td></tr>
+  <tr><td>B-major MFMA order</td><td class="num">1100 TFLOP/s</td><td class="num ok">+26.8%</td><td class="num ok">+11.4%</td></tr>
+</table>
+<p>B-major order plus placement beats production by 8–11% at 32-row tiles, but collapses to 420 TFLOP/s at 128-row tiles, most likely from register spills. At large batch there is no schedule that unlocks the layout.</p>
+
+<h3>3. The activation gain was a layout effect</h3>
+<p>Reading the paired activation copies in the stock 50/50 IOD mix performs like reading the local copy (between 4% worse and 6% better), and with B-major order even all-remote placement beats stock by 4–11%. So most of the "activation locality" gain came from the paired layout itself. That matters, because writing every dispatched token twice cost +8% to +20% of Stage 1; one sparse copy, written once, keeps the layout with no extra traffic.</p>
+
+<h3>4. GEMM1 is only part of the forward</h3>
+<p>Inside the fused kernel GEMM1 overlaps the dispatch and waits for tiles: Stage 1 runs at 0.8 and 1.7 PFLOP/s at 512 and 4096 tokens per rank, against 1.6 and 2.3 PFLOP/s for GEMM1 alone, and Stage 1 is just under half the forward. A 9% faster GEMM1 at 512 tokens per rank becomes −4% of Stage 1 and −2% of the forward. Stage 2 is no help either: a per-IOD queue there replaces tuned static schedules (+23%, +8% and +2% of Stage 2 time), and local W2 is 4.5–6% slower at 4096 tokens per rank.</p>
+
+<table>
+  <tr><th>Tokens/rank</th><th class="num">stock forward</th><th>best variant</th><th class="num">forward</th></tr>
+  <tr><td>64</td><td class="num">0.374 ms</td><td>W1 local + one sparse token copy + B-major order</td><td class="num ok">−4.5%</td></tr>
+  <tr><td>512</td><td class="num">0.643 ms</td><td>W1 local</td><td class="num ok">−2.1%</td></tr>
+  <tr><td>4096</td><td class="num">2.433 ms</td><td>W1 local + one sparse token copy</td><td class="num">−0.3% (noise)</td></tr>
+</table>
+
+<h2 id="deepgemm"><span class="num">06</span>How DeepGEMM does it on B200</h2>
+
+<p>B200 is two dies joined by NV-HBI, each with its own SMs, half of the L2 and its own HBM controllers. DeepGEMM's locality-aware Mega MoE (<a href="https://github.com/deepseek-ai/DeepGEMM/pull/462">#462</a>) has to solve the same two questions, but from the opposite side.</p>
+
+<h3>Which die an SM is on: measured once at init</h3>
+<p><code>%smid</code> does not encode the die, so DeepGEMM probes it:</p>
+<ul>
+  <li>Allocate one probe buffer per die, physically on that die, with 8 chunks of 4 KiB per SM.</li>
+  <li>Fill each chunk with a pointer chain over its 32 lines of 128 B (line <code>l</code> points to line <code>(l + 7) % 32</code>), flush L2 by zeroing a 256 MB tensor, and run one 32-thread CTA per SM that chases 32 dependent <code>ld.global.cg</code> loads per chunk under <code>clock64</code>.</li>
+  <li>An SM's die is the one with the lowest median latency. A probe is accepted only if far/near ≥ 1.25 for every SM and both SMs of each TPC agree; otherwise retry, up to 5 times, then fall back to an even mapping.</li>
+  <li>Relabel whole TPCs until each die has exactly half the SMs, because the work is split 50/50 by N.</li>
+</ul>
+<p>The resulting one-byte-per-SM table is a kernel argument. Each CTA reads <code>sm_locality_domains[%smid]</code> and claims tasks from its die's atomic queue, which only hands out N-clusters in that die's half; it steals from the other queue only when there are at least two waves of tasks.</p>
+
+<h3>Which die the weights are on: chosen per allocation</h3>
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 200" role="img" aria-label="One VA reservation whose two halves are mapped from die 0 and die 1 physical memory">
+  <text class="t" x="16" y="20">deep_gemm.localize(w): (E, N, K) → (2, E, N/2, K)</text>
+  <rect class="hl" x="16" y="36" width="410" height="40" rx="5"/><text x="30" y="61">half 0: (E, N/2, K), contiguous</text>
+  <rect class="box" x="430" y="36" width="410" height="40" rx="5"/><text x="444" y="61">half 1: (E, N/2, K), contiguous</text>
+  <path class="ln" d="M16 86 L16 94"/><path class="ln" d="M840 86 L840 94"/><path class="ln" d="M16 90 L840 90"/>
+  <text class="s" x="230" y="106">one cuMemAddressReserve; stride between halves = one slice (rounded up to 2 MiB)</text>
+  <path class="acc" d="M220 112 L220 140" marker-end="url(#ah)"/><text class="s" x="230" y="130">cuMemMap</text>
+  <path class="ln" d="M634 112 L634 140" marker-end="url(#ah)"/><text class="s" x="644" y="130">cuMemMap</text>
+  <rect class="hl" x="16" y="144" width="410" height="40" rx="5"/><text x="30" y="169">die 0 HBM (physical memory created on die 0)</text>
+  <rect class="box" x="430" y="144" width="410" height="40" rx="5"/><text x="444" y="169">die 1 HBM (physical memory created on die 1)</text>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" opacity=".9"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+<figcaption>The contiguity is virtual: two die-local allocations mapped back to back. The kernel gets one pointer.</figcaption>
+</figure>
+<p>On B200, die-local physical memory exists per allocation: today through MLOPart (a private MPS server that exposes each die as a CUDA device, used only to allocate and then exported to the full-GPU process), and in CUDA 13.4 through <code>CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN</code>. The kernel builds one 4D TMA descriptor <code>(K, N/2, domain, expert)</code> over the single base pointer and indexes the die as a coordinate:</p>
+<pre><code>n_idx      = n_block_idx * BLOCK_N;           // logical N
+half_idx   = n_idx &gt;= shape_n / 2;            // which die's half
+half_n_idx = n_idx - half_idx * (shape_n / 2);
+tma_copy(tensor_map_b, ..., k_idx, half_n_idx, half_idx, expert_idx);</code></pre>
+<p>Only the weights are localized, not the tokens or the scales. The PR reports about 100 W saved and 5–10% higher clock on power-capped, tensor-core-bound runs.</p>
+
+<h2 id="vmm"><span class="num">07</span>Why MI355X cannot map it the same way</h2>
+
+<p>The B200 trick needs physical memory that sits on one die. In SPX + NPS1, every physical 2 MiB page is split between the IODs, so there is nothing IOD-pure to map. HIP's virtual-memory API on gfx950 (ROCm 7.2) doesn't offer a way around it:</p>
+<ul>
+  <li><code>hipMemGetAllocationGranularity</code> reports 4 KiB, so small mappings exist.</li>
+  <li>But <code>hipMemMap</code> only accepts handle offset 0: mapping 8 KiB of a 2 MiB allocation at offsets 4 KiB, 8 KiB, 16 KiB or 1 MiB returns <code>invalid argument</code>. You cannot map just the IOD-0 granules of a larger allocation.</li>
+  <li>The only route left is to allocate tens of thousands of 4 KiB chunks, probe which IOD each landed on (you cannot choose), keep the IOD-0 ones and map them back to back. For W1 alone that is about 115k allocations, and everything ends up on 4 KiB page-table entries instead of 2 MiB ones: TLB reach collapses, and the translation misses cost far more than locality saves.</li>
+</ul>
+<p>So the gather lives in the kernel's address arithmetic (section 03). Its "page table" is one phase bit per 2 MiB page, and the GPU still maps everything with 2 MiB pages.</p>
+
+<table>
+  <tr><th></th><th>B200 (DeepGEMM)</th><th>MI355X (SPX + NPS1)</th></tr>
+  <tr><td>Which die/IOD a CTA/workgroup is on</td><td>probed at init: <code>%smid</code> does not encode it</td><td>read from hardware: <code>XCC_ID &gt;&gt; 2</code></td></tr>
+  <tr><td>Which die/IOD memory is on</td><td>known by construction: allocated per die</td><td>probed: one phase bit per 2 MiB page</td></tr>
+  <tr><td>Default placement</td><td>spread over both dies (granularity not documented)</td><td>alternates every 8 KiB</td></tr>
+  <tr><td>Die/IOD-local memory</td><td>per allocation (MLOPart, CUDA 13.4 API)</td><td>none in SPX; NPS2 needs DPX (two HIP devices)</td></tr>
+  <tr><td>Placement unit</td><td>allocation slices, 2 MiB-aligned VA ranges</td><td>8 KiB granules inside every page</td></tr>
+  <tr><td>How the kernel addresses it</td><td>a domain coordinate in one TMA descriptor</td><td>bit-13 insert plus a phase lookup</td></tr>
+  <tr><td>Balancing</td><td>relabel TPCs to 50/50 (dies can differ)</td><td>not needed: 4 XCDs × 32 CUs per IOD</td></tr>
+</table>
+
+<h2 id="thumb"><span class="num">08</span>Rules of thumb</h2>
+
+<div class="grid2">
+  <div class="card"><h4>Find the IOD in hardware</h4><p>Use <code>XCC_ID &gt;&gt; 2</code>. Round-robin dispatch is observed but not guaranteed.</p></div>
+  <div class="card"><h4>Probe the memory side</h4><p>Probe phases per allocation, on 2 MiB-aligned buffers; it costs about 0.04 s per 512 MiB.</p></div>
+  <div class="card"><h4>Expect gains only in two regimes</h4><p>Memory-bound or power-limited. Otherwise the stock 50/50 interleave is already close to local.</p></div>
+  <div class="card"><h4>Remote is the real cost</h4><p>All-remote placement loses 15–36% in GEMMs and up to 53% of a Stage 2 kernel.</p></div>
+  <div class="card"><h4>Run three controls</h4><p>Local, the same layout read 50/50, and the same layout read remote. Layout effects can outweigh locality, and placing one operand alone can hurt.</p></div>
+  <div class="card"><h4>Queues are free only if you already have them</h4><p>A per-IOD queue costs nothing where the kernel already claims work atomically, and adds overhead where it replaces a tuned static schedule.</p></div>
+  <div class="card"><h4>Do not duplicate shared data</h4><p>Writing a second copy of the activations cost more than it saved. A single sparse copy keeps the useful layout.</p></div>
+  <div class="card"><h4>Tile size decides it</h4><p>Large tiles make the kernel compute-bound, and locality fades: from +15% at 32-row tiles to +2.7% at 128 rows.</p></div>
+</div>
+
+<footer>
+  <p>Source: <a href="https://github.com/carlushuang/gcnasm/pull/55">carlushuang/gcnasm#55</a>: <code>nps_locality/</code> (probes), <code>nps_locality/fp8_gemm_locality/</code> (opus FP8 GEMM) and <code>nps_locality/flydsl_mega_moe/</code> (FlyDSL MegaMoEV2; Parts 1–3, raw outputs in <code>results/</code>). DeepGEMM: <a href="https://github.com/deepseek-ai/DeepGEMM/pull/462">deepseek-ai/DeepGEMM#462</a> (<code>csrc/apis/locality_domain.hpp</code>, <code>deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh</code>); NVIDIA <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/locality-domains.html">CUDA Programming Guide: Locality Domains</a>.</p>
+  <p>Measurements are from 8×MI355X (gfx950) with ROCm 7.2, aiter <code>6fe1bfc8f</code>, FlyDSL 0.4.1 and torch 2.10, in November 2026. B200 behaviour is as described by the DeepGEMM sources and NVIDIA's documentation, not measured here.</p>
+</footer>
+
+</div>
+</body>
+</html>
