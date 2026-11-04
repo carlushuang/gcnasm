@@ -142,36 +142,75 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
 
 <figure>
 <div class="svgbox">
-<svg viewBox="0 0 860 250" role="img" aria-label="MI355X topology: two IODs, each with four XCDs and four HBM stacks, joined by a link">
-  <rect class="box" x="16" y="30" width="380" height="196" rx="8"/>
-  <text class="t" x="30" y="52">IOD 0</text>
-  <rect class="hl" x="30" y="66" width="82" height="52" rx="4"/><text x="44" y="88">XCD 0</text><text class="s" x="44" y="104">32 CUs</text>
-  <rect class="hl" x="120" y="66" width="82" height="52" rx="4"/><text x="134" y="88">XCD 1</text><text class="s" x="134" y="104">32 CUs</text>
-  <rect class="hl" x="210" y="66" width="82" height="52" rx="4"/><text x="224" y="88">XCD 2</text><text class="s" x="224" y="104">32 CUs</text>
-  <rect class="hl" x="300" y="66" width="82" height="52" rx="4"/><text x="314" y="88">XCD 3</text><text class="s" x="314" y="104">32 CUs</text>
-  <rect class="box" x="30" y="150" width="82" height="52" rx="4"/><text x="44" y="180">HBM 0</text>
-  <rect class="box" x="120" y="150" width="82" height="52" rx="4"/><text x="134" y="180">HBM 1</text>
-  <rect class="box" x="210" y="150" width="82" height="52" rx="4"/><text x="224" y="180">HBM 2</text>
-  <rect class="box" x="300" y="150" width="82" height="52" rx="4"/><text x="314" y="180">HBM 3</text>
-
-  <rect class="box" x="464" y="30" width="380" height="196" rx="8"/>
-  <text class="t" x="478" y="52">IOD 1</text>
-  <rect class="box" x="478" y="66" width="82" height="52" rx="4"/><text x="492" y="88">XCD 4</text><text class="s" x="492" y="104">32 CUs</text>
-  <rect class="box" x="568" y="66" width="82" height="52" rx="4"/><text x="582" y="88">XCD 5</text><text class="s" x="582" y="104">32 CUs</text>
-  <rect class="box" x="658" y="66" width="82" height="52" rx="4"/><text x="672" y="88">XCD 6</text><text class="s" x="672" y="104">32 CUs</text>
-  <rect class="box" x="748" y="66" width="82" height="52" rx="4"/><text x="762" y="88">XCD 7</text><text class="s" x="762" y="104">32 CUs</text>
-  <rect class="box" x="478" y="150" width="82" height="52" rx="4"/><text x="492" y="180">HBM 4</text>
-  <rect class="box" x="568" y="150" width="82" height="52" rx="4"/><text x="582" y="180">HBM 5</text>
-  <rect class="box" x="658" y="150" width="82" height="52" rx="4"/><text x="672" y="180">HBM 6</text>
-  <rect class="box" x="748" y="150" width="82" height="52" rx="4"/><text x="762" y="180">HBM 7</text>
-
-  <path class="acc" d="M396 128 L464 128"/>
-  <text class="s" x="402" y="120">IOD link</text>
-  <text class="s" x="16" y="244">XCC_ID 0–3 → IOD 0, XCC_ID 4–7 → IOD 1. In NPS1, memory alternates between the two IODs' stacks every 8 KiB.</text>
+<svg viewBox="0 0 860 334" role="img" aria-label="MI355X topology: two IODs, each with four XCDs (32 CUs and a private 4 MB L2 each), 128 MB of memory-side Infinity Cache and four HBM3E stacks, joined by the IOD link">
+  <rect class="box" x="16" y="28" width="380" height="262" rx="8"/>
+  <text class="t" x="30" y="48">IOD 0</text>
+  <text class="s" x="86" y="48">each CU: 32 KB L1 vector cache + 160 KB LDS</text>
+  <rect class="box" x="30" y="58" width="82" height="84" rx="4"/><text x="42" y="78">XCD 0</text><text class="s" x="42" y="94">32 CUs</text>
+  <rect class="hl" x="38" y="106" width="66" height="26" rx="3"/><text x="44" y="123">L2 4 MB</text>
+  <path class="ln" d="M71 142 L71 176"/>
+  <rect class="box" x="120" y="58" width="82" height="84" rx="4"/><text x="132" y="78">XCD 1</text><text class="s" x="132" y="94">32 CUs</text>
+  <rect class="hl" x="128" y="106" width="66" height="26" rx="3"/><text x="134" y="123">L2 4 MB</text>
+  <path class="ln" d="M161 142 L161 176"/>
+  <rect class="box" x="210" y="58" width="82" height="84" rx="4"/><text x="222" y="78">XCD 2</text><text class="s" x="222" y="94">32 CUs</text>
+  <rect class="hl" x="218" y="106" width="66" height="26" rx="3"/><text x="224" y="123">L2 4 MB</text>
+  <path class="ln" d="M251 142 L251 176"/>
+  <rect class="box" x="300" y="58" width="82" height="84" rx="4"/><text x="312" y="78">XCD 3</text><text class="s" x="312" y="94">32 CUs</text>
+  <rect class="hl" x="308" y="106" width="66" height="26" rx="3"/><text x="314" y="123">L2 4 MB</text>
+  <path class="ln" d="M341 142 L341 176"/>
+  <rect class="hl" x="30" y="176" width="352" height="34" rx="4"/><text x="42" y="198">Infinity Cache 128 MB · memory-side (L3)</text>
+  <path class="ln" d="M71 210 L71 232"/>
+  <rect class="box" x="30" y="232" width="82" height="44" rx="4"/><text x="42" y="250">HBM 0</text><text class="s" x="42" y="266">36 GB</text>
+  <path class="ln" d="M161 210 L161 232"/>
+  <rect class="box" x="120" y="232" width="82" height="44" rx="4"/><text x="132" y="250">HBM 1</text><text class="s" x="132" y="266">36 GB</text>
+  <path class="ln" d="M251 210 L251 232"/>
+  <rect class="box" x="210" y="232" width="82" height="44" rx="4"/><text x="222" y="250">HBM 2</text><text class="s" x="222" y="266">36 GB</text>
+  <path class="ln" d="M341 210 L341 232"/>
+  <rect class="box" x="300" y="232" width="82" height="44" rx="4"/><text x="312" y="250">HBM 3</text><text class="s" x="312" y="266">36 GB</text>
+  <rect class="box" x="464" y="28" width="380" height="262" rx="8"/>
+  <text class="t" x="478" y="48">IOD 1</text>
+  <text class="s" x="534" y="48">each CU: 32 KB L1 vector cache + 160 KB LDS</text>
+  <rect class="box" x="478" y="58" width="82" height="84" rx="4"/><text x="490" y="78">XCD 4</text><text class="s" x="490" y="94">32 CUs</text>
+  <rect class="hl" x="486" y="106" width="66" height="26" rx="3"/><text x="492" y="123">L2 4 MB</text>
+  <path class="ln" d="M519 142 L519 176"/>
+  <rect class="box" x="568" y="58" width="82" height="84" rx="4"/><text x="580" y="78">XCD 5</text><text class="s" x="580" y="94">32 CUs</text>
+  <rect class="hl" x="576" y="106" width="66" height="26" rx="3"/><text x="582" y="123">L2 4 MB</text>
+  <path class="ln" d="M609 142 L609 176"/>
+  <rect class="box" x="658" y="58" width="82" height="84" rx="4"/><text x="670" y="78">XCD 6</text><text class="s" x="670" y="94">32 CUs</text>
+  <rect class="hl" x="666" y="106" width="66" height="26" rx="3"/><text x="672" y="123">L2 4 MB</text>
+  <path class="ln" d="M699 142 L699 176"/>
+  <rect class="box" x="748" y="58" width="82" height="84" rx="4"/><text x="760" y="78">XCD 7</text><text class="s" x="760" y="94">32 CUs</text>
+  <rect class="hl" x="756" y="106" width="66" height="26" rx="3"/><text x="762" y="123">L2 4 MB</text>
+  <path class="ln" d="M789 142 L789 176"/>
+  <rect class="hl" x="478" y="176" width="352" height="34" rx="4"/><text x="490" y="198">Infinity Cache 128 MB · memory-side (L3)</text>
+  <path class="ln" d="M519 210 L519 232"/>
+  <rect class="box" x="478" y="232" width="82" height="44" rx="4"/><text x="490" y="250">HBM 4</text><text class="s" x="490" y="266">36 GB</text>
+  <path class="ln" d="M609 210 L609 232"/>
+  <rect class="box" x="568" y="232" width="82" height="44" rx="4"/><text x="580" y="250">HBM 5</text><text class="s" x="580" y="266">36 GB</text>
+  <path class="ln" d="M699 210 L699 232"/>
+  <rect class="box" x="658" y="232" width="82" height="44" rx="4"/><text x="670" y="250">HBM 6</text><text class="s" x="670" y="266">36 GB</text>
+  <path class="ln" d="M789 210 L789 232"/>
+  <rect class="box" x="748" y="232" width="82" height="44" rx="4"/><text x="760" y="250">HBM 7</text><text class="s" x="760" y="266">36 GB</text>
+  <path class="acc" d="M396 193 L464 193"/>
+  <text class="s" x="402" y="185">IOD link</text>
+  <text class="s" x="402" y="208">5.5 TB/s</text>
+  <text class="s" x="16" y="310">XCC_ID 0–3 → IOD 0, 4–7 → IOD 1. A load goes CU L1 → its XCD's L2 → Infinity Fabric → the Infinity Cache</text>
+  <text class="s" x="16" y="326">and HBM of the IOD that homes the address, so a remote granule crosses the IOD link even when it hits in the Infinity Cache.</text>
 </svg>
 </div>
-<figcaption>One MI355X: 256 CUs and 8 HBM3E stacks, split across two IODs.</figcaption>
+<figcaption>One MI355X: eight XCDs, vertically stacked on two IODs. Each XCD has a private 4 MB L2; each IOD holds 128 MB of memory-side Infinity Cache in front of its four HBM3E stacks (288 GB and 8 TB/s in total).</figcaption>
 </figure>
+
+<p>The caches follow the same split. Only the Infinity Cache sits on the IOD, and it is memory-side: it caches the memory behind its own IOD's HBM controllers, not the data its own XCDs read.</p>
+<table>
+  <tr><th>Level</th><th>Size</th><th>Where it sits</th><th>What it serves</th></tr>
+  <tr><td>L1 vector cache</td><td>32 KB per CU</td><td>in each CU</td><td>that CU</td></tr>
+  <tr><td>LDS</td><td>160 KB per CU</td><td>in each CU</td><td>the workgroups running on that CU</td></tr>
+  <tr><td>L2</td><td>4 MB per XCD (16-way, 16 channels); 32 MB in total</td><td>in each XCD</td><td>the 32 CUs of that XCD only. The eight L2s are separate, so data read by several XCDs is fetched into each of their L2s.</td></tr>
+  <tr><td>Infinity Cache (the "L3", AMD's MALL)</td><td>128 MB per IOD; 256 MB in total</td><td>in the IODs, in front of the HBM controllers</td><td>the memory homed on its IOD, for reads from any XCD. A granule homed on IOD 1 is cached only in IOD 1's Infinity Cache.</td></tr>
+  <tr><td>HBM3E</td><td>8 stacks of 36 GB; 8 TB/s in total</td><td>four stacks per IOD</td><td>the granules homed on that IOD</td></tr>
+</table>
+<p>Because the Infinity Cache is memory-side, locality is decided where the data is homed, not where it is cached: a workgroup on IOD 0 that reads a granule homed on IOD 1 crosses the IOD link (5.5 TB/s of bisection bandwidth per AMD's CDNA 4 whitepaper; all-remote reads top out near 4 TB/s in our measurements) whether the read hits in IOD 1's Infinity Cache or goes to its HBM. The phase probe in section 02 flushes both L2 and the Infinity Cache before timing, so it sees the home, not a cached copy.</p>
 
 <p>Two partition settings decide what software sees:</p>
 <table>
@@ -416,6 +455,7 @@ tma_copy(tensor_map_b, ..., k_idx, half_n_idx, half_idx, expert_idx);</code></pr
 
 <footer>
   <p>Source: <a href="https://github.com/carlushuang/gcnasm/pull/55">carlushuang/gcnasm#55</a>: <code>nps_locality/</code> (probes), <code>nps_locality/fp8_gemm_locality/</code> (opus FP8 GEMM) and <code>nps_locality/flydsl_mega_moe/</code> (FlyDSL MegaMoEV2; Parts 1–3, raw outputs in <code>results/</code>). DeepGEMM: <a href="https://github.com/deepseek-ai/DeepGEMM/pull/462">deepseek-ai/DeepGEMM#462</a> (<code>csrc/apis/locality_domain.hpp</code>, <code>deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh</code>); NVIDIA <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/locality-domains.html">CUDA Programming Guide: Locality Domains</a>.</p>
+  <p>Cache sizes and die layout: AMD ROCm documentation, <a href="https://rocm.docs.amd.com/en/develop/reference/gpu-arch/mi350.html">AMD Instinct MI350 Series microarchitecture</a>; IOD link bandwidth: <a href="https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf">AMD CDNA 4 architecture whitepaper</a>.</p>
   <p>Measurements are from 8×MI355X (gfx950) with ROCm 7.2, aiter <code>6fe1bfc8f</code>, FlyDSL 0.4.1 and torch 2.10, in November 2026. B200 behaviour is as described by the DeepGEMM sources and NVIDIA's documentation, not measured here.</p>
 </footer>
 
