@@ -116,6 +116,10 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
     <h4><a href="nps-locality.html">IOD locality on MI355X</a></h4>
     <p>How a kernel finds its IOD and where an address lives in SPX + NPS1, what IOD-local placement buys, why a fused MoE barely gains, and how DeepGEMM does the same on B200. Code and data: <a href="https://github.com/carlushuang/gcnasm/pull/55">#55</a>.</p>
   </div>
+  <div class="card">
+    <h4><a href="rubin-locality-moe.html">Die-local MoE weights on Vera Rubin</a></h4>
+    <p>How vLLM puts each die's share of the MoE weights in that die's HBM: PyTorch's <code>LocalizedAllocator</code> over CUDA 13.4 virtual memory, a <code>MemPool</code> and green-context stream per die, and a fork/join per GEMM. Sources: <a href="https://github.com/vllm-project/vllm/pull/61685">vllm#61685</a>, <a href="https://github.com/pytorch/pytorch/pull/199127">pytorch#199127</a>.</p>
+  </div>
 </div>
 
 </div>

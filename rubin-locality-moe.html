@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Die-local MoE weights on Vera Rubin: vLLM and PyTorch</title>
+<meta name="description" content="How vLLM's locality-aware MoE places expert weights in each Rubin die's HBM: PyTorch's LocalizedAllocator over CUDA 13.4 virtual memory, a MemPool and green-context stream per die, a clone inside use_mem_pool, and a fork/join per GEMM.">
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #5b6672;
+  --line: #d8dee4;
+  --soft: #f6f8fa;
+  --accent: #b3122b;
+  --accent-soft: #fdf0f2;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --code-bg: #f6f8fa;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --line: #2b313a;
+    --soft: #161b22;
+    --accent: #ff7b8a;
+    --accent-soft: #21161a;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --code-bg: #161b22;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 900px; margin: 0 auto; padding: 0 20px 96px; }
+header.hero { border-bottom: 1px solid var(--line); background: var(--soft); padding: 48px 0 34px; margin-bottom: 40px; }
+header.hero .wrap { padding-bottom: 0; }
+h1 { font-size: 34px; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.02em; }
+.sub { color: var(--muted); font-size: 18px; margin: 0 0 20px; max-width: 62ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  font: 500 12px/1 var(--mono);
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--bg); color: var(--muted); text-decoration: none;
+}
+.chip a, a.chip:hover { color: var(--accent); }
+.chip.hot { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+h2 {
+  font-size: 24px; margin: 52px 0 14px; letter-spacing: -0.01em;
+  padding-top: 10px; border-top: 1px solid var(--line);
+}
+h2 .num { color: var(--accent); font: 600 14px/1 var(--mono); display: block; margin-bottom: 6px; }
+h3 { font-size: 17px; margin: 30px 0 8px; }
+p { margin: 0 0 14px; }
+ul, ol { margin: 0 0 14px; padding-left: 22px; }
+li { margin-bottom: 6px; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+code { font: 13px/1.5 var(--mono); background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 0 0 16px; }
+pre code { background: none; border: 0; padding: 0; font-size: 12.5px; line-height: 1.55; }
+.callout { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 8px 8px 0; padding: 14px 18px; margin: 0 0 20px; }
+.callout p:last-child { margin-bottom: 0; }
+.callout .label { font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); display: block; margin-bottom: 8px; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 18px; font-size: 14.5px; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+th { background: var(--soft); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ok { color: var(--ok); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+figure { margin: 24px 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
+.svgbox { border: 1px solid var(--line); border-radius: 8px; background: var(--soft); padding: 18px; }
+svg text { font-family: var(--mono); font-size: 11px; fill: var(--fg); }
+svg text.t { font-size: 12px; font-weight: 600; }
+svg text.s { fill: var(--muted); font-size: 10px; }
+svg rect.box { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+svg rect.hl { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+svg line, svg path.ln { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+svg path.acc { stroke: var(--accent); stroke-width: 1.4; fill: none; }
+.toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; }
+.toc ol { margin: 0; padding-left: 20px; }
+.toc li { margin-bottom: 3px; }
+footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px; color: var(--muted); font-size: 14px; }
+.small { font-size: 13.5px; color: var(--muted); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } h1 { font-size: 27px; } }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: var(--bg); }
+.card h4 { margin: 0 0 6px; font-size: 14px; }
+.card p { margin: 0; font-size: 14px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Die-local MoE weights on Vera Rubin: vLLM and PyTorch</h1>
+    <p class="sub">Each Rubin GPU has two memory domains, one per die. vLLM's locality-aware MoE keeps each die's SMs reading only the expert weights in that die's HBM. This page traces how the weights get there: a PyTorch allocator over CUDA 13.4's virtual-memory API, one memory pool and one green-context stream per die, a copy inside <code>use_mem_pool</code>, and two fork/joins per MoE forward.</p>
+    <div class="chips">
+      <a class="chip hot" href="https://github.com/vllm-project/vllm/pull/61685">vllm-project/vllm#61685</a>
+      <a class="chip" href="https://github.com/pytorch/pytorch/pull/199127">pytorch/pytorch#199127</a>
+      <a class="chip" href="https://github.com/pytorch/pytorch/pull/199128">pytorch/pytorch#199128</a>
+      <a class="chip" href="https://github.com/flashinfer-ai/flashinfer/pull/6488">flashinfer-ai/flashinfer#6488</a>
+      <span class="chip">Vera Rubin NVL72</span>
+      <span class="chip">CUDA 13.4</span>
+      <span class="chip">NVFP4 MoE</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="callout">
+  <span class="label">In one paragraph</span>
+  <p>CUDA 13.4 can create physical memory on one locality domain (<code>CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN</code>), but only through the virtual-memory API: <code>cudaMalloc</code> memory cannot be localized. PyTorch exposes this as <code>torch.cuda.LocalizedAllocator</code>, a pluggable allocator whose Python callbacks call <code>cuMemCreate</code>, map the pages at an ordinary device address and give the whole GPU access. Wrapped in a <code>torch.cuda.MemPool</code>, it behaves like any other pool. At worker startup vLLM creates one pool and one green-context stream per die. After loading an NVFP4 MoE layer, it slices FC1 and FC2 along N and <code>.clone()</code>s slice <i>i</i> inside <code>use_mem_pool(pools[i])</code>, so each slice becomes a separate tensor stored on die <i>i</i>. At run time FlashInfer launches each GEMM once per die on that die's stream, and <code>torch.cuda.execute_on_streams</code> forks from and joins back to the caller stream. Only the weights are placed; activations stay in ordinary memory. The vLLM PR measures 1.07–1.17× on the MoE op at up to 256 tokens per rank, and about 1.0× at 512–1024.</p>
+</div>
+<div class="callout">
+  <span class="label">The pattern</span>
+  <p>Memory placement and compute placement are <b>separate APIs</b>, and the speedup needs both. The allocator decides where bytes live; the green context decides which SMs run. Neither one changes what a kernel computes: any SM can still read any die's memory, just more slowly.</p>
+</div>
+
+<div class="toc">
+  <ol>
+    <li><a href="#halves">Two halves of the problem</a></li>
+    <li><a href="#alloc">The allocator: <code>LocalizedAllocator</code></a></li>
+    <li><a href="#init">One pool and one stream per die</a></li>
+    <li><a href="#place">Placing the weights: a clone inside <code>use_mem_pool</code></a></li>
+    <li><a href="#run">Running a MoE layer: two fork/joins</a></li>
+    <li><a href="#worth">What it buys</a></li>
+    <li><a href="#compare">Compared with DeepGEMM on B200 and with MI355X</a></li>
+    <li><a href="#caveats">Requirements and caveats</a></li>
+  </ol>
+</div>
+
+<h2 id="halves"><span class="num">01</span>Two halves of the problem</h2>
+
+<p>The <a href="https://vllm.ai/blog/2026-10-09-vera-rubin-preview#locality-domain-support">Rubin preview post</a> states the goal. MoE decode is bound by reading expert weights from HBM, and an SM reads its own die's HBM faster than the other die's. The <a href="https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin">DeepSeek-V4.1-Flash follow-up</a> adds a middle tier: ordinary interleaved memory is slower than the SM's own domain, and the other domain is slower still.</p>
+<p>Making a kernel die-local takes two things, and CUDA 13.4 has a separate API for each:</p>
+
+<table>
+  <tr><th></th><th>Question</th><th>CUDA 13.4</th><th>PyTorch wrapper</th></tr>
+  <tr><td>Memory</td><td>Which die's HBM holds a tensor?</td><td><code>cuMemCreate</code> with a locality-domain location, or a localized <code>cudaMemPool</code></td><td><code>torch.cuda.LocalizedAllocator</code> + <code>torch.cuda.MemPool</code></td></tr>
+  <tr><td>Compute</td><td>Which SMs run a kernel?</td><td>A green context from <code>cudaDevSmResourceSplit</code> with a locality-domain ID</td><td><code>SMPartition.split(locality_domain_ids=…)</code>, <code>GreenContext</code></td></tr>
+  <tr><td>Ordering</td><td>How does per-die work rejoin?</td><td>Events between streams</td><td><code>torch.cuda.execute_on_streams</code></td></tr>
+</table>
+
+<p>Ordinary <code>cudaMalloc</code> memory and unified memory cannot be localized (<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/locality-domains.html">CUDA guide</a>), and that is what PyTorch's default caching allocator sits on. Hence a custom allocator. NVIDIA's guide also notes that localizing only memory, or only compute, usually doesn't help.</p>
+
+<h2 id="alloc"><span class="num">02</span>The allocator: <code>LocalizedAllocator</code></h2>
+
+<p><code>torch.cuda.LocalizedAllocator</code> (<a href="https://github.com/pytorch/pytorch/pull/199127">pytorch#199127</a>, in nightlies from 2026-10-08, 2.16) is a pluggable allocator. Its allocation callback in <a href="https://github.com/pytorch/pytorch/blob/d820e1a6fcc0c1910cc4eda60d83f43f2df37100/torch/cuda/memory.py#L1420-L1586"><code>torch/cuda/memory.py</code></a>, condensed:</p>
+<pre><code>prop = CUmemAllocationProp()
+prop.type = CU_MEM_ALLOCATION_TYPE_PINNED
+prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
+prop.location.localized.deviceId = device_id
+prop.location.localized.localityDomainId = locality_domain_id
+
+gran   = cuMemGetAllocationGranularity(prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM)
+padded = round_up(size, gran)
+handle = cuMemCreate(padded, prop, 0)              # physical pages on one die
+ptr    = cuMemAddressReserve(padded, gran, 0, 0)   # an ordinary device address
+cuMemMap(ptr, padded, 0, handle, 0)
+cuMemSetAccess(ptr, padded, [READWRITE for the whole device], 1)
+return ptr</code></pre>
+<ul>
+  <li>The callbacks are Python functions turned into C function pointers with <code>ctypes</code> and registered through <code>torch._C._cuda_customAllocator(alloc_ptr, free_ptr)</code>. Inside a <code>MemPool</code>, PyTorch's caching allocator calls them only when the pool needs a new segment, and sub-allocates tensors from the segments it holds.</li>
+  <li>The returned pointer is an ordinary device address. Kernels read it without any change; only the physical pages sit on one die.</li>
+  <li>Access is granted to the whole device: <code>cuMemSetAccess</code> works per device, not per domain. An SM on the other die can still read the memory, only more slowly, so placement never affects correctness.</li>
+  <li>Freeing waits on the allocation stream (<code>cuStreamSynchronize</code>) before <code>cuMemUnmap</code>, because unmapping does not wait for queued work the way <code>cudaFree</code> does. That suits weights that live for the whole run, not memory that churns every step.</li>
+  <li>One callback owner per (device, domain) is kept for the life of the process. Allocating from several threads at once is unsupported: the native allocator holds its mutex while the callback takes the GIL, which can deadlock.</li>
+</ul>
+<p>Usage, from PyTorch's docs:</p>
+<pre><code>alloc = torch.cuda.LocalizedAllocator(locality_domain_id=0, device="cuda:0")
+with torch.cuda.device(alloc.device_id):
+    pool = torch.cuda.MemPool(allocator=alloc.allocator())
+with torch.cuda.use_mem_pool(pool, device="cuda:0"):
+    x = torch.randn(1024, device="cuda:0")   # storage on domain 0; the randn kernel is not localized</code></pre>
+
+<h2 id="init"><span class="num">03</span>One pool and one stream per die</h2>
+
+<p>vLLM builds the per-die resources in <a href="https://github.com/vllm-project/vllm/blob/89e860de0073bb9b5ed6af2a42817e2edb99b606/vllm/distributed/localization.py#L146-L266"><code>vllm/distributed/localization.py</code></a>. The GPU worker calls it in <code>init_device</code>, before weights are loaded and CUDA graphs are captured, and every layer shares the result:</p>
+<pre><code>resource = SMPartition.from_device(idx)
+partitions, remainder = resource.split(
+    num_sms=resource.sm_count // n if backfill else 0,   # 0: each domain's own SMs
+    locality_domain_ids=list(range(n)),
+    backfill=backfill)
+contexts = [GreenContext(sm_partition=p) for p in partitions]
+streams  = [c.Stream() for c in contexts]                 # compute stream per die
+with torch.accelerator.device_index(idx):
+    pools = [torch.cuda.MemPool(allocator=LocalizedAllocator(i, device=idx).allocator())
+             for i in range(n)]                           # HBM pool per die</code></pre>
+<ul>
+  <li><b>Index <i>i</i> means the same die in <code>streams[i]</code> and <code>pools[i]</code>.</b> The whole scheme rests on that pairing.</li>
+  <li>Without backfill, each partition gets only the SMs CUDA guarantees for that domain. The Rubin post reports that this uses 200 of the 212 SMs. <code>VLLM_MOE_LOCALIZE_BACKFILL=1</code> asks for an equal share of all SMs instead: CUDA tops a partition up with the domain's supplemental SMs, then with SMs from the other die.</li>
+  <li>The SMs the split leaves over get a green context of their own. vLLM zeroes the MoE output there, overlapped with FC1 (<code>VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP</code>, on by default). With no remainder it uses an ordinary full-device stream.</li>
+  <li>If anything is missing (the torch API, FlashInfer support, driver and <code>cuda.bindings</code> 13.4, a GPU with more than one domain), the function logs why and returns <code>None</code>, and every layer runs the ordinary full-width path.</li>
+</ul>
+
+<h2 id="place"><span class="num">04</span>Placing the weights: a clone inside <code>use_mem_pool</code></h2>
+
+<p>The placement itself is one PyTorch idiom: a <code>.clone()</code> inside <code>use_mem_pool</code>. vLLM does it in <a href="https://github.com/vllm-project/vllm/blob/89e860de0073bb9b5ed6af2a42817e2edb99b606/vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py#L120-L181"><code>_shard_nvfp4_moe_weights_per_die</code></a>. It runs after the checkpoint is loaded, padded and its up/gate rows interleaved, and before the block scales are swizzled:</p>
+<pre><code>n13, n2 = w13.shape[1] // n, w2.shape[1] // n            # split N of [E, N, K]
+for i in range(n):
+    with torch.cuda.use_mem_pool(res.pools[i]):
+        a, b = i * n13, i * n2
+        w13_i = w13[:, a:a + n13, :].clone(memory_format=torch.contiguous_format)
+        w2_i  = w2[:,  b:b + n2,  :].clone(memory_format=torch.contiguous_format)
+        w13_sf_i = swizzle_blockscale(w13_scale[:, a:a + n13, :].contiguous())
+        w2_sf_i  = swizzle_blockscale(w2_scale[:,  b:b + n2,  :].contiguous())
+    replace_parameter(layer, f"localized{i}_w13_weight", w13_i)   # and the other three</code></pre>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 244" role="img" aria-label="w13 split along N into two slices; each slice is cloned into its die's MemPool, whose segments come from cuMemCreate on that die">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" opacity=".9"/>
+    </marker>
+  </defs>
+  <text class="t" x="16" y="20">w13 after padding and up/gate interleave: [E, 2I, H], split along N</text>
+  <rect class="hl" x="16" y="34" width="410" height="40" rx="5"/><text x="30" y="59">w13[:, 0 : n13, :]</text>
+  <rect class="box" x="434" y="34" width="410" height="40" rx="5"/><text x="448" y="59">w13[:, n13 : 2·n13, :]</text>
+  <path class="acc" d="M221 78 L221 106" marker-end="url(#ah)"/><text class="s" x="232" y="96">.clone() inside use_mem_pool(pools[0])</text>
+  <path class="ln" d="M639 78 L639 106" marker-end="url(#ah)"/><text class="s" x="650" y="96">… use_mem_pool(pools[1])</text>
+  <rect class="hl" x="16" y="110" width="410" height="40" rx="5"/><text x="30" y="135">MemPool 0: caches segments, sub-allocates</text>
+  <rect class="box" x="434" y="110" width="410" height="40" rx="5"/><text x="448" y="135">MemPool 1: caches segments, sub-allocates</text>
+  <path class="acc" d="M221 154 L221 182" marker-end="url(#ah)"/><text class="s" x="232" y="172">new segment: LocalizedAllocator(0) callback</text>
+  <path class="ln" d="M639 154 L639 182" marker-end="url(#ah)"/><text class="s" x="650" y="172">LocalizedAllocator(1)</text>
+  <rect class="hl" x="16" y="186" width="410" height="40" rx="5"/><text x="30" y="211">cuMemCreate(locality domain 0): die 0 HBM</text>
+  <rect class="box" x="434" y="186" width="410" height="40" rx="5"/><text x="448" y="211">cuMemCreate(locality domain 1): die 1 HBM</text>
+</svg>
+</div>
+<figcaption>Each die's N-slice becomes its own tensor, with storage from that die's pool. w2 is split the same way. Access is granted to the whole device, so any SM can read either slice; only the speed differs.</figcaption>
+</figure>
+
+<ul>
+  <li>Every allocation made inside the <code>with</code> block comes from die <i>i</i>'s pool, so the clones and the swizzled scales land in die <i>i</i>'s HBM. The copy kernels run on the whole GPU; only their destination is die-local. This is a one-time cost at load.</li>
+  <li><b>FC1</b> (<code>w13</code>, <code>[E, 2I, H]</code>) is split by intermediate rows. Each die's slice must be a multiple of 128 rows, so every interleaved 64-row up/gate pair stays on one die and that die can apply the gated activation on its own. That is why the path requires a gated activation.</li>
+  <li><b>FC2</b> (<code>w2</code>, <code>[E, H, I]</code>) is split by hidden rows: each die produces half of the output's hidden columns.</li>
+  <li>Block scales are split with their weights. The per-expert global scales are shared, since only N is partitioned.</li>
+  <li>The slices are registered as parameters (<code>localized0_w13_weight</code>, …) so EPLB can move them like any other weight.</li>
+  <li>By default the full-width <code>w13</code> and <code>w2</code> are kept, so FlashInfer's autotuner can compare both paths. That doubles MoE weight memory. <code>VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS=1</code> releases them (<code>untyped_storage().resize_(0)</code>) before vLLM profiles memory for the KV cache, and drops the full-width fallback.</li>
+</ul>
+
+<h2 id="run"><span class="num">05</span>Running a MoE layer: two fork/joins</h2>
+
+<p>vLLM passes the slices and streams to FlashInfer's <code>cute_dsl_fused_moe_nvfp4</code> as <code>localized_weights</code>, <code>localized_streams</code>, <code>localized_sm_count</code> and <code>localized_memset_stream</code> (<a href="https://github.com/vllm-project/vllm/blob/89e860de0073bb9b5ed6af2a42817e2edb99b606/vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_moe.py#L99-L141"><code>flashinfer_cutedsl_moe.py</code></a>). FlashInfer then runs each GEMM once per die (<a href="https://github.com/flashinfer-ai/flashinfer/blob/82866b5b0075530c906e7ea06a4a7d429950c106/flashinfer/fused_moe/cute_dsl/fused_moe.py#L857-L1063"><code>fused_moe.py</code></a>):</p>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 214" role="img" aria-label="Timeline: caller stream forks to two green-context streams for FC1 while the remainder SMs zero the output, joins, forks again for FC2, and joins">
+  <defs>
+    <marker id="ah2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" opacity=".9"/>
+    </marker>
+  </defs>
+  <text class="s" x="258" y="16">fork</text>
+  <text class="s" x="420" y="16">join + fork</text>
+  <text class="s" x="638" y="16">join</text>
+  <text x="16" y="44">caller stream</text>
+  <text x="16" y="94">die 0 · green ctx</text>
+  <text x="16" y="144">die 1 · green ctx</text>
+  <text x="16" y="194">remainder SMs</text>
+  <line x1="170" y1="40" x2="844" y2="40" style="stroke-dasharray:2 4;opacity:.6"/>
+  <line x1="170" y1="90" x2="844" y2="90" style="stroke-dasharray:2 4;opacity:.6"/>
+  <line x1="170" y1="140" x2="844" y2="140" style="stroke-dasharray:2 4;opacity:.6"/>
+  <line x1="170" y1="190" x2="844" y2="190" style="stroke-dasharray:2 4;opacity:.6"/>
+  <rect class="box" x="172" y="26" width="88" height="28" rx="4"/><text x="184" y="44">moe_sort</text>
+  <path class="acc" d="M270 24 L270 204"/>
+  <rect class="hl" x="280" y="76" width="160" height="28" rx="4"/><text x="292" y="94">FC1 · w13 slice 0</text>
+  <rect class="hl" x="280" y="126" width="160" height="28" rx="4"/><text x="292" y="144">FC1 · w13 slice 1</text>
+  <rect class="box" x="280" y="176" width="112" height="28" rx="4"/><text x="292" y="194">out memset</text>
+  <path class="acc" d="M450 24 L450 204"/>
+  <rect class="hl" x="460" y="76" width="180" height="28" rx="4"/><text x="472" y="94">FC2 · w2 slice 0</text>
+  <rect class="hl" x="460" y="126" width="180" height="28" rx="4"/><text x="472" y="144">FC2 · w2 slice 1</text>
+  <path class="acc" d="M650 24 L650 154"/>
+  <rect class="box" x="660" y="26" width="184" height="28" rx="4"/><text x="672" y="44">next op</text>
+</svg>
+</div>
+<figcaption>One MoE forward with localization. Each green stream waits on the caller stream before its GEMM, and the caller waits on both before going on. The output memset runs on the SMs the split left over, overlapped with FC1.</figcaption>
+</figure>
+
+<pre><code>def _fc1_die(i):                   # called with streams[i] current
+    gemm1(a=x, b=shard[i]["w1_weight"], ..., out=gemm1_out, domain_id=i)
+torch.cuda.execute_on_streams(localized_streams, _fc1_die, range(n))
+
+def _fc2_die(i):
+    gemm2(a=intermediate, b=shard[i]["w2_weight"], ..., out=gemm2_output, domain_id=i)
+torch.cuda.execute_on_streams(localized_streams, _fc2_die, range(n))</code></pre>
+<ul>
+  <li><a href="https://github.com/pytorch/pytorch/blob/d820e1a6fcc0c1910cc4eda60d83f43f2df37100/torch/cuda/streams.py#L283"><code>execute_on_streams</code></a> (<a href="https://github.com/pytorch/pytorch/pull/199128">pytorch#199128</a>) records an event on the caller stream and makes each green stream wait on it. It then calls the callback with that stream current, records a done event per stream, and makes the caller stream wait on all of them. The host never blocks: the Python callbacks run one after another while their GPU work overlaps.</li>
+  <li><b>FC1:</b> each die multiplies all of the activations by its own slice and writes disjoint columns of one shared output buffer. That buffer and the activations are ordinary allocations that both dies read; at decode sizes they are small next to the weights.</li>
+  <li><b>FC2:</b> each die reads the whole FC1 output and its own slice of <code>w2</code>, contracts the full intermediate dimension and writes disjoint hidden columns. No reduction is needed. The join after FC1 is what lets FC2 read both halves.</li>
+  <li>The GEMM kernels take one extra argument, <code>domain_id</code>; the per-die streams decide where they run.</li>
+  <li>The fork/join is captured into vLLM's CUDA graphs. CUDA documents that captured kernel nodes keep their green-context SMs when the graph is replayed.</li>
+</ul>
+
+<h2 id="worth"><span class="num">06</span>What it buys</h2>
+
+<p>The Rubin preview post reports about 1.2× on average for MiniMax M3 MoE shapes at small token counts, with communication excluded, across TP and EP and with or without backfill. <a href="https://github.com/vllm-project/vllm/pull/61685">vllm#61685</a> measured the MoE op on Rubin (FC1 + memset + FC2; routing excluded; NVFP4; balanced routing; both paths autotuned under CUDA graphs):</p>
+
+<table>
+  <tr><th>Per-rank shape (H / I / experts / top-k)</th><th class="num">Tokens</th><th class="num">Baseline (µs)</th><th class="num">Localized (µs)</th><th class="num">Speedup</th></tr>
+  <tr><td>TP8-shaped: 3584 / 384 / 896 / 16, no backfill</td><td class="num">64</td><td class="num">199.2</td><td class="num">185.4</td><td class="num">1.074×</td></tr>
+  <tr><td></td><td class="num">128</td><td class="num">203.9</td><td class="num">188.8</td><td class="num">1.080×</td></tr>
+  <tr><td></td><td class="num">256</td><td class="num">208.0</td><td class="num">192.1</td><td class="num">1.083×</td></tr>
+  <tr><td>TEP16-shaped: 3584 / 3072 / 56 / 16, backfill</td><td class="num">32</td><td class="num">92.3</td><td class="num">80.6</td><td class="num">1.145×</td></tr>
+  <tr><td></td><td class="num">64</td><td class="num">92.4</td><td class="num">79.6</td><td class="num">1.161×</td></tr>
+  <tr><td></td><td class="num">128</td><td class="num">93.3</td><td class="num">82.6</td><td class="num">1.129×</td></tr>
+  <tr><td></td><td class="num">256</td><td class="num">94.9</td><td class="num">81.4</td><td class="num">1.167×</td></tr>
+  <tr><td></td><td class="num">512</td><td class="num">128.7</td><td class="num">126.2</td><td class="num">1.019×</td></tr>
+  <tr><td></td><td class="num">1024</td><td class="num">191.1</td><td class="num">189.3</td><td class="num">1.008×</td></tr>
+</table>
+
+<div class="callout">
+  <span class="label">Where it helps</span>
+  <p>The gain is for decode that is bound by weight reads. At 512 and 1024 tokens per rank, the TEP16 shape is back to about 1.0×. That matches the MI355X result in <a href="nps-locality.html#worth">IOD locality on MI355X</a>: locality pays off when the kernel is memory-bound.</p>
+</div>
+
+<p>The DeepSeek-V4.1-Flash follow-up extends die-local placement to MegaMoE's expert weights, the LM head and the mHC residual stream.</p>
+
+<h2 id="compare"><span class="num">07</span>Compared with DeepGEMM on B200 and with MI355X</h2>
+
+<p>The <a href="nps-locality.html">MI355X page</a> covers how <a href="nps-locality.html#deepgemm">DeepGEMM does this on B200</a> and <a href="nps-locality.html#vmm">why MI355X cannot map it the same way</a>. Side by side:</p>
+
+<table>
+  <tr><th></th><th>vLLM + PyTorch (Rubin)</th><th>DeepGEMM (B200)</th><th>MI355X (SPX + NPS1)</th></tr>
+  <tr><td>Die/IOD-local memory</td><td><code>LocalizedAllocator</code>: <code>cuMemCreate</code> on one domain, per pool segment</td><td>Physical memory created per die (MLOPart today, the CUDA 13.4 API)</td><td>None: every 2 MiB page alternates IODs every 8 KiB</td></tr>
+  <tr><td>Weight layout</td><td>Two separate tensors per weight, one per die</td><td>Two die-local allocations mapped back to back in one VA range; one pointer</td><td>One ordinary tensor; the kernel gathers its IOD's granules</td></tr>
+  <tr><td>Which SMs/CUs do a die's work</td><td>A green context per domain; CUDA picks the SMs</td><td>SM-to-die table probed at init; each CTA claims tasks from its die's queue</td><td><code>XCC_ID &gt;&gt; 2</code>, read from hardware</td></tr>
+  <tr><td>Launches per GEMM</td><td>One per die, fork/join over two streams</td><td>One</td><td>One</td></tr>
+  <tr><td>Imbalance</td><td>Equal partitions; backfill lends SMs across dies</td><td>Steals from the other die's queue when there are at least two waves</td><td>Not needed: 4 XCDs × 32 CUs per IOD</td></tr>
+</table>
+
+<p>The vLLM route keeps the kernels nearly unchanged and moves the rest into the framework: PyTorch decides where bytes live and which SMs run, and the same grouped GEMM runs once per die. A ROCm port would need both primitives from HIP. The first, physical memory that sits on one IOD, is what SPX + NPS1 does not have (<a href="nps-locality.html#vmm">section 07 of the MI355X page</a>).</p>
+
+<h2 id="caveats"><span class="num">08</span>Requirements and caveats</h2>
+
+<div class="grid2">
+  <div class="card"><h4>Opt in</h4><p><code>VLLM_USE_LOCALITY_DOMAINS=1</code> with <code>--moe-backend flashinfer_cutedsl</code>. Off by default.</p></div>
+  <div class="card"><h4>Stack</h4><p>PyTorch nightly from 2026-10-08 (2.16), FlashInfer main after #6488 (no 0.7.x release has it), CUDA driver and <code>cuda.bindings</code> 13.4+.</p></div>
+  <div class="card"><h4>One path only</h4><p>FlashInfer CuTeDSL NVFP4 MoE with a gated activation. Per-token activation quantization is unsupported.</p></div>
+  <div class="card"><h4>Memory</h4><p>Full-width weights are kept by default, about 2× MoE weight memory. <code>…_LOCALIZE_FREE_FULL_WEIGHTS=1</code> drops them.</p></div>
+  <div class="card"><h4>Pair memory with compute</h4><p>A die-local tensor read from all SMs, or a green context reading interleaved memory, gains little. Place both.</p></div>
+  <div class="card"><h4>Allocator limits</h4><p>Python callbacks, no concurrent allocation from other threads, frees synchronize the stream. Fit for static weights, not per-step buffers.</p></div>
+  <div class="card"><h4>Quiet fallback</h4><p>vGPU, MIG, NUMA mode, Windows and MPS partitions report one domain. Then, or when any piece is missing, vLLM logs why and runs the full-width path.</p></div>
+  <div class="card"><h4>Next</h4><p><a href="https://github.com/pytorch/pytorch/pull/202504">pytorch#202504</a> (open) proposes <code>torch.cuda.localize</code> to localize whole programs rather than hand-placed tensors.</p></div>
+</div>
+
+<footer>
+  <p>Sources: vLLM <a href="https://github.com/vllm-project/vllm/pull/61685">#61685</a> at <a href="https://github.com/vllm-project/vllm/tree/89e860de0073bb9b5ed6af2a42817e2edb99b606"><code>89e860de</code></a> (<code>vllm/distributed/localization.py</code>, <code>vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py</code>, <code>vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_moe.py</code>, <code>vllm/v1/worker/gpu_worker.py</code>); PyTorch <a href="https://github.com/pytorch/pytorch/pull/199127">#199127</a>, <a href="https://github.com/pytorch/pytorch/pull/199128">#199128</a> and <a href="https://github.com/pytorch/pytorch/pull/198279">#198279</a> at <a href="https://github.com/pytorch/pytorch/tree/d820e1a6fcc0c1910cc4eda60d83f43f2df37100"><code>d820e1a6</code></a> (<code>torch/cuda/memory.py</code>, <code>torch/cuda/streams.py</code>, <code>docs/source/cuda.md</code>); FlashInfer <a href="https://github.com/flashinfer-ai/flashinfer/pull/5276">#5276</a> and <a href="https://github.com/flashinfer-ai/flashinfer/pull/6488">#6488</a> at <a href="https://github.com/flashinfer-ai/flashinfer/tree/82866b5b0075530c906e7ea06a4a7d429950c106"><code>82866b5b</code></a> (<code>flashinfer/fused_moe/cute_dsl/fused_moe.py</code>).</p>
+  <p>Background: vLLM blog, <a href="https://vllm.ai/blog/2026-10-09-vera-rubin-preview">vLLM Support for NVIDIA Vera Rubin NVL72</a> and <a href="https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin">DeepSeek-V4.1-Flash on Vera Rubin NVL72</a>; NVIDIA <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/locality-domains.html">CUDA Programming Guide: Locality Domains</a> and <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/green-contexts.html">Green Contexts</a>.</p>
+  <p>Read from the sources in November 2026; nothing here was measured on Rubin by us. Timings are from vllm#61685 and the vLLM blog. See also <a href="nps-locality.html">IOD locality on MI355X</a> and the <a href="index.html">notes index</a>.</p>
+</footer>
+
+</div>
+</body>
+</html>
