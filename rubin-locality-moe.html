@@ -111,6 +111,7 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
       <a class="chip" href="https://github.com/pytorch/pytorch/pull/199127">pytorch/pytorch#199127</a>
       <a class="chip" href="https://github.com/pytorch/pytorch/pull/199128">pytorch/pytorch#199128</a>
       <a class="chip" href="https://github.com/flashinfer-ai/flashinfer/pull/6488">flashinfer-ai/flashinfer#6488</a>
+      <a class="chip" href="https://github.com/deepseek-ai/DeepGEMM/pull/462">deepseek-ai/DeepGEMM#462</a>
       <span class="chip">Vera Rubin NVL72</span>
       <span class="chip">CUDA 13.4</span>
       <span class="chip">NVFP4 MoE</span>
@@ -128,6 +129,10 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
   <span class="label">The pattern</span>
   <p>Memory placement and compute placement are <b>separate APIs</b>, and the speedup needs both. The allocator decides where bytes live; the green context decides which SMs run. Neither one changes what a kernel computes: any SM can still read any die's memory, just more slowly.</p>
 </div>
+<div class="callout">
+  <span class="label">Pointers and streams</span>
+  <p><b>vLLM:</b> two tensors, two unrelated pointers, one launch per die. Each launch gets only its own die's weight pointer, and its green-context stream decides which SMs run it; the kernel never knows the die. <b>DeepGEMM:</b> one tensor, one pointer, one launch on all SMs. The die is a TMA coordinate, and each CTA learns its die from a probed SM table. <b>The two can be combined</b> (section 08): one tensor over two domains and one ordinary stream with no green context, provided the kernel schedules its work per die.</p>
+</div>
 
 <div class="toc">
   <ol>
@@ -138,6 +143,7 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
     <li><a href="#run">Running a MoE layer: two fork/joins</a></li>
     <li><a href="#worth">What it buys</a></li>
     <li><a href="#compare">Compared with DeepGEMM on B200 and with MI355X</a></li>
+    <li><a href="#combine">One tensor and one stream, without green contexts</a></li>
     <li><a href="#caveats">Requirements and caveats</a></li>
   </ol>
 </div>
@@ -199,9 +205,18 @@ streams  = [c.Stream() for c in contexts]                 # compute stream per d
 with torch.accelerator.device_index(idx):
     pools = [torch.cuda.MemPool(allocator=LocalizedAllocator(i, device=idx).allocator())
              for i in range(n)]                           # HBM pool per die</code></pre>
+<p>How each stream gets bound to one die's SMs, from PyTorch's <a href="https://github.com/pytorch/pytorch/blob/d820e1a6fcc0c1910cc4eda60d83f43f2df37100/torch/cuda/green_contexts.py#L344-L500"><code>torch/cuda/green_contexts.py</code></a> to the driver:</p>
+<pre><code>SMPartition.from_device(idx)            -&gt; cuDeviceGetDevResource(dev, CU_DEV_RESOURCE_TYPE_SM)
+resource.split(locality_domain_ids=…)   -&gt; cuDevSmResourceSplit(n, res, 0, params)
+                                           params[i].flags |= CU_DEV_SM_RESOURCE_GROUP_LOCALITY_DOMAIN_ID
+                                           params[i].localityDomainId = i   (+ …_BACKFILL if backfill)
+GreenContext(sm_partition=p)            -&gt; cuDevResourceGenerateDesc + cuGreenCtxCreate
+context.Stream()                        -&gt; cuGreenCtxStreamCreate(green_ctx, CU_STREAM_NON_BLOCKING),
+                                           wrapped as torch.cuda.ExternalStream</code></pre>
 <ul>
   <li><b>Index <i>i</i> means the same die in <code>streams[i]</code> and <code>pools[i]</code>.</b> The whole scheme rests on that pairing.</li>
-  <li>Without backfill, each partition gets only the SMs CUDA guarantees for that domain. The Rubin post reports that this uses 200 of the 212 SMs. <code>VLLM_MOE_LOCALIZE_BACKFILL=1</code> asks for an equal share of all SMs instead: CUDA tops a partition up with the domain's supplemental SMs, then with SMs from the other die.</li>
+  <li><b>The die is a property of the stream, fixed when the stream is created.</b> Nothing at run time "sets" a die: code switches to <code>streams[i]</code>, and every kernel launched there can use only that green context's SMs. vLLM never calls <code>set_context</code> or <code>cuCtxSetCurrent</code>. It keeps the context objects alive, because the streams hold only weak references to them.</li>
+  <li>Without backfill, each partition gets only the SMs CUDA guarantees for that domain. The Rubin post reports that this uses 200 of the 212 SMs. <code>VLLM_MOE_LOCALIZE_BACKFILL=1</code> asks for an equal share of all SMs instead: CUDA tops a partition up with the domain's supplemental SMs, then with SMs from the other die. So the "die 0" stream can include a few die-1 SMs, which read die 0's weights remotely; vLLM only checks that each partition got its <code>total // 2</code> SMs.</li>
   <li>The SMs the split leaves over get a green context of their own. vLLM zeroes the MoE output there, overlapped with FC1 (<code>VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP</code>, on by default). With no remainder it uses an ordinary full-device stream.</li>
   <li>If anything is missing (the torch API, FlashInfer support, driver and <code>cuda.bindings</code> 13.4, a GPU with more than one domain), the function logs why and returns <code>None</code>, and every layer runs the ordinary full-width path.</li>
 </ul>
@@ -301,7 +316,11 @@ torch.cuda.execute_on_streams(localized_streams, _fc2_die, range(n))</code></pre
   <li><a href="https://github.com/pytorch/pytorch/blob/d820e1a6fcc0c1910cc4eda60d83f43f2df37100/torch/cuda/streams.py#L283"><code>execute_on_streams</code></a> (<a href="https://github.com/pytorch/pytorch/pull/199128">pytorch#199128</a>) records an event on the caller stream and makes each green stream wait on it. It then calls the callback with that stream current, records a done event per stream, and makes the caller stream wait on all of them. The host never blocks: the Python callbacks run one after another while their GPU work overlaps.</li>
   <li><b>FC1:</b> each die multiplies all of the activations by its own slice and writes disjoint columns of one shared output buffer. That buffer and the activations are ordinary allocations that both dies read; at decode sizes they are small next to the weights.</li>
   <li><b>FC2:</b> each die reads the whole FC1 output and its own slice of <code>w2</code>, contracts the full intermediate dimension and writes disjoint hidden columns. No reduction is needed. The join after FC1 is what lets FC2 read both halves.</li>
-  <li>The GEMM kernels take one extra argument, <code>domain_id</code>; the per-die streams decide where they run.</li>
+  <li><b>No kernel sees both weight pointers.</b> What each launch receives:
+<pre><code>launch 0, streams[0] (die-0 SMs):  A = x (shared)   B = slice 0 (die 0)   C = out.data_ptr()
+launch 1, streams[1] (die-1 SMs):  A = x (shared)   B = slice 1 (die 1)   C = out.data_ptr() + die 1's column offset</code></pre>
+  <code>B</code> is an ordinary dense <code>[E, N/2, K]</code> weight. <code>domain_id</code> is consumed on the host: it shifts the output pointer to that die's columns, sets the full output row stride, offsets the output scale factors by whole 64-column tiles, and selects a compile-time half-width variant. The kernel itself never knows which die it is on.</li>
+  <li>A kernel on a green-context stream gets only that partition's SMs, so FlashInfer scales <code>max_active_clusters</code> by <code>sm_count / total_sm</code>; that is what <code>localized_sm_count</code> is for. A persistent grid sized for the whole GPU would otherwise oversubscribe the partition.</li>
   <li>The fork/join is captured into vLLM's CUDA graphs. CUDA documents that captured kernel nodes keep their green-context SMs when the graph is replayed.</li>
 </ul>
 
@@ -331,20 +350,96 @@ torch.cuda.execute_on_streams(localized_streams, _fc2_die, range(n))</code></pre
 
 <h2 id="compare"><span class="num">07</span>Compared with DeepGEMM on B200 and with MI355X</h2>
 
-<p>The <a href="nps-locality.html">MI355X page</a> covers how <a href="nps-locality.html#deepgemm">DeepGEMM does this on B200</a> and <a href="nps-locality.html#vmm">why MI355X cannot map it the same way</a>. Side by side:</p>
+<p>The <a href="nps-locality.html">MI355X page</a> covers how <a href="nps-locality.html#deepgemm">DeepGEMM does this on B200</a> and <a href="nps-locality.html#vmm">why MI355X cannot map it the same way</a>. The part that differs most from vLLM is how DeepGEMM gets one pointer.</p>
+
+<h3>How DeepGEMM gets one tensor over two dies</h3>
+<p><code>deep_gemm.localize(w)</code> turns <code>(E, N, K)</code> into <code>(2, E, N/2, K)</code> through <a href="https://github.com/deepseek-ai/DeepGEMM/blob/057ca5964aae0879ff2e0eb71ee05a3cb0ba3df7/csrc/apis/locality_domain.hpp#L43-L56"><code>empty_per_domain</code></a>:</p>
+<pre><code>slice = align(numel * elem_size, granularity);
+ptr   = reserve(slice * 2);                                  // ONE cuMemAddressReserve
+for (d = 0; d &lt; 2; ++d)
+    map(ptr + d * slice, slice, d);                          // die-d memory, cuMemMap, cuMemSetAccess
+return torch::from_blob(ptr, {2, E, N/2, K}, {slice / elem, ...}, release, kCUDA);</code></pre>
+<ul>
+  <li>The tensor comes from <code>torch::from_blob</code> with a custom deleter. There is no <code>MemPool</code>, and PyTorch's allocator statistics do not see this memory.</li>
+  <li>The die-local pages come from <b>MLOPart</b>, not yet from CUDA 13.4: the 13.4 <code>cuMemCreate</code> call is a <code>TODO</code> in <a href="https://github.com/deepseek-ai/DeepGEMM/blob/057ca5964aae0879ff2e0eb71ee05a3cb0ba3df7/csrc/runtime/locality_domain.hpp#L34-L38"><code>csrc/runtime/locality_domain.hpp</code></a>. A child process starts an MPS server with <code>-mlopart</code>, which shows the GPU as two CUDA devices, one per die. It runs <code>cuMemCreate</code> on device <i>d</i> and sends the handle over a socket as a POSIX file descriptor; the main process imports it with <code>cuMemImportFromShareableHandle</code> and maps it (<a href="https://github.com/deepseek-ai/DeepGEMM/blob/057ca5964aae0879ff2e0eb71ee05a3cb0ba3df7/deep_gemm/utils/mlopart.py"><code>deep_gemm/utils/mlopart.py</code></a>).</li>
+  <li>The weight TMA descriptor is always 4D, <code>(K, N/2, domain, expert)</code>, over that one pointer (<a href="https://github.com/deepseek-ai/DeepGEMM/blob/057ca5964aae0879ff2e0eb71ee05a3cb0ba3df7/csrc/jit_kernels/impls/runtime_utils.hpp#L310-L323"><code>runtime_utils.hpp</code></a>). Unlocalized weights get the same descriptor over ordinary memory, so one kernel binary serves both. Each CTA reads <code>sm_locality_domains[%smid]</code> and claims N-tiles from its die's atomic queue (<a href="https://github.com/deepseek-ai/DeepGEMM/blob/057ca5964aae0879ff2e0eb71ee05a3cb0ba3df7/deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh#L344-L370"><code>scheduler/mega_moe.cuh</code></a>).</li>
+</ul>
+
+<p>Side by side:</p>
 
 <table>
   <tr><th></th><th>vLLM + PyTorch (Rubin)</th><th>DeepGEMM (B200)</th><th>MI355X (SPX + NPS1)</th></tr>
-  <tr><td>Die/IOD-local memory</td><td><code>LocalizedAllocator</code>: <code>cuMemCreate</code> on one domain, per pool segment</td><td>Physical memory created per die (MLOPart today, the CUDA 13.4 API)</td><td>None: every 2 MiB page alternates IODs every 8 KiB</td></tr>
-  <tr><td>Weight layout</td><td>Two separate tensors per weight, one per die</td><td>Two die-local allocations mapped back to back in one VA range; one pointer</td><td>One ordinary tensor; the kernel gathers its IOD's granules</td></tr>
-  <tr><td>Which SMs/CUs do a die's work</td><td>A green context per domain; CUDA picks the SMs</td><td>SM-to-die table probed at init; each CTA claims tasks from its die's queue</td><td><code>XCC_ID &gt;&gt; 2</code>, read from hardware</td></tr>
+  <tr><td>Tensors and pointers</td><td>Two tensors per weight; each launch gets one weight pointer</td><td>One tensor <code>(2, E, N/2, K)</code>, one pointer</td><td>One ordinary tensor</td></tr>
+  <tr><td>Die/IOD-local memory</td><td><code>LocalizedAllocator</code>: <code>cuMemCreate</code> on one domain, per pool segment</td><td>MLOPart: per-die memory imported over IPC (the CUDA 13.4 path is a <code>TODO</code>)</td><td>None: every 2 MiB page alternates IODs every 8 KiB</td></tr>
+  <tr><td>Address space</td><td>A reservation per pool segment; the two halves' addresses are unrelated</td><td>One reservation; die <i>d</i> at <code>ptr + d·slice</code></td><td>The kernel gathers its IOD's 8 KiB granules</td></tr>
+  <tr><td>Which SMs/CUs do a die's work</td><td>A green context per domain; CUDA picks the SMs</td><td>SM-to-die table probed at init; each CTA claims tasks from its die's queue</td><td>Each workgroup reads <code>XCC_ID &gt;&gt; 2</code> from hardware</td></tr>
+  <tr><td>Does the kernel know the die?</td><td>No: the host offsets the output pointer</td><td>Yes: a TMA coordinate and a per-die queue</td><td>Yes: from <code>XCC_ID</code></td></tr>
   <tr><td>Launches per GEMM</td><td>One per die, fork/join over two streams</td><td>One</td><td>One</td></tr>
   <tr><td>Imbalance</td><td>Equal partitions; backfill lends SMs across dies</td><td>Steals from the other die's queue when there are at least two waves</td><td>Not needed: 4 XCDs × 32 CUs per IOD</td></tr>
 </table>
 
+<p>The design follows from the kernel. DeepGEMM's Mega MoE is one persistent fused kernel (dispatch, both GEMMs, combine), so it cannot easily be split into per-die launches and must know the die inside. FlashInfer's path is two ordinary grouped GEMMs, so launching each once per die is easy and needs no SM probe.</p>
+
 <p>The vLLM route keeps the kernels nearly unchanged and moves the rest into the framework: PyTorch decides where bytes live and which SMs run, and the same grouped GEMM runs once per die. A ROCm port would need both primitives from HIP. The first, physical memory that sits on one IOD, is what SPX + NPS1 does not have (<a href="nps-locality.html#vmm">section 07 of the MI355X page</a>).</p>
 
-<h2 id="caveats"><span class="num">08</span>Requirements and caveats</h2>
+<h2 id="combine"><span class="num">08</span>One tensor and one stream, without green contexts</h2>
+
+<p>Can you take vLLM's die-local allocations, present them as one DeepGEMM-style tensor, and run one kernel on one ordinary stream? On a GPU with CUDA 13.4 locality domains, yes, with two conditions: allocate the tensor whole rather than remapping pool tensors, and make the kernel schedule its work per die. The code below is an untested sketch.</p>
+
+<h3>The tensor: DeepGEMM's layout with the CUDA 13.4 location type</h3>
+<pre><code>prop(d): CUmemAllocationProp, type PINNED, location.type = CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN,
+         location.localized.deviceId = dev, location.localized.localityDomainId = d
+
+gran  = cuMemGetAllocationGranularity(prop(0), CU_MEM_ALLOC_GRANULARITY_MINIMUM)
+slice = round_up(nbytes_per_half, gran)
+ptr   = cuMemAddressReserve(2 * slice, gran, 0, 0)          # one reservation
+for d in (0, 1):
+    h[d] = cuMemCreate(slice, prop(d), 0)                   # physical pages on domain d
+    cuMemMap(ptr + d * slice, slice, 0, h[d], 0)
+cuMemSetAccess(ptr, 2 * slice, [READWRITE for the device], 1)
+
+class Holder:                       # owns the mapping; synchronize, unmap and release in __del__
+    @property
+    def __cuda_array_interface__(self):
+        return {"shape": (2 * slice,), "typestr": "|u1", "data": (ptr, False),
+                "version": 3, "strides": None, "stream": None}
+
+flat = torch.as_tensor(holder, device="cuda").view(dtype)  # zero-copy; the tensor keeps holder alive
+w = flat.as_strided((2, E, N // 2, K), (slice // elem, *contiguous_strides((E, N // 2, K))))
+w.copy_(w_full.unflatten(1, (2, -1)).movedim(1, 0))        # same layout as deep_gemm.localize(w_full, dim=1)</code></pre>
+<ul>
+  <li>The calls are the ones <code>LocalizedAllocator</code> makes, through <code>cuda.bindings</code>, but with one reservation for both halves. A small C++ extension calling <code>torch::from_blob</code> works as well, as in DeepGEMM.</li>
+  <li><b>Why not remap two tensors from vLLM-style pools?</b> <code>cuMemRetainAllocationHandle(t.data_ptr())</code> does return the physical handle for any address in a mapping. But <code>cuMemMap</code>'s offset "currently must be zero" (<a href="https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__VA.html">driver API</a>), so a physical allocation can be mapped only whole, from its first byte. A <code>MemPool</code> tensor is a sub-allocation inside a pool segment, so the remap works only by accident. The docs also do not say outright that one handle may be mapped at two addresses.</li>
+</ul>
+
+<h3>The kernel: one launch has to schedule per die</h3>
+<p>The memory needs no green context: the allocator only decides where bytes live, and every SM may read both halves. But on an ordinary stream the hardware decides which SM runs which <code>blockIdx</code>. With a static <code>blockIdx</code>-to-tile mapping, about half the CTAs read the far half, so expect no gain. The kernel has to do what DeepGEMM's does:</p>
+<pre><code>// grid = one CTA per SM (persistent), on one ordinary stream
+unsigned smid; asm volatile("mov.u32 %0, %%smid;" : "=r"(smid));
+int die = sm_die[smid];                                    // table built once at init
+while (claim_tile(&amp;next_tile[die], &amp;t)) {                 // per-die atomic counter: tiles in die's N half
+    const W* b = w + die * slice_elems + tile_offset(t);   // the local half of the one tensor
+    ...
+}
+// optional: steal from next_tile[die ^ 1] once the local queue is empty and enough work remains</code></pre>
+<ul>
+  <li>Reset the per-die counters every launch (a memset on the same stream, or a self-reset), which keeps them correct under CUDA graphs.</li>
+  <li>Size <code>sm_die</code> with <code>%nsmid</code>: <code>%smid</code> values are not guaranteed to be contiguous.</li>
+  <li>The dies may not get equal SM counts. DeepGEMM relabels whole TPCs to 50/50 and steals only when there are at least two waves of work.</li>
+</ul>
+
+<h3>Building <code>sm_die</code></h3>
+<ul>
+  <li><b>Latency probe, no green context at all.</b> DeepGEMM's way: pointer-chase each half from every SM and assign each SM to the faster half. Accept only clear, TPC-consistent results. The split tensor itself can serve as the probe buffer.</li>
+  <li><b>Green contexts once at init, as an oracle.</b> On domain <i>d</i>'s green-context stream, launch a kernel that writes <code>sm_die[%smid] = d</code>, then drop the contexts. Without supplemental SMs this labels only each domain's guaranteed SMs (about 200 of 212 on Rubin): mark the rest as either-die, or request them with <code>cudaDevSmResourceGroupLocalityDomainSupplementalSms</code> through <code>cuda.bindings</code>, since PyTorch's <code>split</code> does not expose that flag.</li>
+</ul>
+
+<div class="callout">
+  <span class="label">On MI355X</span>
+  <p>The tensor step does not exist in SPX + NPS1: HIP cannot place physical memory on one IOD, and every 2 MiB page alternates IODs every 8 KiB (<a href="nps-locality.html#vmm">section 07 of the MI355X page</a>). The kernel step carries over as is: one launch, each workgroup's IOD from <code>XCC_ID &gt;&gt; 2</code>, per-IOD queues, with the in-kernel granule gather in place of a split address range.</p>
+</div>
+
+<h2 id="caveats"><span class="num">09</span>Requirements and caveats</h2>
 
 <div class="grid2">
   <div class="card"><h4>Opt in</h4><p><code>VLLM_USE_LOCALITY_DOMAINS=1</code> with <code>--moe-backend flashinfer_cutedsl</code>. Off by default.</p></div>
@@ -358,9 +453,9 @@ torch.cuda.execute_on_streams(localized_streams, _fc2_die, range(n))</code></pre
 </div>
 
 <footer>
-  <p>Sources: vLLM <a href="https://github.com/vllm-project/vllm/pull/61685">#61685</a> at <a href="https://github.com/vllm-project/vllm/tree/89e860de0073bb9b5ed6af2a42817e2edb99b606"><code>89e860de</code></a> (<code>vllm/distributed/localization.py</code>, <code>vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py</code>, <code>vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_moe.py</code>, <code>vllm/v1/worker/gpu_worker.py</code>); PyTorch <a href="https://github.com/pytorch/pytorch/pull/199127">#199127</a>, <a href="https://github.com/pytorch/pytorch/pull/199128">#199128</a> and <a href="https://github.com/pytorch/pytorch/pull/198279">#198279</a> at <a href="https://github.com/pytorch/pytorch/tree/d820e1a6fcc0c1910cc4eda60d83f43f2df37100"><code>d820e1a6</code></a> (<code>torch/cuda/memory.py</code>, <code>torch/cuda/streams.py</code>, <code>docs/source/cuda.md</code>); FlashInfer <a href="https://github.com/flashinfer-ai/flashinfer/pull/5276">#5276</a> and <a href="https://github.com/flashinfer-ai/flashinfer/pull/6488">#6488</a> at <a href="https://github.com/flashinfer-ai/flashinfer/tree/82866b5b0075530c906e7ea06a4a7d429950c106"><code>82866b5b</code></a> (<code>flashinfer/fused_moe/cute_dsl/fused_moe.py</code>).</p>
-  <p>Background: vLLM blog, <a href="https://vllm.ai/blog/2026-10-09-vera-rubin-preview">vLLM Support for NVIDIA Vera Rubin NVL72</a> and <a href="https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin">DeepSeek-V4.1-Flash on Vera Rubin NVL72</a>; NVIDIA <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/locality-domains.html">CUDA Programming Guide: Locality Domains</a> and <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/green-contexts.html">Green Contexts</a>.</p>
-  <p>Read from the sources in November 2026; nothing here was measured on Rubin by us. Timings are from vllm#61685 and the vLLM blog. See also <a href="nps-locality.html">IOD locality on MI355X</a> and the <a href="index.html">notes index</a>.</p>
+  <p>Sources: vLLM <a href="https://github.com/vllm-project/vllm/pull/61685">#61685</a> at <a href="https://github.com/vllm-project/vllm/tree/89e860de0073bb9b5ed6af2a42817e2edb99b606"><code>89e860de</code></a> (<code>vllm/distributed/localization.py</code>, <code>vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py</code>, <code>vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_moe.py</code>, <code>vllm/v1/worker/gpu_worker.py</code>); PyTorch <a href="https://github.com/pytorch/pytorch/pull/199127">#199127</a>, <a href="https://github.com/pytorch/pytorch/pull/199128">#199128</a> and <a href="https://github.com/pytorch/pytorch/pull/198279">#198279</a> at <a href="https://github.com/pytorch/pytorch/tree/d820e1a6fcc0c1910cc4eda60d83f43f2df37100"><code>d820e1a6</code></a> (<code>torch/cuda/memory.py</code>, <code>torch/cuda/streams.py</code>, <code>docs/source/cuda.md</code>); FlashInfer <a href="https://github.com/flashinfer-ai/flashinfer/pull/5276">#5276</a> and <a href="https://github.com/flashinfer-ai/flashinfer/pull/6488">#6488</a> at <a href="https://github.com/flashinfer-ai/flashinfer/tree/82866b5b0075530c906e7ea06a4a7d429950c106"><code>82866b5b</code></a> (<code>flashinfer/fused_moe/cute_dsl/fused_moe.py</code>, <code>blockscaled_contiguous_gather_grouped_gemm_act_fusion.py</code>, <code>blockscaled_contiguous_grouped_gemm_finalize_fusion.py</code>); PyTorch <code>torch/cuda/green_contexts.py</code>; DeepGEMM <a href="https://github.com/deepseek-ai/DeepGEMM/pull/462">#462</a> at <a href="https://github.com/deepseek-ai/DeepGEMM/tree/057ca5964aae0879ff2e0eb71ee05a3cb0ba3df7"><code>057ca596</code></a> (<code>csrc/apis/locality_domain.hpp</code>, <code>csrc/runtime/locality_domain.hpp</code>, <code>deep_gemm/utils/mlopart.py</code>, <code>csrc/jit_kernels/impls/runtime_utils.hpp</code>, <code>deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh</code>).</p>
+  <p>Background: vLLM blog, <a href="https://vllm.ai/blog/2026-10-09-vera-rubin-preview">vLLM Support for NVIDIA Vera Rubin NVL72</a> and <a href="https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin">DeepSeek-V4.1-Flash on Vera Rubin NVL72</a>; NVIDIA <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/locality-domains.html">CUDA Programming Guide: Locality Domains</a> and <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/green-contexts.html">Green Contexts</a>; <a href="https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__VA.html">CUDA Driver API: Virtual Memory Management</a>.</p>
+  <p>Read from the sources in November 2026; nothing here was measured on Rubin by us. Timings are from vllm#61685 and the vLLM blog. The section-08 code is an untested sketch. See also <a href="nps-locality.html">IOD locality on MI355X</a> and the <a href="index.html">notes index</a>.</p>
 </footer>
 
 </div>
