@@ -121,7 +121,7 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
     <p>How vLLM puts each die's share of the MoE weights in that die's HBM: PyTorch's <code>LocalizedAllocator</code> over CUDA 13.4 virtual memory, a <code>MemPool</code> and green-context stream per die, and a fork/join per GEMM. Also: how DeepGEMM gets one pointer over both dies, and how to combine the two with one stream and no green context. Sources: <a href="https://github.com/vllm-project/vllm/pull/61685">vllm#61685</a>, <a href="https://github.com/pytorch/pytorch/pull/199127">pytorch#199127</a>.</p>
   <div class="card">
     <h4><a href="instinct-timeline.html">AMD Instinct timeline: MI6 to MI455X</a></h4>
-    <p>Every Instinct GPU from June 2017 to November 2026 on one timeline, by architecture and gfx target, with how memory (4 GB to 432 GB), bandwidth and FP16 grew, and what each generation changed. Specs from AMD's product pages and ROCm.</p>
+    <p>Every Instinct GPU from June 2017 to November 2026 on one timeline, starting from the Radeon R9 Fury X, AMD's first HBM GPU, with NVIDIA's HBM datacenter GPUs (P100 to Rubin) on the same axis. Also by architecture and gfx target, how memory, bandwidth and FP16 grew, and what each generation changed.</p>
   </div>
 </div>
 
