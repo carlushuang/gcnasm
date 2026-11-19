@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMD Instinct timeline: MI6 to MI455X</title>
+<meta name="description" content="A timeline of AMD Instinct datacenter GPUs from MI6, MI8 and MI25 (2017) to MI455X and MI450X (2026): architecture, gfx target, memory, bandwidth and peak throughput per part.">
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #5b6672;
+  --line: #d8dee4;
+  --soft: #f6f8fa;
+  --accent: #b3122b;
+  --accent-soft: #fdf0f2;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --code-bg: #f6f8fa;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --line: #2b313a;
+    --soft: #161b22;
+    --accent: #ff7b8a;
+    --accent-soft: #21161a;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --code-bg: #161b22;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 900px; margin: 0 auto; padding: 0 20px 96px; }
+header.hero { border-bottom: 1px solid var(--line); background: var(--soft); padding: 48px 0 34px; margin-bottom: 40px; }
+header.hero .wrap { padding-bottom: 0; }
+h1 { font-size: 34px; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.02em; }
+.sub { color: var(--muted); font-size: 18px; margin: 0 0 20px; max-width: 62ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  font: 500 12px/1 var(--mono);
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--bg); color: var(--muted); text-decoration: none;
+}
+.chip a, a.chip:hover { color: var(--accent); }
+.chip.hot { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+h2 {
+  font-size: 24px; margin: 52px 0 14px; letter-spacing: -0.01em;
+  padding-top: 10px; border-top: 1px solid var(--line);
+}
+h2 .num { color: var(--accent); font: 600 14px/1 var(--mono); display: block; margin-bottom: 6px; }
+h3 { font-size: 17px; margin: 30px 0 8px; }
+p { margin: 0 0 14px; }
+ul, ol { margin: 0 0 14px; padding-left: 22px; }
+li { margin-bottom: 6px; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+code { font: 13px/1.5 var(--mono); background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 0 0 16px; }
+pre code { background: none; border: 0; padding: 0; font-size: 12.5px; line-height: 1.55; }
+.callout { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 8px 8px 0; padding: 14px 18px; margin: 0 0 20px; }
+.callout p:last-child { margin-bottom: 0; }
+.callout .label { font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); display: block; margin-bottom: 8px; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 18px; font-size: 14.5px; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+th { background: var(--soft); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ok { color: var(--ok); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+figure { margin: 24px 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
+.svgbox { border: 1px solid var(--line); border-radius: 8px; background: var(--soft); padding: 18px; }
+svg text { font-family: var(--mono); font-size: 11px; fill: var(--fg); }
+svg text.t { font-size: 12px; font-weight: 600; }
+svg text.s { fill: var(--muted); font-size: 10px; }
+svg rect.box { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+svg rect.hl { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+svg line, svg path.ln { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+svg path.acc { stroke: var(--accent); stroke-width: 1.4; fill: none; }
+.toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; }
+.toc ol { margin: 0; padding-left: 20px; }
+.toc li { margin-bottom: 3px; }
+footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px; color: var(--muted); font-size: 14px; }
+.small { font-size: 13.5px; color: var(--muted); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } h1 { font-size: 27px; } }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: var(--bg); }
+.card h4 { margin: 0 0 6px; font-size: 14px; }
+.card p { margin: 0; font-size: 14px; color: var(--muted); }
+
+:root { --mark: #b3122b; }
+@media (prefers-color-scheme: dark) { :root { --mark: #f05a66; } }
+svg line.grid { stroke: var(--line); stroke-width: 1; }
+svg line.base { stroke: var(--muted); stroke-width: 1; opacity: .7; }
+svg circle.mk { fill: var(--mark); stroke: var(--soft); stroke-width: 2; }
+svg circle.mk.ann { fill: var(--soft); stroke: var(--mark); stroke-width: 2; }
+svg circle.hit { fill: transparent; stroke: none; }
+svg g.pt { outline: none; }
+svg g.pt:hover circle.mk, svg g.pt:focus-visible circle.mk { stroke: var(--fg); }
+svg text.lt { font-size: 12px; font-weight: 600; }
+svg text.pl { font-size: 11px; }
+.svgbox { position: relative; }
+.svgbox + .svgbox { margin-top: 14px; }
+.tip { position: absolute; z-index: 2; display: none; pointer-events: none; max-width: 340px;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px 10px; font-size: 12.5px; line-height: 1.45; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+.tip .tt { font-weight: 600; font-size: 13.5px; }
+.tip .ts { color: var(--muted); margin-bottom: 4px; }
+.tip .tr { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tip .tr.wrap { white-space: normal; }
+table td, table th { white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>AMD Instinct timeline: MI6 to MI455X</h1>
+    <p class="sub">Every AMD Instinct datacenter GPU from the first three Radeon Instinct cards in June 2017 to the CDNA 5 parts of 2026, by architecture and gfx target, with how memory, bandwidth and peak throughput grew.</p>
+    <div class="chips">
+      <span class="chip hot">19 parts · 2017–2026</span>
+      <span class="chip">GCN 3 → CDNA 5</span>
+      <span class="chip">gfx803 → gfx950</span>
+      <span class="chip">4 GB → 432 GB</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="callout">
+  <span class="label">In one paragraph</span>
+  <p>AMD's datacenter GPUs started as Radeon Instinct in June 2017 with three cards on three architectures: MI8 (Fiji), MI6 (Polaris) and MI25 (Vega). MI50 and MI60 (Vega 20, 7 nm) followed in November 2018. MI100 (November 2020) began CDNA, a compute-only line with matrix cores, under the AMD Instinct name. CDNA 2 put two dies in one package (MI250X); CDNA 3 moved to chiplets with a 256 MiB Infinity Cache and FP8 (MI300X, and the MI300A with Zen 4 cores); CDNA 4 added the MX formats and 160 KiB of LDS (MI355X); CDNA 5 moves to HBM4 and the Helios rack (MI455X, July 2026). Over nine years, memory per GPU grew from 4 GB to 432 GB, bandwidth from 0.224 to 23.3 TB/s, and dense FP16 from 5.7 TFLOPS to 5 PFLOPS.</p>
+</div>
+<div class="callout">
+  <span class="label">About the names</span>
+  <p>There is no MI10. The first three names roughly track peak FP16 TFLOPS: MI6 5.7, MI8 8.2, MI25 24.6. From MI100 on, the number marks the series, and the letters mark the variant: X for the flagship OAM part, A for the APU, P for the PCIe card.</p>
+</div>
+
+<div class="toc">
+  <ol>
+    <li><a href="#timeline">The timeline</a></li>
+    <li><a href="#growth">What grew</a></li>
+    <li><a href="#gens">What each generation changed</a></li>
+    <li><a href="#specs">Every part</a></li>
+  </ol>
+</div>
+
+<h2 id="timeline"><span class="num">01</span>The timeline</h2>
+
+<figure>
+<div class="svgbox"><svg viewBox="0 0 860 458" role="group" aria-label="Timeline of AMD Instinct GPUs by architecture, 2017 to 2026">
+<text class="s" x="16" y="20">generation · gfx · process</text>
+<circle class="mk" cx="206" cy="16" r="5"/><text x="216" y="20">launched (AMD launch date)</text>
+<circle class="mk ann" cx="426" cy="16" r="5"/><text x="436" y="20">announced, not launched yet</text>
+<line class="grid" x1="200" y1="34" x2="200" y2="430"/>
+<text class="s" x="200" y="447" text-anchor="middle">2017</text>
+<line class="grid" x1="263.4" y1="34" x2="263.4" y2="430"/>
+<text class="s" x="263.4" y="447" text-anchor="middle">2018</text>
+<line class="grid" x1="326.9" y1="34" x2="326.9" y2="430"/>
+<text class="s" x="326.9" y="447" text-anchor="middle">2019</text>
+<line class="grid" x1="390.3" y1="34" x2="390.3" y2="430"/>
+<text class="s" x="390.3" y="447" text-anchor="middle">2020</text>
+<line class="grid" x1="453.9" y1="34" x2="453.9" y2="430"/>
+<text class="s" x="453.9" y="447" text-anchor="middle">2021</text>
+<line class="grid" x1="517.4" y1="34" x2="517.4" y2="430"/>
+<text class="s" x="517.4" y="447" text-anchor="middle">2022</text>
+<line class="grid" x1="580.8" y1="34" x2="580.8" y2="430"/>
+<text class="s" x="580.8" y="447" text-anchor="middle">2023</text>
+<line class="grid" x1="644.3" y1="34" x2="644.3" y2="430"/>
+<text class="s" x="644.3" y="447" text-anchor="middle">2024</text>
+<line class="grid" x1="707.9" y1="34" x2="707.9" y2="430"/>
+<text class="s" x="707.9" y="447" text-anchor="middle">2025</text>
+<line class="grid" x1="771.3" y1="34" x2="771.3" y2="430"/>
+<text class="s" x="771.3" y="447" text-anchor="middle">2026</text>
+<line class="grid" x1="834.7" y1="34" x2="834.7" y2="430"/>
+<text class="s" x="834.7" y="447" text-anchor="middle">2027</text>
+<text class="lt" x="16" y="54">GCN 3 · Fiji</text>
+<text class="s" x="16" y="68">gfx803 · TSMC 28 nm</text>
+<line class="grid" x1="16" y1="78" x2="845" y2="78"/>
+<text class="lt" x="16" y="98">GCN 4 · Polaris 10</text>
+<text class="s" x="16" y="112">gfx803 · GF 14 nm</text>
+<line class="grid" x1="16" y1="122" x2="845" y2="122"/>
+<text class="lt" x="16" y="142">GCN 5 · Vega 10</text>
+<text class="s" x="16" y="156">gfx900 · GF 14 nm</text>
+<line class="grid" x1="16" y1="166" x2="845" y2="166"/>
+<text class="lt" x="16" y="186">GCN 5.1 · Vega 20</text>
+<text class="s" x="16" y="200">gfx906 · TSMC 7 nm</text>
+<line class="grid" x1="16" y1="210" x2="845" y2="210"/>
+<text class="lt" x="16" y="230">CDNA 1 · Arcturus</text>
+<text class="s" x="16" y="244">gfx908 · TSMC 7 nm</text>
+<line class="grid" x1="16" y1="254" x2="845" y2="254"/>
+<text class="lt" x="16" y="274">CDNA 2 · Aldebaran</text>
+<text class="s" x="16" y="288">gfx90a · TSMC 6 nm</text>
+<line class="grid" x1="16" y1="298" x2="845" y2="298"/>
+<text class="lt" x="16" y="318">CDNA 3</text>
+<text class="s" x="16" y="332">gfx942 · TSMC 5 + 6 nm</text>
+<line class="grid" x1="16" y1="342" x2="845" y2="342"/>
+<text class="lt" x="16" y="362">CDNA 4</text>
+<text class="s" x="16" y="376">gfx950 · TSMC 3 + 6 nm</text>
+<line class="grid" x1="16" y1="386" x2="845" y2="386"/>
+<text class="lt" x="16" y="406">CDNA 5</text>
+<text class="s" x="16" y="420">gfx unlisted · TSMC 2 + 3 nm</text>
+<line class="base" x1="16" y1="430" x2="845" y2="430"/>
+<g class="pt" tabindex="0" role="img" aria-label="MI8, launched 20 Jun 2017, GCN 3 · Fiji" data-tip="t-MI8"><circle class="hit" cx="229.5" cy="56" r="12"/><circle class="mk" cx="229.5" cy="56" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI6, launched 20 Jun 2017, GCN 4 · Polaris 10" data-tip="t-MI6"><circle class="hit" cx="229.5" cy="100" r="12"/><circle class="mk" cx="229.5" cy="100" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI25, launched 20 Jun 2017, GCN 5 · Vega 10" data-tip="t-MI25"><circle class="hit" cx="229.5" cy="144" r="12"/><circle class="mk" cx="229.5" cy="144" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI50 · MI60, launched 18 Nov 2018, GCN 5.1 · Vega 20" data-tip="t-MI50"><circle class="hit" cx="319.2" cy="188" r="12"/><circle class="mk" cx="319.2" cy="188" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI100, launched 16 Nov 2020, CDNA 1 · Arcturus" data-tip="t-MI100"><circle class="hit" cx="445.9" cy="232" r="12"/><circle class="mk" cx="445.9" cy="232" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI250 · MI250X, launched 8 Nov 2021, CDNA 2 · Aldebaran" data-tip="t-MI250"><circle class="hit" cx="508" cy="276" r="12"/><circle class="mk" cx="508" cy="276" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI210, launched 22 Mar 2022, CDNA 2 · Aldebaran" data-tip="t-MI210"><circle class="hit" cx="531.3" cy="276" r="12"/><circle class="mk" cx="531.3" cy="276" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI300A · MI300X, launched 6 Dec 2023, CDNA 3" data-tip="t-MI300A"><circle class="hit" cx="639.7" cy="320" r="12"/><circle class="mk" cx="639.7" cy="320" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI325X, launched 10 Oct 2024, CDNA 3" data-tip="t-MI325X"><circle class="hit" cx="693.4" cy="320" r="12"/><circle class="mk" cx="693.4" cy="320" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350X · MI355X, launched 12 Jun 2025, CDNA 4" data-tip="t-MI350X"><circle class="hit" cx="736" cy="364" r="12"/><circle class="mk" cx="736" cy="364" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI430X, announced 19 Nov 2025, CDNA 5" data-tip="t-MI430X"><circle class="hit" cx="763.8" cy="408" r="12"/><circle class="mk ann" cx="763.8" cy="408" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI440X, announced 5 Jan 2026, CDNA 5" data-tip="t-MI440X"><circle class="hit" cx="772" cy="408" r="12"/><circle class="mk ann" cx="772" cy="408" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350P, launched 7 May 2026, CDNA 4" data-tip="t-MI350P"><circle class="hit" cx="793.2" cy="364" r="12"/><circle class="mk" cx="793.2" cy="364" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI455X, launched 23 Jul 2026, CDNA 5" data-tip="t-MI455X"><circle class="hit" cx="806.6" cy="408" r="12"/><circle class="mk" cx="806.6" cy="408" r="5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI450X, launched 12 Nov 2026, CDNA 5" data-tip="t-MI450X"><circle class="hit" cx="826.1" cy="408" r="12"/><circle class="mk" cx="826.1" cy="408" r="5"/></g>
+<text class="pl" x="239.5" y="60">MI8</text>
+<text class="pl" x="239.5" y="104">MI6</text>
+<text class="pl" x="239.5" y="148">MI25</text>
+<text class="pl" x="329.2" y="192">MI50 · MI60</text>
+<text class="pl" x="455.9" y="236">MI100</text>
+<text class="pl" x="498" y="280" text-anchor="end">MI250 · MI250X</text>
+<text class="pl" x="541.3" y="280">MI210</text>
+<text class="pl" x="629.7" y="324" text-anchor="end">MI300A · MI300X</text>
+<text class="pl" x="703.4" y="324">MI325X</text>
+<text class="pl" x="726" y="368" text-anchor="end">MI350X · MI355X</text>
+<text class="pl" x="753.8" y="412" text-anchor="end">MI430X</text>
+<text class="pl" x="772" y="427" text-anchor="middle">MI440X</text>
+<text class="pl" x="803.2" y="368">MI350P</text>
+<text class="pl" x="806.6" y="398" text-anchor="middle">MI455X</text>
+<text class="pl" x="826.1" y="427" text-anchor="middle">MI450X</text>
+</svg></div>
+<figcaption>One row per architecture, one dot per launch; parts launched the same day share a dot. Hover or tab to a dot for its specs. Launched parts sit at AMD's launch date, announced parts at their announcement. All values are also in the <a href="#specs">table</a>.</figcaption>
+</figure>
+
+<h2 id="growth"><span class="num">02</span>What grew</h2>
+
+<p>The same time axis, one dot per launched part, on log scales. Announced parts (MI430X, MI440X) are left out.</p>
+
+<figure>
+<div class="svgbox"><svg viewBox="0 0 860 192" role="group" aria-label="Memory per GPU per GPU over time, log scale">
+<text class="t" x="16" y="18">Memory per GPU</text>
+<text class="s" x="16" y="34">4 GB (MI8, 2017) to 432 GB (MI455X, 2026): 108x</text>
+<line class="grid" x1="200" y1="152.7" x2="845" y2="152.7"/>
+<text class="s" x="192" y="155.7" text-anchor="end">4 GB</text>
+<line class="grid" x1="200" y1="126" x2="845" y2="126"/>
+<text class="s" x="192" y="129" text-anchor="end">16 GB</text>
+<line class="grid" x1="200" y1="99.3" x2="845" y2="99.3"/>
+<text class="s" x="192" y="102.3" text-anchor="end">64 GB</text>
+<line class="grid" x1="200" y1="72.7" x2="845" y2="72.7"/>
+<text class="s" x="192" y="75.7" text-anchor="end">256 GB</text>
+<line class="grid" x1="200" y1="46" x2="845" y2="46"/>
+<text class="s" x="192" y="49" text-anchor="end">1 TB</text>
+<line class="grid" x1="200" y1="46" x2="200" y2="166"/>
+<text class="s" x="200" y="183" text-anchor="middle">2017</text>
+<line class="grid" x1="263.4" y1="46" x2="263.4" y2="166"/>
+<text class="s" x="263.4" y="183" text-anchor="middle">2018</text>
+<line class="grid" x1="326.9" y1="46" x2="326.9" y2="166"/>
+<text class="s" x="326.9" y="183" text-anchor="middle">2019</text>
+<line class="grid" x1="390.3" y1="46" x2="390.3" y2="166"/>
+<text class="s" x="390.3" y="183" text-anchor="middle">2020</text>
+<line class="grid" x1="453.9" y1="46" x2="453.9" y2="166"/>
+<text class="s" x="453.9" y="183" text-anchor="middle">2021</text>
+<line class="grid" x1="517.4" y1="46" x2="517.4" y2="166"/>
+<text class="s" x="517.4" y="183" text-anchor="middle">2022</text>
+<line class="grid" x1="580.8" y1="46" x2="580.8" y2="166"/>
+<text class="s" x="580.8" y="183" text-anchor="middle">2023</text>
+<line class="grid" x1="644.3" y1="46" x2="644.3" y2="166"/>
+<text class="s" x="644.3" y="183" text-anchor="middle">2024</text>
+<line class="grid" x1="707.9" y1="46" x2="707.9" y2="166"/>
+<text class="s" x="707.9" y="183" text-anchor="middle">2025</text>
+<line class="grid" x1="771.3" y1="46" x2="771.3" y2="166"/>
+<text class="s" x="771.3" y="183" text-anchor="middle">2026</text>
+<line class="grid" x1="834.7" y1="46" x2="834.7" y2="166"/>
+<text class="s" x="834.7" y="183" text-anchor="middle">2027</text>
+<line class="base" x1="200" y1="166" x2="845" y2="166"/>
+<g class="pt" tabindex="0" role="img" aria-label="MI8, Jun 2017: 4 GB" data-tip="mem_gb-MI8"><circle class="hit" cx="229.5" cy="152.7" r="12"/><circle class="mk" cx="229.5" cy="152.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI6 · MI25, Jun 2017: 16 GB" data-tip="mem_gb-MI6"><circle class="hit" cx="229.5" cy="126" r="12"/><circle class="mk" cx="229.5" cy="126" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI50, Nov 2018: 16 GB" data-tip="mem_gb-MI50"><circle class="hit" cx="319.2" cy="126" r="12"/><circle class="mk" cx="319.2" cy="126" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI60, Nov 2018: 32 GB" data-tip="mem_gb-MI60"><circle class="hit" cx="319.2" cy="112.7" r="12"/><circle class="mk" cx="319.2" cy="112.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI100, Nov 2020: 32 GB" data-tip="mem_gb-MI100"><circle class="hit" cx="445.9" cy="112.7" r="12"/><circle class="mk" cx="445.9" cy="112.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI250 · MI250X, Nov 2021: 128 GB" data-tip="mem_gb-MI250"><circle class="hit" cx="508" cy="86" r="12"/><circle class="mk" cx="508" cy="86" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI210, Mar 2022: 64 GB" data-tip="mem_gb-MI210"><circle class="hit" cx="531.3" cy="99.3" r="12"/><circle class="mk" cx="531.3" cy="99.3" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI300A, Dec 2023: 128 GB" data-tip="mem_gb-MI300A"><circle class="hit" cx="639.7" cy="86" r="12"/><circle class="mk" cx="639.7" cy="86" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI300X, Dec 2023: 192 GB" data-tip="mem_gb-MI300X"><circle class="hit" cx="639.7" cy="78.2" r="12"/><circle class="mk" cx="639.7" cy="78.2" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI325X, Oct 2024: 256 GB" data-tip="mem_gb-MI325X"><circle class="hit" cx="693.4" cy="72.7" r="12"/><circle class="mk" cx="693.4" cy="72.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350X · MI355X, Jun 2025: 288 GB" data-tip="mem_gb-MI350X"><circle class="hit" cx="736" cy="70.4" r="12"/><circle class="mk" cx="736" cy="70.4" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350P, May 2026: 144 GB" data-tip="mem_gb-MI350P"><circle class="hit" cx="793.2" cy="83.7" r="12"/><circle class="mk" cx="793.2" cy="83.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI455X, Jul 2026: 432 GB" data-tip="mem_gb-MI455X"><circle class="hit" cx="806.6" cy="62.6" r="12"/><circle class="mk" cx="806.6" cy="62.6" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI450X, Nov 2026: 288 GB" data-tip="mem_gb-MI450X"><circle class="hit" cx="826.1" cy="70.4" r="12"/><circle class="mk" cx="826.1" cy="70.4" r="4.5"/></g>
+<text class="pl" x="239.5" y="156.7">MI8 · 4 GB</text>
+<text class="pl" x="812.6" y="52.6" text-anchor="end">MI455X · 432 GB</text>
+</svg></div>
+<div class="svgbox"><svg viewBox="0 0 860 192" role="group" aria-label="Memory bandwidth per GPU per GPU over time, log scale">
+<text class="t" x="16" y="18">Memory bandwidth per GPU</text>
+<text class="s" x="16" y="34">0.224 TB/s (MI6, 2017) to 23.3 TB/s (MI455X, 2026): 104x</text>
+<line class="grid" x1="200" y1="155" x2="845" y2="155"/>
+<text class="s" x="192" y="158" text-anchor="end">0.25 TB/s</text>
+<line class="grid" x1="200" y1="125.2" x2="845" y2="125.2"/>
+<text class="s" x="192" y="128.2" text-anchor="end">1 TB/s</text>
+<line class="grid" x1="200" y1="95.5" x2="845" y2="95.5"/>
+<text class="s" x="192" y="98.5" text-anchor="end">4 TB/s</text>
+<line class="grid" x1="200" y1="65.7" x2="845" y2="65.7"/>
+<text class="s" x="192" y="68.7" text-anchor="end">16 TB/s</text>
+<line class="grid" x1="200" y1="46" x2="200" y2="166"/>
+<text class="s" x="200" y="183" text-anchor="middle">2017</text>
+<line class="grid" x1="263.4" y1="46" x2="263.4" y2="166"/>
+<text class="s" x="263.4" y="183" text-anchor="middle">2018</text>
+<line class="grid" x1="326.9" y1="46" x2="326.9" y2="166"/>
+<text class="s" x="326.9" y="183" text-anchor="middle">2019</text>
+<line class="grid" x1="390.3" y1="46" x2="390.3" y2="166"/>
+<text class="s" x="390.3" y="183" text-anchor="middle">2020</text>
+<line class="grid" x1="453.9" y1="46" x2="453.9" y2="166"/>
+<text class="s" x="453.9" y="183" text-anchor="middle">2021</text>
+<line class="grid" x1="517.4" y1="46" x2="517.4" y2="166"/>
+<text class="s" x="517.4" y="183" text-anchor="middle">2022</text>
+<line class="grid" x1="580.8" y1="46" x2="580.8" y2="166"/>
+<text class="s" x="580.8" y="183" text-anchor="middle">2023</text>
+<line class="grid" x1="644.3" y1="46" x2="644.3" y2="166"/>
+<text class="s" x="644.3" y="183" text-anchor="middle">2024</text>
+<line class="grid" x1="707.9" y1="46" x2="707.9" y2="166"/>
+<text class="s" x="707.9" y="183" text-anchor="middle">2025</text>
+<line class="grid" x1="771.3" y1="46" x2="771.3" y2="166"/>
+<text class="s" x="771.3" y="183" text-anchor="middle">2026</text>
+<line class="grid" x1="834.7" y1="46" x2="834.7" y2="166"/>
+<text class="s" x="834.7" y="183" text-anchor="middle">2027</text>
+<line class="base" x1="200" y1="166" x2="845" y2="166"/>
+<g class="pt" tabindex="0" role="img" aria-label="MI6, Jun 2017: 0.224 TB/s" data-tip="bw-MI6"><circle class="hit" cx="229.5" cy="157.4" r="12"/><circle class="mk" cx="229.5" cy="157.4" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI25, Jun 2017: 0.484 TB/s" data-tip="bw-MI25"><circle class="hit" cx="229.5" cy="140.8" r="12"/><circle class="mk" cx="229.5" cy="140.8" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI8, Jun 2017: 0.512 TB/s" data-tip="bw-MI8"><circle class="hit" cx="229.5" cy="139.6" r="12"/><circle class="mk" cx="229.5" cy="139.6" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI50 · MI60, Nov 2018: 1.024 TB/s" data-tip="bw-MI50"><circle class="hit" cx="319.2" cy="124.7" r="12"/><circle class="mk" cx="319.2" cy="124.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI100, Nov 2020: 1.2 TB/s" data-tip="bw-MI100"><circle class="hit" cx="445.9" cy="121.3" r="12"/><circle class="mk" cx="445.9" cy="121.3" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI250 · MI250X, Nov 2021: 3.2 TB/s" data-tip="bw-MI250"><circle class="hit" cx="508" cy="100.3" r="12"/><circle class="mk" cx="508" cy="100.3" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI210, Mar 2022: 1.6 TB/s" data-tip="bw-MI210"><circle class="hit" cx="531.3" cy="115.1" r="12"/><circle class="mk" cx="531.3" cy="115.1" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI300A · MI300X, Dec 2023: 5.3 TB/s" data-tip="bw-MI300A"><circle class="hit" cx="639.7" cy="89.4" r="12"/><circle class="mk" cx="639.7" cy="89.4" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI325X, Oct 2024: 6 TB/s" data-tip="bw-MI325X"><circle class="hit" cx="693.4" cy="86.8" r="12"/><circle class="mk" cx="693.4" cy="86.8" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350X · MI355X, Jun 2025: 8 TB/s" data-tip="bw-MI350X"><circle class="hit" cx="736" cy="80.6" r="12"/><circle class="mk" cx="736" cy="80.6" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350P, May 2026: 4 TB/s" data-tip="bw-MI350P"><circle class="hit" cx="793.2" cy="95.5" r="12"/><circle class="mk" cx="793.2" cy="95.5" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI455X, Jul 2026: 23.3 TB/s" data-tip="bw-MI455X"><circle class="hit" cx="806.6" cy="57.6" r="12"/><circle class="mk" cx="806.6" cy="57.6" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI450X, Nov 2026: 23.3 TB/s" data-tip="bw-MI450X"><circle class="hit" cx="826.1" cy="57.6" r="12"/><circle class="mk" cx="826.1" cy="57.6" r="4.5"/></g>
+<text class="pl" x="239.5" y="161.4">MI6 · 0.224 TB/s</text>
+<text class="pl" x="812.6" y="47.6" text-anchor="end">MI455X · 23.3 TB/s</text>
+</svg></div>
+<div class="svgbox"><svg viewBox="0 0 860 192" role="group" aria-label="Peak dense FP16 per GPU over time, log scale">
+<text class="t" x="16" y="18">Peak dense FP16</text>
+<text class="s" x="16" y="34">5.7 TFLOPS (MI6, 2017) to 5 PFLOPS (MI455X, 2026): about 880x</text>
+<line class="grid" x1="200" y1="148.6" x2="845" y2="148.6"/>
+<text class="s" x="192" y="151.6" text-anchor="end">10 TF</text>
+<line class="grid" x1="200" y1="115.3" x2="845" y2="115.3"/>
+<text class="s" x="192" y="118.3" text-anchor="end">100 TF</text>
+<line class="grid" x1="200" y1="82" x2="845" y2="82"/>
+<text class="s" x="192" y="85" text-anchor="end">1 PF</text>
+<line class="grid" x1="200" y1="48.6" x2="845" y2="48.6"/>
+<text class="s" x="192" y="51.6" text-anchor="end">10 PF</text>
+<line class="grid" x1="200" y1="46" x2="200" y2="166"/>
+<text class="s" x="200" y="183" text-anchor="middle">2017</text>
+<line class="grid" x1="263.4" y1="46" x2="263.4" y2="166"/>
+<text class="s" x="263.4" y="183" text-anchor="middle">2018</text>
+<line class="grid" x1="326.9" y1="46" x2="326.9" y2="166"/>
+<text class="s" x="326.9" y="183" text-anchor="middle">2019</text>
+<line class="grid" x1="390.3" y1="46" x2="390.3" y2="166"/>
+<text class="s" x="390.3" y="183" text-anchor="middle">2020</text>
+<line class="grid" x1="453.9" y1="46" x2="453.9" y2="166"/>
+<text class="s" x="453.9" y="183" text-anchor="middle">2021</text>
+<line class="grid" x1="517.4" y1="46" x2="517.4" y2="166"/>
+<text class="s" x="517.4" y="183" text-anchor="middle">2022</text>
+<line class="grid" x1="580.8" y1="46" x2="580.8" y2="166"/>
+<text class="s" x="580.8" y="183" text-anchor="middle">2023</text>
+<line class="grid" x1="644.3" y1="46" x2="644.3" y2="166"/>
+<text class="s" x="644.3" y="183" text-anchor="middle">2024</text>
+<line class="grid" x1="707.9" y1="46" x2="707.9" y2="166"/>
+<text class="s" x="707.9" y="183" text-anchor="middle">2025</text>
+<line class="grid" x1="771.3" y1="46" x2="771.3" y2="166"/>
+<text class="s" x="771.3" y="183" text-anchor="middle">2026</text>
+<line class="grid" x1="834.7" y1="46" x2="834.7" y2="166"/>
+<text class="s" x="834.7" y="183" text-anchor="middle">2027</text>
+<line class="base" x1="200" y1="166" x2="845" y2="166"/>
+<g class="pt" tabindex="0" role="img" aria-label="MI6, Jun 2017: 5.7 TF" data-tip="fp16-MI6"><circle class="hit" cx="229.5" cy="156.7" r="12"/><circle class="mk" cx="229.5" cy="156.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI8, Jun 2017: 8.2 TF" data-tip="fp16-MI8"><circle class="hit" cx="229.5" cy="151.5" r="12"/><circle class="mk" cx="229.5" cy="151.5" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI25, Jun 2017: 24.6 TF" data-tip="fp16-MI25"><circle class="hit" cx="229.5" cy="135.6" r="12"/><circle class="mk" cx="229.5" cy="135.6" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI50, Nov 2018: 26.5 TF" data-tip="fp16-MI50"><circle class="hit" cx="319.2" cy="134.5" r="12"/><circle class="mk" cx="319.2" cy="134.5" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI60, Nov 2018: 29.5 TF" data-tip="fp16-MI60"><circle class="hit" cx="319.2" cy="132.9" r="12"/><circle class="mk" cx="319.2" cy="132.9" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI100, Nov 2020: 184.6 TF" data-tip="fp16-MI100"><circle class="hit" cx="445.9" cy="106.4" r="12"/><circle class="mk" cx="445.9" cy="106.4" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI250, Nov 2021: 362.1 TF" data-tip="fp16-MI250"><circle class="hit" cx="508" cy="96.6" r="12"/><circle class="mk" cx="508" cy="96.6" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI250X, Nov 2021: 383 TF" data-tip="fp16-MI250X"><circle class="hit" cx="508" cy="95.8" r="12"/><circle class="mk" cx="508" cy="95.8" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI210, Mar 2022: 181 TF" data-tip="fp16-MI210"><circle class="hit" cx="531.3" cy="106.7" r="12"/><circle class="mk" cx="531.3" cy="106.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI300A, Dec 2023: 980.6 TF" data-tip="fp16-MI300A"><circle class="hit" cx="639.7" cy="82.2" r="12"/><circle class="mk" cx="639.7" cy="82.2" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI300X, Dec 2023: 1.31 PF" data-tip="fp16-MI300X"><circle class="hit" cx="639.7" cy="78.1" r="12"/><circle class="mk" cx="639.7" cy="78.1" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI325X, Oct 2024: 1.31 PF" data-tip="fp16-MI325X"><circle class="hit" cx="693.4" cy="78.1" r="12"/><circle class="mk" cx="693.4" cy="78.1" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350X, Jun 2025: 2.3 PF" data-tip="fp16-MI350X"><circle class="hit" cx="736" cy="69.9" r="12"/><circle class="mk" cx="736" cy="69.9" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI355X, Jun 2025: 2.5 PF" data-tip="fp16-MI355X"><circle class="hit" cx="736" cy="68.7" r="12"/><circle class="mk" cx="736" cy="68.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI350P, May 2026: 1.15 PF" data-tip="fp16-MI350P"><circle class="hit" cx="793.2" cy="79.9" r="12"/><circle class="mk" cx="793.2" cy="79.9" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI455X, Jul 2026: 5 PF" data-tip="fp16-MI455X"><circle class="hit" cx="806.6" cy="58.7" r="12"/><circle class="mk" cx="806.6" cy="58.7" r="4.5"/></g>
+<g class="pt" tabindex="0" role="img" aria-label="MI450X, Nov 2026: 5 PF" data-tip="fp16-MI450X"><circle class="hit" cx="826.1" cy="58.7" r="12"/><circle class="mk" cx="826.1" cy="58.7" r="4.5"/></g>
+<text class="pl" x="239.5" y="160.7">MI6 · 5.7 TF</text>
+<text class="pl" x="812.6" y="48.7" text-anchor="end">MI455X · 5 PF</text>
+</svg></div>
+<figcaption>Log scales. FP16 is vector throughput on GCN (MI6 and MI8 run FP16 at the FP32 rate; Vega doubles it with packed math) and dense matrix throughput, without sparsity, from CDNA 1 on. MI250 and MI250X count both dies of the package.</figcaption>
+</figure>
+
+<h2 id="gens"><span class="num">03</span>What each generation changed</h2>
+
+<table>
+  <tr><th>Generation</th><th>gfx</th><th>Parts</th><th>What changed</th></tr>
+  <tr><td>GCN 3 / GCN 4</td><td><code>gfx803</code></td><td>MI8, MI6</td><td>First Radeon Instinct cards. MI8 brings HBM (4 GB), MI6 uses GDDR5. FP16 runs at the FP32 rate. 64 KiB LDS and a 256 KiB VGPR file per CU, 2 MiB L2.</td></tr>
+  <tr><td>GCN 5</td><td><code>gfx900</code></td><td>MI25</td><td>HBM2 and packed FP16 at twice the FP32 rate (24.6 TFLOPS). L2 grows to 4 MiB.</td></tr>
+  <tr><td>GCN 5.1</td><td><code>gfx906</code></td><td>MI50, MI60</td><td>7 nm, 1 TB/s of HBM2, FP64 at half rate (7.4 TFLOPS on MI60). The last Radeon-branded Instinct cards, and the last with display output.</td></tr>
+  <tr><td>CDNA 1</td><td><code>gfx908</code></td><td>MI100</td><td>Compute-only, renamed AMD Instinct. Matrix cores lift FP16 from 29.5 to 184.6 TFLOPS. Each CU gets 256 KiB of AccVGPRs beside its 256 KiB VGPR file; L2 8 MiB.</td></tr>
+  <tr><td>CDNA 2</td><td><code>gfx90a</code></td><td>MI250X, MI250, MI210</td><td>Two dies (GCDs) per OAM package on MI250/MI250X. A unified 512 KiB register file per CU. FP64 matrix at twice the vector rate (95.7 vs 47.9 TFLOPS on MI250X). HBM2e, 3.2 TB/s per package.</td></tr>
+  <tr><td>CDNA 3</td><td><code>gfx942</code></td><td>MI300A, MI300X, MI325X</td><td>Chiplets: XCDs of 38 CUs on I/O dies, with a 256 MiB Infinity Cache. FP8 (2.61 PFLOPS dense on MI300X). MI300A adds 24 Zen 4 cores sharing 128 GB of HBM3. 192 GB HBM3, then 256 GB HBM3E on MI325X.</td></tr>
+  <tr><td>CDNA 4</td><td><code>gfx950</code></td><td>MI350X, MI355X, MI350P</td><td>3 nm XCDs of 32 CUs. LDS grows from 64 to 160 KiB per CU. MXFP4 and MXFP6 (10.1 PFLOPS on MI355X). FP64 matrix drops to the vector rate. 288 GB HBM3E at 8 TB/s; MI350P is half of it on a PCIe card.</td></tr>
+  <tr><td>CDNA 5</td><td>not listed yet</td><td>MI455X, MI450X, MI430X, MI440X</td><td>TSMC 2 nm and 3 nm, 320 billion transistors, 256 work-group processors. 432 GB HBM4 at 23.3 TB/s and 40.3 PFLOPS MXFP4 on MI455X, an EAM module for the 72-GPU Helios rack. FP64 is 5 TFLOPS on MI455X and MI450X; MI430X is the FP64 part (288 TFLOPS projected, 2027).</td></tr>
+</table>
+
+<h2 id="specs"><span class="num">04</span>Every part</h2>
+
+<p>Peak figures as AMD lists them. FP16, FP8 and FP4 are dense (no sparsity); FP4 is OCP MXFP4. "PF" is PFLOPS and "TF" TFLOPS.</p>
+
+<table>
+  <tr><th>Product</th><th>Launch</th><th>Generation</th><th>gfx</th><th>Process</th><th>CUs</th><th>Memory</th><th class="num">Bandwidth</th><th class="num">FP16 dense</th><th class="num">FP8 dense</th><th class="num">FP4 dense</th><th class="num">FP64 vector</th><th>Power</th><th>Form factor</th></tr>
+  <tr><td><b>MI25</b></td><td>20 Jun 2017</td><td>GCN 5 · Vega 10</td><td><code>gfx900</code></td><td>GF 14 nm</td><td>64</td><td>16 GB HBM2</td><td class="num">0.484 TB/s</td><td class="num">24.6 TF (vector)</td><td class="num">-</td><td class="num">-</td><td class="num">0.77 TF</td><td>300 W</td><td>PCIe card</td></tr>
+  <tr><td><b>MI6</b></td><td>20 Jun 2017</td><td>GCN 4 · Polaris 10</td><td><code>gfx803</code></td><td>GF 14 nm</td><td>36</td><td>16 GB GDDR5</td><td class="num">0.224 TB/s</td><td class="num">5.7 TF (vector)</td><td class="num">-</td><td class="num">-</td><td class="num">0.36 TF</td><td>150 W</td><td>PCIe card</td></tr>
+  <tr><td><b>MI8</b></td><td>20 Jun 2017</td><td>GCN 3 · Fiji</td><td><code>gfx803</code></td><td>TSMC 28 nm</td><td>64</td><td>4 GB HBM</td><td class="num">0.512 TB/s</td><td class="num">8.2 TF (vector)</td><td class="num">-</td><td class="num">-</td><td class="num">0.51 TF</td><td>175 W</td><td>PCIe card</td></tr>
+  <tr><td><b>MI50</b></td><td>18 Nov 2018</td><td>GCN 5.1 · Vega 20</td><td><code>gfx906</code></td><td>TSMC 7 nm</td><td>60</td><td>16 or 32 GB HBM2</td><td class="num">1.024 TB/s</td><td class="num">26.5 TF (vector)</td><td class="num">-</td><td class="num">-</td><td class="num">6.6 TF</td><td>300 W</td><td>PCIe card</td></tr>
+  <tr><td><b>MI60</b></td><td>18 Nov 2018</td><td>GCN 5.1 · Vega 20</td><td><code>gfx906</code></td><td>TSMC 7 nm</td><td>64</td><td>32 GB HBM2</td><td class="num">1.024 TB/s</td><td class="num">29.5 TF (vector)</td><td class="num">-</td><td class="num">-</td><td class="num">7.4 TF</td><td>300 W</td><td>PCIe card</td></tr>
+  <tr><td><b>MI100</b></td><td>16 Nov 2020</td><td>CDNA 1 · Arcturus</td><td><code>gfx908</code></td><td>TSMC 7 nm</td><td>120</td><td>32 GB HBM2</td><td class="num">1.2 TB/s</td><td class="num">184.6 TF</td><td class="num">-</td><td class="num">-</td><td class="num">11.5 TF</td><td>300 W</td><td>PCIe card</td></tr>
+  <tr><td><b>MI250</b></td><td>8 Nov 2021</td><td>CDNA 2 · Aldebaran</td><td><code>gfx90a</code></td><td>TSMC 6 nm</td><td>208</td><td>128 GB HBM2e</td><td class="num">3.2 TB/s</td><td class="num">362.1 TF</td><td class="num">-</td><td class="num">-</td><td class="num">45.3 TF</td><td>500 W (560 W peak)</td><td>OAM</td></tr>
+  <tr><td><b>MI250X</b></td><td>8 Nov 2021</td><td>CDNA 2 · Aldebaran</td><td><code>gfx90a</code></td><td>TSMC 6 nm</td><td>220</td><td>128 GB HBM2e</td><td class="num">3.2 TB/s</td><td class="num">383 TF</td><td class="num">-</td><td class="num">-</td><td class="num">47.9 TF</td><td>500 W (560 W peak)</td><td>OAM</td></tr>
+  <tr><td><b>MI210</b></td><td>22 Mar 2022</td><td>CDNA 2 · Aldebaran</td><td><code>gfx90a</code></td><td>TSMC 6 nm</td><td>104</td><td>64 GB HBM2e</td><td class="num">1.6 TB/s</td><td class="num">181 TF</td><td class="num">-</td><td class="num">-</td><td class="num">22.6 TF</td><td>300 W</td><td>PCIe card</td></tr>
+  <tr><td><b>MI300A</b></td><td>6 Dec 2023</td><td>CDNA 3</td><td><code>gfx942</code></td><td>TSMC 5 + 6 nm</td><td>228 + 24 Zen 4 cores</td><td>128 GB HBM3</td><td class="num">5.3 TB/s</td><td class="num">980.6 TF</td><td class="num">1.96 PF</td><td class="num">-</td><td class="num">61.3 TF</td><td>550 W (760 W peak)</td><td>APU, SH5 socket</td></tr>
+  <tr><td><b>MI300X</b></td><td>6 Dec 2023</td><td>CDNA 3</td><td><code>gfx942</code></td><td>TSMC 5 + 6 nm</td><td>304</td><td>192 GB HBM3</td><td class="num">5.3 TB/s</td><td class="num">1.31 PF</td><td class="num">2.61 PF</td><td class="num">-</td><td class="num">81.7 TF</td><td>750 W</td><td>OAM</td></tr>
+  <tr><td><b>MI325X</b></td><td>10 Oct 2024</td><td>CDNA 3</td><td><code>gfx942</code></td><td>TSMC 5 + 6 nm</td><td>304</td><td>256 GB HBM3E</td><td class="num">6 TB/s</td><td class="num">1.31 PF</td><td class="num">2.61 PF</td><td class="num">-</td><td class="num">81.7 TF</td><td>1000 W</td><td>OAM</td></tr>
+  <tr><td><b>MI350X</b></td><td>12 Jun 2025</td><td>CDNA 4</td><td><code>gfx950</code></td><td>TSMC 3 + 6 nm</td><td>256</td><td>288 GB HBM3E</td><td class="num">8 TB/s</td><td class="num">2.3 PF</td><td class="num">4.6 PF</td><td class="num">9.2 PF</td><td class="num">72.1 TF</td><td>1000 W</td><td>OAM</td></tr>
+  <tr><td><b>MI355X</b></td><td>12 Jun 2025</td><td>CDNA 4</td><td><code>gfx950</code></td><td>TSMC 3 + 6 nm</td><td>256</td><td>288 GB HBM3E</td><td class="num">8 TB/s</td><td class="num">2.5 PF</td><td class="num">5 PF</td><td class="num">10.1 PF</td><td class="num">78.6 TF</td><td>1400 W</td><td>OAM</td></tr>
+  <tr><td><b>MI430X</b></td><td>19 Nov 2025 (announced)</td><td>CDNA 5</td><td>not listed yet</td><td>TSMC 2 + 3 nm</td><td>-</td><td>432 GB HBM4</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td class="num">9.2 PF</td><td class="num">288 TF</td><td>-</td><td>-</td></tr>
+  <tr><td><b>MI440X</b></td><td>5 Jan 2026 (announced)</td><td>CDNA 5</td><td>not listed yet</td><td>TSMC 2 + 3 nm</td><td>-</td><td>-</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td>-</td><td>8-GPU server</td></tr>
+  <tr><td><b>MI350P</b></td><td>7 May 2026</td><td>CDNA 4</td><td><code>gfx950</code></td><td>TSMC 3 + 6 nm</td><td>128</td><td>144 GB HBM3E</td><td class="num">4 TB/s</td><td class="num">1.15 PF</td><td class="num">2.3 PF</td><td class="num">4.6 PF</td><td class="num">36 TF</td><td>600 W (450 W configurable)</td><td>PCIe card</td></tr>
+  <tr><td><b>MI455X</b></td><td>23 Jul 2026</td><td>CDNA 5</td><td>not listed yet</td><td>TSMC 2 + 3 nm</td><td>256 WGPs</td><td>432 GB HBM4</td><td class="num">23.3 TB/s</td><td class="num">5 PF</td><td class="num">20.1 PF</td><td class="num">40.3 PF</td><td class="num">5 TF</td><td>not published</td><td>EAM, Helios rack</td></tr>
+  <tr><td><b>MI450X</b></td><td>12 Nov 2026</td><td>CDNA 5</td><td>not listed yet</td><td>TSMC 2 + 3 nm</td><td>256 WGPs</td><td>288 GB HBM4</td><td class="num">23.3 TB/s</td><td class="num">5 PF</td><td class="num">20.1 PF</td><td class="num">40.3 PF</td><td class="num">5 TF</td><td>not published</td><td>EAM, Helios rack</td></tr>
+</table>
+
+<ul class="small">
+  <li>MI50 shipped with 16 or 32 GB; the trend chart plots 16 GB. MI250 and MI250X are two GCDs in one package, and their memory and bandwidth are per package. MI300A shares its HBM with its CPU cores.</li>
+  <li>MI430X: announced 19 Nov 2025 and expected in 2027. AMD's November 2026 figures, which it calls projections, are 432 GB of HBM4 at 23.3 TB/s, 288 TFLOPS FP64 and 9.2 PFLOPS FP4. MI440X: announced at CES on 5 Jan 2026 for an eight-GPU server; AMD has published no specs, and its current MI400 pages do not list it.</li>
+  <li>CDNA 5 parts list 256 work-group processors rather than compute units. ROCm's hardware table does not list a gfx target for them yet.</li>
+</ul>
+
+<footer>
+  <p>Sources: AMD product pages, for launch dates and specs: <a href="https://www.amd.com/en/products/accelerators/instinct/mi100.html">MI100</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi200/mi210.html">MI210</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi200/mi250.html">MI250</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html">MI250X</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi300/mi300a.html">MI300A</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html">MI300X</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html">MI325X</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html">MI350X</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html">MI355X</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi350/mi350p.html">MI350P</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi400/mi455x.html">MI455X</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi400/mi450x.html">MI450X</a>, <a href="https://www.amd.com/en/products/accelerators/instinct/mi400/mi430x.html">MI430X</a>. AMD blogs: <a href="https://www.amd.com/en/blogs/2025/amd-instinct-mi430x-powering-the-next-wave-of-ai.html">MI430X announcement</a> (19 Nov 2025) and <a href="https://www.amd.com/en/blogs/2026/amd-instinct-mi350p-pcie-gpus-run-enterprise-ai-on-your.html">MI350P launch</a> (7 May 2026); <a href="https://www.amd.com/en/newsroom/press-releases/2026-1-5-amd-and-its-partners-share-their-vision-for-ai-ev.html">CES 2026 press release</a> (MI440X).</p>
+  <p>gfx targets, CU counts, LDS, cache and register-file sizes: ROCm, <a href="https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html">GPU hardware specifications</a>. MI6, MI8, MI25, MI50 and MI60 dates and specs: <a href="https://en.wikipedia.org/wiki/AMD_Instinct">Wikipedia, AMD Instinct</a>, whose MI6, MI8 and MI25 figures cite AMD's Radeon Instinct product pages.</p>
+  <p>Compiled in November 2026. See also <a href="nps-locality.html">IOD locality on MI355X</a> and the <a href="index.html">notes index</a>.</p>
+</footer>
+
+</div>
+
+<div class="tip" id="tip" role="tooltip"></div>
+<script type="application/json" id="tips">{"mem_gb-MI8": {"title": "4 GB", "sub": "MI8 · Jun 2017", "rows": []}, "mem_gb-MI6": {"title": "16 GB", "sub": "MI6 · MI25 · Jun 2017", "rows": []}, "mem_gb-MI50": {"title": "16 GB", "sub": "MI50 · Nov 2018", "rows": ["Plotted at 16 GB."]}, "mem_gb-MI60": {"title": "32 GB", "sub": "MI60 · Nov 2018", "rows": []}, "mem_gb-MI100": {"title": "32 GB", "sub": "MI100 · Nov 2020", "rows": []}, "mem_gb-MI250": {"title": "128 GB", "sub": "MI250 · MI250X · Nov 2021", "rows": ["Two GCDs; memory and bandwidth per package.", "Two GCDs; memory and bandwidth per package."]}, "mem_gb-MI210": {"title": "64 GB", "sub": "MI210 · Mar 2022", "rows": []}, "mem_gb-MI300A": {"title": "128 GB", "sub": "MI300A · Dec 2023", "rows": ["Memory shared with the CPU cores."]}, "mem_gb-MI300X": {"title": "192 GB", "sub": "MI300X · Dec 2023", "rows": []}, "mem_gb-MI325X": {"title": "256 GB", "sub": "MI325X · Oct 2024", "rows": []}, "mem_gb-MI350X": {"title": "288 GB", "sub": "MI350X · MI355X · Jun 2025", "rows": []}, "mem_gb-MI350P": {"title": "144 GB", "sub": "MI350P · May 2026", "rows": []}, "mem_gb-MI455X": {"title": "432 GB", "sub": "MI455X · Jul 2026", "rows": []}, "mem_gb-MI450X": {"title": "288 GB", "sub": "MI450X · Nov 2026", "rows": []}, "bw-MI6": {"title": "0.224 TB/s", "sub": "MI6 · Jun 2017", "rows": []}, "bw-MI25": {"title": "0.484 TB/s", "sub": "MI25 · Jun 2017", "rows": []}, "bw-MI8": {"title": "0.512 TB/s", "sub": "MI8 · Jun 2017", "rows": []}, "bw-MI50": {"title": "1.024 TB/s", "sub": "MI50 · MI60 · Nov 2018", "rows": []}, "bw-MI100": {"title": "1.2 TB/s", "sub": "MI100 · Nov 2020", "rows": []}, "bw-MI250": {"title": "3.2 TB/s", "sub": "MI250 · MI250X · Nov 2021", "rows": []}, "bw-MI210": {"title": "1.6 TB/s", "sub": "MI210 · Mar 2022", "rows": []}, "bw-MI300A": {"title": "5.3 TB/s", "sub": "MI300A · MI300X · Dec 2023", "rows": []}, "bw-MI325X": {"title": "6 TB/s", "sub": "MI325X · Oct 2024", "rows": []}, "bw-MI350X": {"title": "8 TB/s", "sub": "MI350X · MI355X · Jun 2025", "rows": []}, "bw-MI350P": {"title": "4 TB/s", "sub": "MI350P · May 2026", "rows": []}, "bw-MI455X": {"title": "23.3 TB/s", "sub": "MI455X · Jul 2026", "rows": []}, "bw-MI450X": {"title": "23.3 TB/s", "sub": "MI450X · Nov 2026", "rows": []}, "fp16-MI6": {"title": "5.7 TF", "sub": "MI6 · Jun 2017", "rows": []}, "fp16-MI8": {"title": "8.2 TF", "sub": "MI8 · Jun 2017", "rows": []}, "fp16-MI25": {"title": "24.6 TF", "sub": "MI25 · Jun 2017", "rows": []}, "fp16-MI50": {"title": "26.5 TF", "sub": "MI50 · Nov 2018", "rows": []}, "fp16-MI60": {"title": "29.5 TF", "sub": "MI60 · Nov 2018", "rows": []}, "fp16-MI100": {"title": "184.6 TF", "sub": "MI100 · Nov 2020", "rows": []}, "fp16-MI250": {"title": "362.1 TF", "sub": "MI250 · Nov 2021", "rows": []}, "fp16-MI250X": {"title": "383 TF", "sub": "MI250X · Nov 2021", "rows": []}, "fp16-MI210": {"title": "181 TF", "sub": "MI210 · Mar 2022", "rows": []}, "fp16-MI300A": {"title": "980.6 TF", "sub": "MI300A · Dec 2023", "rows": []}, "fp16-MI300X": {"title": "1.31 PF", "sub": "MI300X · Dec 2023", "rows": []}, "fp16-MI325X": {"title": "1.31 PF", "sub": "MI325X · Oct 2024", "rows": []}, "fp16-MI350X": {"title": "2.3 PF", "sub": "MI350X · Jun 2025", "rows": []}, "fp16-MI355X": {"title": "2.5 PF", "sub": "MI355X · Jun 2025", "rows": []}, "fp16-MI350P": {"title": "1.15 PF", "sub": "MI350P · May 2026", "rows": []}, "fp16-MI455X": {"title": "5 PF", "sub": "MI455X · Jul 2026", "rows": []}, "fp16-MI450X": {"title": "5 PF", "sub": "MI450X · Nov 2026", "rows": []}, "t-MI8": {"title": "MI8", "sub": "Launched 20 Jun 2017 · GCN 3 · Fiji · gfx803", "rows": ["MI8: 4 GB HBM · 0.512 TB/s · FP16 8.2 TF · 175 W"]}, "t-MI6": {"title": "MI6", "sub": "Launched 20 Jun 2017 · GCN 4 · Polaris 10 · gfx803", "rows": ["MI6: 16 GB GDDR5 · 0.224 TB/s · FP16 5.7 TF · 150 W"]}, "t-MI25": {"title": "MI25", "sub": "Launched 20 Jun 2017 · GCN 5 · Vega 10 · gfx900", "rows": ["MI25: 16 GB HBM2 · 0.484 TB/s · FP16 24.6 TF · 300 W"]}, "t-MI50": {"title": "MI50 · MI60", "sub": "Launched 18 Nov 2018 · GCN 5.1 · Vega 20 · gfx906", "rows": ["MI50: 16 or 32 GB HBM2 · 1.024 TB/s · FP16 26.5 TF · 300 W", "MI60: 32 GB HBM2 · 1.024 TB/s · FP16 29.5 TF · 300 W"]}, "t-MI100": {"title": "MI100", "sub": "Launched 16 Nov 2020 · CDNA 1 · Arcturus · gfx908", "rows": ["MI100: 32 GB HBM2 · 1.2 TB/s · FP16 184.6 TF · 300 W"]}, "t-MI250": {"title": "MI250 · MI250X", "sub": "Launched 8 Nov 2021 · CDNA 2 · Aldebaran · gfx90a", "rows": ["MI250: 128 GB HBM2e · 3.2 TB/s · FP16 362.1 TF · 500 W (560 W peak)", "MI250X: 128 GB HBM2e · 3.2 TB/s · FP16 383 TF · 500 W (560 W peak)"]}, "t-MI210": {"title": "MI210", "sub": "Launched 22 Mar 2022 · CDNA 2 · Aldebaran · gfx90a", "rows": ["MI210: 64 GB HBM2e · 1.6 TB/s · FP16 181 TF · 300 W"]}, "t-MI300A": {"title": "MI300A · MI300X", "sub": "Launched 6 Dec 2023 · CDNA 3 · gfx942", "rows": ["MI300A: 128 GB HBM3 · 5.3 TB/s · FP16 980.6 TF · 550 W (760 W peak)", "MI300X: 192 GB HBM3 · 5.3 TB/s · FP16 1.31 PF · 750 W"]}, "t-MI325X": {"title": "MI325X", "sub": "Launched 10 Oct 2024 · CDNA 3 · gfx942", "rows": ["MI325X: 256 GB HBM3E · 6 TB/s · FP16 1.31 PF · 1000 W"]}, "t-MI350X": {"title": "MI350X · MI355X", "sub": "Launched 12 Jun 2025 · CDNA 4 · gfx950", "rows": ["MI350X: 288 GB HBM3E · 8 TB/s · FP16 2.3 PF · FP4 9.2 PF · 1000 W", "MI355X: 288 GB HBM3E · 8 TB/s · FP16 2.5 PF · FP4 10.1 PF · 1400 W"]}, "t-MI430X": {"title": "MI430X", "sub": "Announced 19 Nov 2025 · CDNA 5 · not listed yet", "rows": ["MI430X: 432 GB HBM4 · FP4 9.2 PF", "Announced 19 Nov 2025; available 2027. Figures are AMD projections (Nov 2026): 432 GB, 23.3 TB/s."]}, "t-MI440X": {"title": "MI440X", "sub": "Announced 5 Jan 2026 · CDNA 5 · not listed yet", "rows": ["MI440X: no published specs", "Announced at CES, 5 Jan 2026. No published specs; not on AMD's current MI400 pages."]}, "t-MI350P": {"title": "MI350P", "sub": "Launched 7 May 2026 · CDNA 4 · gfx950", "rows": ["MI350P: 144 GB HBM3E · 4 TB/s · FP16 1.15 PF · FP4 4.6 PF · 600 W (450 W configurable)"]}, "t-MI455X": {"title": "MI455X", "sub": "Launched 23 Jul 2026 · CDNA 5 · not listed yet", "rows": ["MI455X: 432 GB HBM4 · 23.3 TB/s · FP16 5 PF · FP4 40.3 PF"]}, "t-MI450X": {"title": "MI450X", "sub": "Launched 12 Nov 2026 · CDNA 5 · not listed yet", "rows": ["MI450X: 288 GB HBM4 · 23.3 TB/s · FP16 5 PF · FP4 40.3 PF"]}}</script>
+<script>
+(function () {
+  const TIPS = JSON.parse(document.getElementById("tips").textContent);
+  const tipEl = document.getElementById("tip");
+  function line(cls, text) { const d = document.createElement("div"); d.className = cls; d.textContent = text; return d; }
+  function show(g) {
+    const t = TIPS[g.dataset.tip]; if (!t) return;
+    const box = g.closest(".svgbox"); if (tipEl.parentNode !== box) box.appendChild(tipEl);
+    tipEl.replaceChildren(line("tt", t.title), line("ts", t.sub), ...t.rows.map(r => line(r.length > 60 ? "tr wrap" : "tr", r)));
+    tipEl.style.display = "block";
+    const m = g.querySelector("circle.mk").getBoundingClientRect(), b = box.getBoundingClientRect();
+    let left = m.left - b.left + m.width / 2 + 14, top = m.top - b.top - 6;
+    if (left + tipEl.offsetWidth > b.width - 4) left = m.left - b.left + m.width / 2 - 14 - tipEl.offsetWidth;
+    if (top + tipEl.offsetHeight > b.height - 4) top = Math.max(4, b.height - 4 - tipEl.offsetHeight);
+    tipEl.style.left = Math.max(4, left) + "px"; tipEl.style.top = top + "px";
+  }
+  function hide() { tipEl.style.display = "none"; }
+  document.querySelectorAll("g.pt").forEach(g => {
+    g.addEventListener("pointerenter", () => show(g));
+    g.addEventListener("pointerleave", hide);
+    g.addEventListener("focus", () => show(g));
+    g.addEventListener("blur", hide);
+  });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") hide(); });
+})();
+</script>
+</body>
+</html>
