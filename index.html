@@ -117,6 +117,10 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
     <p>How a kernel finds its IOD and where an address lives in SPX + NPS1, what IOD-local placement buys, why a fused MoE barely gains, and how DeepGEMM does the same on B200. Code and data: <a href="https://github.com/carlushuang/gcnasm/pull/55">#55</a>.</p>
   </div>
   <div class="card">
+    <h4><a href="dspark-deepspec.html">DSpark: from paper to Python</a></h4>
+    <p>A flow through DeepSeek's actual DeepSpec implementation: target-conditioned parallel drafting, Markov correction, confidence pruning and exact AR verification. Also: why the open evaluator's static threshold is not the paper's production hardware-aware scheduler. Sources: <a href="https://github.com/deepseek-ai/DeepSpec">DeepSpec</a>, <a href="https://arxiv.org/abs/2607.05147">DSpark</a>.</p>
+  </div>
+  <div class="card">
     <h4><a href="rubin-locality-moe.html">Die-local MoE weights on Vera Rubin</a></h4>
     <p>How vLLM puts each die's share of the MoE weights in that die's HBM: PyTorch's <code>LocalizedAllocator</code> over CUDA 13.4 virtual memory, a <code>MemPool</code> and green-context stream per die, and a fork/join per GEMM. Also: how DeepGEMM gets one pointer over both dies, and how to combine the two with one stream and no green context. Sources: <a href="https://github.com/vllm-project/vllm/pull/61685">vllm#61685</a>, <a href="https://github.com/pytorch/pytorch/pull/199127">pytorch#199127</a>.</p>
   <div class="card">
